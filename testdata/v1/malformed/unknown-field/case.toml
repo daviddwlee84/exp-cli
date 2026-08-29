@@ -1,0 +1,6 @@
+schema = "exp.fixture-case/v1"
+base = "../../valid-project"
+mode = "overlay"
+validation_scope = "canonical_records"
+description = "A known Plan schema rejects an unknown top-level field."
+expected_codes = ["record.unknown_field"]

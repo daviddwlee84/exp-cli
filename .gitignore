@@ -1,0 +1,9 @@
+# Build and test output
+/exp
+/dist/
+*.test
+*.out
+/coverage.*
+
+# Local machine state
+.DS_Store

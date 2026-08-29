@@ -1,0 +1,6 @@
+schema = "exp.fixture-case/v1"
+base = "../../valid-project"
+mode = "overlay"
+validation_scope = "canonical_records"
+description = "A committed Attempt contains an absolute cwd and credential-bearing provider URI."
+expected_codes = ["path.not_relative", "uri.credentials"]

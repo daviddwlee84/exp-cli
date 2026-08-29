@@ -1,0 +1,6 @@
+schema = "exp.fixture-case/v1"
+base = "../../valid-project"
+mode = "overlay"
+validation_scope = "canonical_records"
+description = "Experiment evidence must cite a Run, not the Run's successful Attempt."
+expected_codes = ["reference.wrong_kind"]

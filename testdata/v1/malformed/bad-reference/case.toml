@@ -1,0 +1,6 @@
+schema = "exp.fixture-case/v1"
+base = "../../valid-project"
+mode = "overlay"
+validation_scope = "canonical_records"
+description = "A Finding evidence edge points to a well-formed but absent Run ID."
+expected_codes = ["reference.not_found"]
