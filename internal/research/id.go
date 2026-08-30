@@ -50,7 +50,7 @@ func NewImportedID(kind Kind, value uuid.UUID) (ID, error) {
 }
 
 func validateIDKind(kind Kind) error {
-	if kind == KindProject || kind == KindUnknown || !kind.Valid() {
+	if kind == KindProject || kind == KindPolicy || kind == KindUnknown || !kind.Valid() {
 		return fmt.Errorf("kind %q cannot have a typed ID: %w", kind, ErrInvalidID)
 	}
 	return nil
@@ -75,10 +75,10 @@ func validateUUID(value uuid.UUID, versions ...uuid.Version) error {
 // UUIDv5 form are recognized; record validation decides whether v5 is authorized.
 func ParseID(value string) (ID, error) {
 	for _, kind := range RecordKinds {
-		if kind == KindProject {
+		prefix, prefixErr := kind.IDPrefix()
+		if prefixErr != nil {
 			continue
 		}
-		prefix, _ := kind.IDPrefix()
 		if !strings.HasPrefix(value, prefix) {
 			continue
 		}

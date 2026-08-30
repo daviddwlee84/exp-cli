@@ -16,7 +16,7 @@ func TestEmbeddedCommandReferenceMatchesActualCobraTree(t *testing.T) {
 	}
 }
 
-func TestCommandReferenceContainsOnlyFunctionalWalkingPath(t *testing.T) {
+func TestCommandReferenceContainsAutonomousResearchWorkflow(t *testing.T) {
 	reference, err := GenerateCommandReference(NewRootCommand(NewApp(t.Context(), nil, nil, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -24,13 +24,17 @@ func TestCommandReferenceContainsOnlyFunctionalWalkingPath(t *testing.T) {
 	for _, path := range []string{
 		"## `exp init`", "## `exp doctor`", "## `exp plan add`", "## `exp plan list`",
 		"## `exp validate`", "## `exp render`", "## `exp context`", "## `exp skill print`",
-		"## `exp skill install`", "## `exp skill check`",
+		"## `exp skill install`", "## `exp skill check`", "## `exp skill sync`",
+		"## `exp migrate plan`", "## `exp migrate apply`",
+		"## `exp idea develop`", "## `exp queue insert`", "## `exp daemon tick`",
+		"## `exp experiment close`", "## `exp candidate create`", "## `exp release create`",
+		"## `exp promotion append`", "## `exp champion manifest`",
 	} {
 		if !strings.Contains(reference, path) {
 			t.Errorf("generated reference is missing %s", path)
 		}
 	}
-	for _, deferred := range []string{"## `exp experiment", "## `exp run", "## `exp migrate", "## `exp provider"} {
+	for _, deferred := range []string{"## `exp run"} {
 		if strings.Contains(reference, deferred) {
 			t.Errorf("generated reference advertises deferred command %s", deferred)
 		}

@@ -12,9 +12,9 @@ export BINARY
 export PREFIX
 export VERSION
 
-.PHONY: all build install fmt fmt-check vet test test-race test-build-portability clean
+.PHONY: all build install skill-sync skill-check fmt fmt-check vet test test-race test-build-portability clean
 
-all: fmt-check vet test-race build
+all: skill-check fmt-check vet test-race build
 
 # cmd/go parses -ldflags itself. Quote the complete -X field only when VERSION
 # contains whitespace; an unquoted field safely carries quote characters as data.
@@ -36,6 +36,13 @@ build:
 install: build
 	install -d "$${PREFIX}/bin"
 	install -m 0755 "$${BINARY}" "$${PREFIX}/bin/$${BINARY}"
+	"$${PREFIX}/bin/$${BINARY}" skill install --link
+
+skill-sync:
+	go run ./cmd/exp skill sync
+
+skill-check:
+	go run ./cmd/exp skill sync --check
 
 fmt:
 	gofmt -w cmd internal

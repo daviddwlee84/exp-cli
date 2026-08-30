@@ -24,6 +24,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check generated skill command reference
+        run: make skill-check
       - name: Check formatting
         run: make fmt-check
       - name: Vet

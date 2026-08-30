@@ -1,57 +1,121 @@
 ---
 name: exp-cli
 description: >-
-  Plan and inspect Git-native ML, DL, NLP, and quantitative research with exp;
-  use when pricing an experiment idea, pre-registering comparable evidence,
-  validating research records, interpreting negative results, or resuming work.
+  Operate exp's Git-native research queue and evidence lifecycle; use when
+  developing human or agent Ideas, prioritizing scarce compute, dispatching
+  experiments, recording Findings, composing Releases, or reviewing Promotion.
 metadata:
   schema-version: "exp.skill/v1"
   skill-version: "1"
 ---
 
-# exp-cli research guidance
+# exp-cli research control plane
 
-Use `exp` as a Git-native research control plane: it keeps the reasoning from a priced idea to evidence and a decision reviewable, while upstream systems remain authoritative for execution, queues, telemetry, artifacts, registries, credentials, and notebook runtimes.
+Use `exp` to preserve the path from an Idea to evidence and a production
+decision. Canonical research meaning belongs to Git-backed records under
+`experiments/`; Pueue, MLflow, Git, and Plan-scoped search systems retain their
+own operational authority.
 
-## Current command boundary
+Read [the generated command reference](references/commands.md) before invoking
+an unfamiliar command. Full flags in `exp <command> --help` are authoritative.
 
-This skill documents only the current walking-skeleton surface:
+## Preserve the safety gates
 
-```text
-exp init
-exp doctor [--json] [--live]
-exp plan add [flags | --input -] [--json]
-exp plan list [--json]
-exp validate [--json]
-exp render [--check]
-exp context [--json]
-exp skill print|install|check
-```
+- Initialize Policy explicitly. It defaults to `manual` with 80/20
+  exploit/explore allocation. `manual` and `shadow` never dispatch.
+- Do not change to `assisted` or `limited` without the user's authorization and
+  the command's `--confirm-auto-experiment` acknowledgement.
+- No autonomy mode authorizes production Promotion. Promotion requires a sealed
+  holdout Evaluation, a named human approver, and explicit confirmation.
+- Treat agent output as advisory. It must pass the command's strict JSON schema
+  and normal canonical validation before it can affect records.
+- Keep operational success separate from scientific judgment. A succeeded task
+  is not a supported hypothesis; a failed task is not a refuted hypothesis.
 
-Do not claim that this build implements experiment lifecycle transitions, Runs, Attempts, conclusions, Findings, Decisions, provider reads or submissions, legacy migration, sweep orchestration, or artifact transfer. Those concepts define the research model and later direction; they are not hidden commands. Consult [the generated command reference](references/commands.md) rather than inventing syntax.
+## Build queue-ready work
 
-## Research judgment before mechanics
+1. Capture a human or agent Idea with origin, cluster, controlled
+   classification, and parent Ideas when it follows an existing branch.
+2. Qualify it only after the question is falsifiable and the Plan has measurable
+   payoff, probability/impact, information and unblock value, risk, constrained
+   ResourcePool-hours, and revision-pinned Finding dependencies.
+3. A human may qualify directly. `idea develop` may ask one fresh CLI agent for
+   the missing Plan and `--apply` only after the proposal validates.
+4. Insert the Plan into one ResourcePool/lane partition. Prefer the transparent
+   score as the baseline; use `queue insert --agent` when listwise advice and
+   adjacent battles add useful judgment.
+5. If order-swapped battles disagree, abstain, lack confidence, or require tie
+   review, leave the incumbent Queue unchanged and surface human review. Do not
+   manually infer the intended order from one of the two answers.
+6. When new belief-changing evidence stales a queued Plan, review it and use
+   `plan refresh` with a complete new utility estimate. The transaction repins
+   dependencies, removes the Plan from the Queue, and returns its Idea to
+   `qualified`; run `queue insert` again so the revised Plan competes afresh.
 
-1. Ask what decision the experiment could change. Price the expected payoff with a named metric and unit, an estimate when defensible, effort, and assumptions. If no plausible decision has enough value to repay the work, recommend not running it.
-2. State the question, hypothesis, primary factor, baseline, comparability requirements, success criteria, and decision rule before looking at outcome evidence. Once evidence collection begins, preserve that design; a later change is an explicit amendment, not a rewritten prediction.
-3. Demand comparable evidence. Differences in data, split, preprocessing, metric definition, seed policy, compute regime, stopping rule, or evaluation timing can make a numerical comparison invalid.
-4. Preserve negative information. Record a supported negative finding only when comparable included evidence answers the registered question. Record dead-end conditions and excluded evidence without turning an execution failure into a refuted hypothesis.
-5. Keep the axes separate: an Attempt can succeed operationally while the hypothesis is refuted, or fail operationally while the scientific result remains unknown. `invalid` means the evidence cannot answer the question; it does not mean `refuted`.
+Read [methodology.md](references/methodology.md) before designing, closing, or
+combining experiments.
 
-Read [methodology.md](references/methodology.md) before designing or interpreting an experiment.
+## Dispatch without moving authority
 
-## Put information under the right authority
+`.exp/runtime.json` binds canonical Pool and Plan IDs to a Pueue group and an
+exact workload/Git contract. It may select the main checkout or the unique
+registered worktree at `head_commit`. Pueue persists task environments, so the
+runtime accepts only allowed non-secret names and requires empty `secret_env`;
+use a workload-side credential broker. `daemon frontier` is local-only; `daemon tick` and `daemon run`
+contact Pueue and dispatch only in explicitly enabled policy modes.
 
-Use exp records for research meaning: priced Plans, registered designs, intended evidence units, operational Attempts, evidence-backed Findings, and action-bearing Decisions. Keep ordinary work actions in the project TODO, exploratory notes in its backlog, recurring troubleshooting knowledge in pitfalls, and durable non-negotiable constraints in invariants. Those stores are independently managed; exp may link to them but does not silently duplicate or mutate them.
+The daemon's SQLite state is private coordination, not research truth. Pueue
+owns live tasks. The workload owns MLflow run creation and logging;
+`provider mlflow verify` reads selected fields only. Never create a Finding,
+Evaluation, verdict, Candidate, Release, or Promotion merely from scheduler,
+worker, or tracker status.
 
-See [records-and-project-knowledge.md](references/records-and-project-knowledge.md) for routing rules.
+For code-changing experiments, use the experiment workspace commands with a
+full base commit and narrow allowlist. The agent may create the exact experiment
+commit. It may not merge it, remove the worktree, or edit `experiments/` as part
+of the code ChangeSet; the human owns integration.
 
-## Human, agent, and fallback use
+## Close, combine, and promote
 
-Humans may use explicit flags and review ordinary Markdown. Agents should prefer each command's `--json` form and the versioned stdin request accepted by `exp plan add --input - --json`; never scrape human tables or mix warnings from stderr into JSON stdout. Validate before relying on a derived projection.
+- Close an Experiment with explicit included/excluded Run dispositions. Record
+  `invalid` when evidence cannot answer the registered question; use
+  `inconclusive` when valid evidence remains insufficient.
+- Publish Findings with scoped evidence and explicit `weakens`/`overturns`
+  edges. New belief-changing evidence can stale dependent Plans and Queues.
+- Create a Candidate only from a supported Experiment plus a passing scientific
+  Evaluation and a successful direct Attempt for an included Run whose pinned
+  full Git commit and exact ChangeSet match the Candidate.
+- Compose a Release with typed project-specific slots. More than one Candidate
+  requires a separately evaluated combination Experiment; never add independent
+  improvements arithmetically.
+- Treat the append-only Promotion chain as authority. Champion manifests are
+  derived downstream views and are never edited or read back as canonical.
+- Create the PromotionSpec before its fresh holdout Evaluation. A holdout that
+  predates the seal or was consumed by another Promotion is not eligible.
 
-If the binary is unavailable, use the [manual read-only fallback](references/usage-and-fallback.md). Never approximate a mutation by hand, infer live provider state from a stale record, or run a legacy/helper script as a substitute for exp.
+See [records-and-project-knowledge.md](references/records-and-project-knowledge.md)
+for record ownership and routing to TODO/backlog/pitfalls/invariants.
 
-## External tools and skills
+## Transactions, migration, and search
 
-DVC, MLflow, Pueue, Slurm, and Marimo each retain their own authority and may have independently installed skills. This skill can tell an agent when that guidance is relevant, but it never invokes another skill's scripts or templates. Current exp commands do not perform provider operations. See [external-tools.md](references/external-tools.md).
+Use domain commands for scientific mutations. The public `record transaction`
+surface accepts only low-risk Idea and ResourcePool edits; it requires exact
+revisions and recovers through prepared hash-checked journals. On interruption or a recovery diagnostic, use
+`record recover` and do not hand-edit a split canonical state.
+
+Harness-v0 migration is opt-in: create and review a fingerprinted plan, resolve
+every `needs_review` item, then apply that exact plan. Never execute legacy
+scripts or silently convert ambiguous inbox prose.
+
+Optuna-like search is scoped inside one Plan revision. It may suggest parameters
+or prune trials through the Study adapter contract, but it never owns global
+Queue order, ResourcePools, Findings, Releases, or Promotions. A concrete
+Optuna adapter is not included in this build.
+
+## Machine use and fallback
+
+Agents should prefer `--json`, parse the entire `exp.cli/v1` envelope, and carry
+complete typed IDs plus revisions. Never scrape human tables or reconstruct
+facts from generated projections. See [usage-and-fallback.md](references/usage-and-fallback.md)
+when the binary is unavailable, and [external-tools.md](references/external-tools.md)
+before crossing into Pueue, MLflow, Git, or another provider.

@@ -34,3 +34,16 @@ func configureProcessCancellation(command *exec.Cmd) {
 		return errors.Join(err, directErr)
 	}
 }
+
+// cleanupProcessGroup prevents a successfully exiting command from leaving
+// detached descendants that continue consuming compute or mutating outputs.
+func cleanupProcessGroup(command *exec.Cmd) error {
+	if command == nil || command.Process == nil {
+		return nil
+	}
+	err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}

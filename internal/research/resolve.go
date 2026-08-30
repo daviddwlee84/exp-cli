@@ -13,16 +13,17 @@ var (
 	ErrAmbiguousReference = errors.New("ambiguous reference")
 )
 
-// Candidate is the identity data needed for display and user-input resolution.
-type Candidate struct {
+// ReferenceCandidate is the identity data needed for display and user-input
+// resolution. It is deliberately distinct from the canonical Candidate record.
+type ReferenceCandidate struct {
 	ID      ID
 	Aliases []string
 }
 
-var displayPattern = regexp.MustCompile(`(?i)^([PERAFD])-([0-9a-f]{8,32})$`)
+var displayPattern = regexp.MustCompile(`(?i)^([IOQVBPERASNFCLTMD])-([0-9a-f]{8,32})$`)
 
 // DisplayCode allocates the shortest same-kind code with at least eight UUID hex digits.
-func DisplayCode(target ID, candidates []Candidate) (string, error) {
+func DisplayCode(target ID, candidates []ReferenceCandidate) (string, error) {
 	if target.IsZero() {
 		return "", fmt.Errorf("display zero ID: %w", ErrInvalidID)
 	}
@@ -53,7 +54,7 @@ func DisplayCode(target ID, candidates []Candidate) (string, error) {
 // Resolve accepts a full typed ID, an unambiguous typed prefix, a display code,
 // or the exact type-aware legacy alias. expected may be KindUnknown when the
 // reference syntax itself supplies the kind.
-func Resolve(query string, expected Kind, candidates []Candidate) (ID, error) {
+func Resolve(query string, expected Kind, candidates []ReferenceCandidate) (ID, error) {
 	if query == "" {
 		return ID{}, fmt.Errorf("empty reference: %w", ErrReferenceNotFound)
 	}
@@ -73,7 +74,7 @@ func Resolve(query string, expected Kind, candidates []Candidate) (ID, error) {
 		if expected != KindUnknown && alias.Kind != expected {
 			return ID{}, fmt.Errorf("%s is a %s alias, expected %s: %w", query, alias.Kind, expected, ErrWrongIDKind)
 		}
-		return uniqueMatch(query, alias.Kind, candidates, func(candidate Candidate) bool {
+		return uniqueMatch(query, alias.Kind, candidates, func(candidate ReferenceCandidate) bool {
 			for _, value := range candidate.Aliases {
 				if value == query {
 					return true
@@ -89,7 +90,7 @@ func Resolve(query string, expected Kind, candidates []Candidate) (ID, error) {
 			return ID{}, fmt.Errorf("%s is a %s display code, expected %s: %w", query, kind, expected, ErrWrongIDKind)
 		}
 		prefix := strings.ToUpper(match[2])
-		return uniqueMatch(query, kind, candidates, func(candidate Candidate) bool {
+		return uniqueMatch(query, kind, candidates, func(candidate ReferenceCandidate) bool {
 			return strings.HasPrefix(strings.ToUpper(candidate.ID.UUIDHex()), prefix)
 		})
 	}
@@ -98,7 +99,7 @@ func Resolve(query string, expected Kind, candidates []Candidate) (ID, error) {
 		if expected != KindUnknown && kind != expected {
 			return ID{}, fmt.Errorf("%s is a %s prefix, expected %s: %w", query, kind, expected, ErrWrongIDKind)
 		}
-		return uniqueMatch(query, kind, candidates, func(candidate Candidate) bool {
+		return uniqueMatch(query, kind, candidates, func(candidate ReferenceCandidate) bool {
 			return strings.HasPrefix(candidate.ID.String(), uuidPrefix)
 		})
 	}
@@ -108,10 +109,10 @@ func Resolve(query string, expected Kind, candidates []Candidate) (ID, error) {
 
 func parseTypedPrefix(query string) (Kind, string, bool) {
 	for _, kind := range RecordKinds {
-		if kind == KindProject {
+		prefix, prefixErr := kind.IDPrefix()
+		if prefixErr != nil {
 			continue
 		}
-		prefix, _ := kind.IDPrefix()
 		if !strings.HasPrefix(query, prefix) {
 			continue
 		}
@@ -134,7 +135,7 @@ func parseTypedPrefix(query string) (Kind, string, bool) {
 	return KindUnknown, "", false
 }
 
-func uniqueMatch(query string, kind Kind, candidates []Candidate, matches func(Candidate) bool) (ID, error) {
+func uniqueMatch(query string, kind Kind, candidates []ReferenceCandidate, matches func(ReferenceCandidate) bool) (ID, error) {
 	found := make([]ID, 0, 1)
 	for _, candidate := range candidates {
 		if candidate.ID.Kind() == kind && matches(candidate) {

@@ -104,6 +104,9 @@ func (i OSInvoker) Invoke(ctx context.Context, spec CommandSpec) (Result, error)
 	}
 
 	waitErr := command.Wait()
+	if cleanupErr := cleanupProcessGroup(command); cleanupErr != nil {
+		waitErr = errors.Join(waitErr, cleanupErr)
+	}
 	result.FinishedAt = now().UTC()
 	result.Duration = nonNegativeDuration(result.StartedAt, result.FinishedAt)
 	if command.ProcessState != nil {

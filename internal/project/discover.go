@@ -157,10 +157,25 @@ func readDefaultMarkerWithHook(ctx context.Context, repositoryRoot string, befor
 		return marker{}, false, fmt.Errorf("experiments root changed while reading Project marker: %w", err)
 	}
 	document, err := record.Decode(data)
+	imported := false
+	if err != nil {
+		document, err = record.DecodeImported(data)
+		imported = err == nil
+	}
 	if err != nil {
 		return marker{}, false, fmt.Errorf("invalid Project marker experiments/%s: %w", record.ProjectFile, err)
 	}
 	document.Path = record.ProjectFile
+	if imported {
+		inventory, inventoryErr := record.LoadInventoryRoot(ctx, experiments, filepath.Join(repositoryRoot, "experiments"))
+		if inventoryErr != nil {
+			return marker{}, false, fmt.Errorf("authenticate imported Project inventory: %w", inventoryErr)
+		}
+		if !inventory.Valid() || inventory.Project == nil {
+			return marker{}, false, fmt.Errorf("authenticate imported Project inventory: %w", inventory.Error())
+		}
+		document = inventory.Project.Clone()
+	}
 	return marker{Root: filepath.Join(repositoryRoot, "experiments"), Document: document, Content: append([]byte(nil), data...), Identity: experimentsInfo}, true, nil
 }
 
@@ -200,7 +215,10 @@ func classifyUnmarkedRoot(rootPath string) (rootClassification, error) {
 	if len(entries) == 0 {
 		return rootAbsentOrEmpty, nil
 	}
-	allowedEmptyDirectories := map[string]struct{}{record.PlansDir: {}, record.FindingsDir: {}, record.DecisionsDir: {}}
+	allowedEmptyDirectories := make(map[string]struct{})
+	for _, directory := range record.CanonicalFlatDirs() {
+		allowedEmptyDirectories[directory] = struct{}{}
+	}
 	legacyNames := map[string]struct{}{"REPORT.md": {}, "ROADMAP.md": {}, "LEDGER.md": {}, "INBOX.md": {}}
 	allAllowedEmpty := true
 	for _, entry := range entries {

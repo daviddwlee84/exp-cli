@@ -85,6 +85,9 @@ func readProjectReceipt(root *os.Root) (*receiptState, error) {
 	}
 	document, err := record.Decode(receipt.Content)
 	if err != nil {
+		document, err = record.DecodeImported(receipt.Content)
+	}
+	if err != nil {
 		return state, fmt.Errorf("decode Project from initialization receipt: %w", err)
 	}
 	if document.Kind() != research.KindProject {

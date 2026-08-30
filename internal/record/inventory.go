@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -32,16 +33,18 @@ var ErrInventoryChanged = errors.New("canonical inventory changed during operati
 type Inventory struct {
 	Root        string
 	Project     *Document
+	Policy      *Document
 	Documents   []*Document
 	Diagnostics []Diagnostic
 
-	byID        map[research.ID][]*Document
-	locations   map[string]Location
-	boundRoot   *os.Root
-	boundVerify func() error
-	identities  map[string]fs.FileInfo
-	snapshot    [sha256.Size]byte
-	hasSnapshot bool
+	byID                   map[research.ID][]*Document
+	locations              map[string]Location
+	boundRoot              *os.Root
+	boundVerify            func() error
+	identities             map[string]fs.FileInfo
+	snapshot               [sha256.Size]byte
+	hasSnapshot            bool
+	skipImportedProvenance bool
 }
 
 // LoadInventory parses canonical paths below root with a background context.
@@ -208,14 +211,15 @@ func (scanner *inventoryScanner) scanRoot(root *os.Root) error {
 		if _, generated := generatedProjectionNames[name]; generated {
 			continue
 		}
-		switch name {
-		case PlansDir, FindingsDir, DecisionsDir:
+		if _, flat := flatLayouts[name]; flat {
 			scanner.note(name, info, nil)
 			if !scanner.openAndScanFlat(root, name, name, info) {
 				scanner.inspectCandidate(root, name, name, info)
 			}
 			continue
-		case ProjectFile:
+		}
+		switch name {
+		case ProjectFile, PolicyFile:
 			scanner.note(name, info, nil)
 			scanner.inspectCandidate(root, name, name, info)
 			continue
@@ -426,6 +430,9 @@ func (scanner *inventoryScanner) inspectCandidate(parent *os.Root, name, relativ
 	scanner.note(relative, openedInfo, data)
 	document, decodeErr := Decode(data)
 	if decodeErr != nil {
+		document, decodeErr = DecodeImported(data)
+	}
+	if decodeErr != nil {
 		scanner.inventory.Diagnostics = append(scanner.inventory.Diagnostics, DiagnosticsForError(relative, decodeErr)...)
 		return
 	}
@@ -476,7 +483,23 @@ func readRootDirectory(root *os.Root) ([]fs.DirEntry, error) {
 // InventoryFromDocuments validates an in-memory candidate snapshot. It is used
 // while holding the project lock before a canonical publication.
 func InventoryFromDocuments(root string, documents []*Document) *Inventory {
+	return inventoryFromDocuments(root, documents, false)
+}
+
+// InventoryFromMigratedDocuments validates the schema, layout, and graph of a
+// complete migration candidate before an archive exists. UUIDv5 provenance is
+// still provisional; LoadInventoryContext authenticates the published result
+// against its exact archived source bytes.
+func InventoryFromMigratedDocuments(root string, documents []*Document) *Inventory {
+	inventory := inventoryFromDocuments(root, documents, true)
+	return inventory
+}
+
+func inventoryFromDocuments(root string, documents []*Document, imported bool) *Inventory {
 	inventory := newInventory(root)
+	if imported {
+		inventory.skipImportedProvenance = true
+	}
 	seenPath := map[string]struct{}{}
 	for _, input := range documents {
 		if input == nil {
@@ -489,7 +512,11 @@ func InventoryFromDocuments(root string, documents []*Document) *Inventory {
 			continue
 		}
 		seenPath[document.Path] = struct{}{}
-		if err := research.Validate(document.Record); err != nil {
+		validate := research.Validate
+		if imported {
+			validate = research.ValidateImported
+		}
+		if err := validate(document.Record); err != nil {
 			inventory.Diagnostics = append(inventory.Diagnostics, DiagnosticsForError(document.Path, err)...)
 			continue
 		}
@@ -507,6 +534,9 @@ func InventoryFromDocuments(root string, documents []*Document) *Inventory {
 		}
 		inventory.validateCommittedPathContainment(document)
 		revision, err := Revision(document)
+		if imported {
+			revision, err = RevisionImported(document)
+		}
 		if err != nil {
 			inventory.Diagnostics = append(inventory.Diagnostics, DiagnosticsForError(document.Path, err)...)
 			continue
@@ -531,11 +561,19 @@ func newInventory(root string) *Inventory {
 func (inventory *Inventory) finalize() {
 	sort.SliceStable(inventory.Documents, func(i, j int) bool { return inventory.Documents[i].Path < inventory.Documents[j].Path })
 	projectCount := 0
+	policyCount := 0
 	for _, document := range inventory.Documents {
 		if document.Kind() == research.KindProject {
 			projectCount++
 			if inventory.Project == nil {
 				inventory.Project = document
+			}
+			continue
+		}
+		if document.Kind() == research.KindPolicy {
+			policyCount++
+			if inventory.Policy == nil {
+				inventory.Policy = document
 			}
 			continue
 		}
@@ -550,10 +588,110 @@ func (inventory *Inventory) finalize() {
 	case projectCount > 1:
 		inventory.addDiagnostic(ProjectFile, "project.multiple", "canonical inventory has more than one Project record")
 	}
+	if policyCount > 1 {
+		inventory.addDiagnostic(PolicyFile, "policy.multiple", "canonical inventory has more than one Policy record")
+	}
 	inventory.validateDuplicates()
+	if !inventory.skipImportedProvenance {
+		inventory.validateImportedProvenance()
+	}
 	inventory.validateRelationships()
+	inventory.validatePlanExperimentSemantics()
+	inventory.validatePromotionSemantics()
 	inventory.validateCycles()
 	inventory.sortDiagnostics()
+}
+
+// validatePromotionSemantics mirrors the append-only lifecycle service at the
+// whole-inventory boundary. This prevents hand-edited records from bypassing
+// the same sealed-holdout and champion-chain invariants enforced by commands.
+func (inventory *Inventory) validatePromotionSemantics() {
+	promotions := inventory.OfKind(research.KindPromotion)
+	consumers := make(map[research.ID][]*Document)
+	for _, document := range promotions {
+		promotion := document.Record.(*research.Promotion)
+		consumers[promotion.Evaluation] = append(consumers[promotion.Evaluation], document)
+
+		if challenger := inventory.unique(promotion.Challenger); challenger != nil {
+			if challenger.Record.(*research.Release).State != research.ReleaseValidated {
+				inventory.addDiagnostic(document.Path, "promotion.challenger_state", "Promotion challenger must be a validated Release")
+			}
+		}
+		specDocument := inventory.unique(promotion.Spec)
+		evaluationDocument := inventory.unique(promotion.Evaluation)
+		if specDocument != nil && evaluationDocument != nil {
+			spec := specDocument.Record.(*research.PromotionSpec)
+			evaluation := evaluationDocument.Record.(*research.Evaluation)
+			if !evaluation.EvaluatedAt.After(spec.SealedAt) {
+				inventory.addDiagnostic(document.Path, "promotion.holdout_stale", "Promotion Evaluation must be evaluated strictly after the PromotionSpec was sealed")
+			}
+		}
+	}
+	for evaluation, documents := range consumers {
+		if evaluation.IsZero() || len(documents) < 2 {
+			continue
+		}
+		for _, document := range documents {
+			inventory.addDiagnostic(document.Path, "promotion.holdout_reused", fmt.Sprintf("Evaluation %s is consumed by %d Promotions", evaluation, len(documents)))
+		}
+	}
+
+	roots := make(map[string][]*Document)
+	followers := make(map[research.ID][]*Document)
+	for _, document := range promotions {
+		promotion := document.Record.(*research.Promotion)
+		if promotion.Previous.IsZero() {
+			roots[promotion.Target] = append(roots[promotion.Target], document)
+		} else {
+			followers[promotion.Previous] = append(followers[promotion.Previous], document)
+		}
+	}
+	for target, candidates := range roots {
+		if len(candidates) != 1 {
+			continue
+		}
+		current := candidates[0]
+		visited := make(map[research.ID]struct{})
+		var champion research.ID
+		var championSetting *research.Promotion
+		for current != nil {
+			promotion := current.Record.(*research.Promotion)
+			if _, seen := visited[promotion.ID]; seen {
+				break
+			}
+			visited[promotion.ID] = struct{}{}
+			if promotion.Incumbent != champion {
+				inventory.addDiagnostic(current.Path, "promotion.incumbent_mismatch", fmt.Sprintf("Promotion incumbent %s does not match current champion %s for target %s", promotion.Incumbent, champion, target))
+			}
+			switch promotion.Outcome {
+			case research.PromotionAccepted:
+				if promotion.Challenger == champion {
+					inventory.addDiagnostic(current.Path, "promotion.challenger_is_champion", "accepted Promotion challenger is already the current champion")
+				}
+				champion = promotion.Challenger
+				championSetting = promotion
+			case research.PromotionRejected:
+				if promotion.Challenger == champion {
+					inventory.addDiagnostic(current.Path, "promotion.challenger_is_champion", "rejected Promotion challenger is already the current champion")
+				}
+			case research.PromotionRolledBack:
+				expected := research.ID{}
+				if championSetting != nil {
+					expected = championSetting.Incumbent
+				}
+				if expected.IsZero() || promotion.Challenger != expected {
+					inventory.addDiagnostic(current.Path, "promotion.rollback_incumbent", fmt.Sprintf("rollback must restore the incumbent displaced by the current champion-setting Promotion (%s)", expected))
+				}
+				champion = promotion.Challenger
+				championSetting = promotion
+			}
+			next := followers[promotion.ID]
+			if len(next) != 1 {
+				break
+			}
+			current = next[0]
+		}
+	}
 }
 
 func (inventory *Inventory) validateDuplicates() {
@@ -601,8 +739,83 @@ func (inventory *Inventory) validateDuplicates() {
 }
 
 func (inventory *Inventory) validateRelationships() {
+	queuePartitions := map[string]*Document{}
+	for _, document := range inventory.OfKind(research.KindQueue) {
+		queue := document.Record.(*research.Queue)
+		for _, partition := range queue.Partitions {
+			key := partition.Pool.String() + "\x00" + string(partition.Lane)
+			if previous := queuePartitions[key]; previous != nil {
+				inventory.addDiagnostic(previous.Path, "queue.partition_global_duplicate", fmt.Sprintf("pool/lane partition %s/%s is also owned by %s", partition.Pool, partition.Lane, document.Path))
+				inventory.addDiagnostic(document.Path, "queue.partition_global_duplicate", fmt.Sprintf("pool/lane partition %s/%s is already owned by %s", partition.Pool, partition.Lane, previous.Path))
+				continue
+			}
+			queuePartitions[key] = document
+		}
+	}
 	for _, document := range inventory.Documents {
 		switch value := document.Record.(type) {
+		case *research.Idea:
+			for index, id := range value.Parents {
+				inventory.require(document, fmt.Sprintf("parents[%d]", index), id, research.KindIdea)
+			}
+			if !value.ResultingPlan.IsZero() {
+				planDocument := inventory.require(document, "resulting_plan", value.ResultingPlan, research.KindPlan)
+				if planDocument != nil && planDocument.Record.(*research.Plan).Idea != value.ID {
+					inventory.addDiagnostic(document.Path, "idea.plan_mismatch", "Idea resulting_plan does not point back through Plan.idea")
+				}
+			}
+			if !value.MergedInto.IsZero() {
+				inventory.require(document, "merged_into", value.MergedInto, research.KindIdea)
+			}
+			inventory.validateClassificationValues(document, &value.Classification)
+			inventory.validateClusterValue(document, value.PrimaryCluster)
+		case *research.ResourcePool:
+		case *research.Queue:
+			for partitionIndex, partition := range value.Partitions {
+				inventory.require(document, fmt.Sprintf("partitions[%d].pool", partitionIndex), partition.Pool, research.KindResourcePool)
+				for entryIndex, entry := range partition.Entries {
+					field := fmt.Sprintf("partitions[%d].entries[%d].plan", partitionIndex, entryIndex)
+					planDocument := inventory.require(document, field, entry.Plan, research.KindPlan)
+					if planDocument != nil {
+						plan := planDocument.Record.(*research.Plan)
+						if plan.Schema != research.SchemaPlanV2 || plan.State != research.PlanQueued {
+							inventory.addDiagnostic(document.Path, "queue.plan_state", fmt.Sprintf("%s must reference a queued exp.plan/v2", field))
+						}
+						if len(plan.Resources) != 1 || plan.Resources[0].Pool != partition.Pool {
+							inventory.addDiagnostic(document.Path, "queue.plan_pool", fmt.Sprintf("%s ResourcePool does not match its Queue partition", field))
+						}
+					}
+					if planDocument != nil && entry.PlanRevision != planDocument.Revision {
+						inventory.addDiagnostic(document.Path, "queue.plan_stale", fmt.Sprintf("%s pins revision %s but current Plan revision is %s", field, entry.PlanRevision, planDocument.Revision))
+					}
+					if planDocument != nil && !entry.Pinned {
+						if plan, ok := planDocument.Record.(*research.Plan); ok && inventory.clusterSaturated(plan.PrimaryCluster) {
+							inventory.addDiagnostic(document.Path, "queue.cluster_saturated", fmt.Sprintf("%s belongs to saturated cluster %s", field, plan.PrimaryCluster))
+						}
+					}
+				}
+			}
+		case *research.QueueAdvice:
+			inventory.require(document, "queue", value.Queue, research.KindQueue)
+			inventory.require(document, "candidate_plan", value.CandidatePlan, research.KindPlan)
+			inventory.require(document, "pool", value.Pool, research.KindResourcePool)
+			for index, id := range value.ListwiseOrder {
+				inventory.require(document, fmt.Sprintf("listwise_order[%d]", index), id, research.KindPlan)
+			}
+		case *research.Battle:
+			inventory.require(document, "queue", value.Queue, research.KindQueue)
+			if !value.Advice.IsZero() {
+				adviceDocument := inventory.require(document, "advice", value.Advice, research.KindQueueAdvice)
+				if adviceDocument != nil {
+					advice := adviceDocument.Record.(*research.QueueAdvice)
+					if advice.Queue != value.Queue || advice.QueueRevision != value.QueueRevision || advice.CandidatePlan != value.CandidatePlan || advice.Pool != value.Pool || advice.Lane != value.Lane {
+						inventory.addDiagnostic(document.Path, "battle.advice_mismatch", "Battle context does not match its QueueAdvice")
+					}
+				}
+			}
+			inventory.require(document, "candidate_plan", value.CandidatePlan, research.KindPlan)
+			inventory.require(document, "incumbent_plan", value.IncumbentPlan, research.KindPlan)
+			inventory.require(document, "pool", value.Pool, research.KindResourcePool)
 		case *research.Plan:
 			for index, id := range value.Assumptions {
 				inventory.require(document, fmt.Sprintf("assumptions[%d]", index), id, research.KindFinding)
@@ -610,7 +823,42 @@ func (inventory *Inventory) validateRelationships() {
 			if !value.ResultingExperiment.IsZero() {
 				inventory.require(document, "resulting_experiment", value.ResultingExperiment, research.KindExperiment)
 			}
+			if value.Schema == research.SchemaPlanV2 {
+				if !value.Idea.IsZero() {
+					ideaDocument := inventory.require(document, "idea", value.Idea, research.KindIdea)
+					if ideaDocument != nil && ideaDocument.Record.(*research.Idea).ResultingPlan != value.ID {
+						inventory.addDiagnostic(document.Path, "plan.idea_mismatch", "Plan.idea is not the Idea's sole resulting_plan")
+					}
+				}
+				if value.Classification != nil {
+					inventory.validateClassificationValues(document, value.Classification)
+				}
+				inventory.validateClusterValue(document, value.PrimaryCluster)
+				for index, dependency := range value.Dependencies {
+					field := fmt.Sprintf("dependencies[%d]", index)
+					finding := inventory.require(document, field+".finding", dependency.Finding, research.KindFinding)
+					if finding == nil {
+						continue
+					}
+					if value.State == research.PlanQueued && dependency.Revision != finding.Revision {
+						inventory.addDiagnostic(document.Path, "plan.dependency_stale", fmt.Sprintf("%s pins revision %s but current Finding revision is %s", field, dependency.Revision, finding.Revision))
+					}
+					digest, err := inventory.BeliefDigest(dependency.Finding)
+					if value.State == research.PlanQueued && err == nil && digest != dependency.BeliefDigest {
+						inventory.addDiagnostic(document.Path, "plan.belief_stale", fmt.Sprintf("%s pins belief digest %s but current digest is %s", field, dependency.BeliefDigest, digest))
+					}
+				}
+				for index, need := range value.Resources {
+					inventory.require(document, fmt.Sprintf("resources[%d].pool", index), need.Pool, research.KindResourcePool)
+				}
+			}
 		case *research.Experiment:
+			for index, id := range value.Parents {
+				inventory.require(document, fmt.Sprintf("parents[%d]", index), id, research.KindExperiment)
+			}
+			for index, id := range value.CandidateInputs {
+				inventory.require(document, fmt.Sprintf("candidate_inputs[%d]", index), id, research.KindCandidate)
+			}
 			if value.ClosureDetail != nil && !value.ClosureDetail.SupersededBy.IsZero() {
 				inventory.require(document, "closure_detail.superseded_by", value.ClosureDetail.SupersededBy, research.KindExperiment)
 			}
@@ -621,6 +869,9 @@ func (inventory *Inventory) validateRelationships() {
 						run := target.Record.(*research.Run)
 						if run.Experiment != value.ID {
 							inventory.addDiagnostic(document.Path, "reference.wrong_owner", fmt.Sprintf("conclusion evidence Run %s belongs to Experiment %s", run.ID, run.Experiment))
+						}
+						if evidence.Disposition == research.EvidenceIncluded && !inventory.runHasSuccessfulDirectAttempt(evidence.Run) {
+							inventory.addDiagnostic(document.Path, "experiment.evidence_unexecuted", fmt.Sprintf("included Run %s has no successful direct Attempt", evidence.Run))
 						}
 					}
 				}
@@ -645,19 +896,237 @@ func (inventory *Inventory) validateRelationships() {
 					}
 				}
 			}
+			if value.Schema == research.SchemaAttemptV2 {
+				inventory.require(document, "pool", value.Pool, research.KindResourcePool)
+				inventory.require(document, "queue", value.Queue, research.KindQueue)
+			}
+		case *research.EvaluationSpec:
+			inventory.require(document, "budget_pool", value.BudgetPool, research.KindResourcePool)
+		case *research.Evaluation:
+			specDocument := inventory.require(document, "spec", value.Spec, research.KindEvaluationSpec)
+			inventory.requireAny(document, "subject", value.Subject, research.KindExperiment, research.KindCandidate, research.KindRelease)
+			if specDocument != nil {
+				spec := specDocument.Record.(*research.EvaluationSpec)
+				allowedMetrics := make(map[string]research.MetricSpec, len(spec.Metrics))
+				for _, metric := range spec.Metrics {
+					allowedMetrics[metric.Name] = metric
+				}
+				observed := make(map[string]research.MetricValue, len(value.Metrics))
+				for _, metric := range value.Metrics {
+					specification, found := allowedMetrics[metric.Name]
+					if !found || specification.Unit != metric.Unit {
+						inventory.addDiagnostic(document.Path, "evaluation.metric_mismatch", fmt.Sprintf("metric %s (%s) is not declared by EvaluationSpec %s", metric.Name, metric.Unit, spec.ID))
+					}
+					observed[metric.Name] = metric
+				}
+				if len(observed) != len(allowedMetrics) {
+					inventory.addDiagnostic(document.Path, "evaluation.metric_incomplete", fmt.Sprintf("Evaluation supplies %d of %d declared metrics", len(observed), len(allowedMetrics)))
+				}
+				thresholds, passed := 0, true
+				for name, specification := range allowedMetrics {
+					if specification.Threshold == nil {
+						continue
+					}
+					metric, found := observed[name]
+					if !found {
+						continue
+					}
+					thresholds++
+					if specification.Direction == research.MetricMaximize {
+						passed = passed && metric.Value >= *specification.Threshold
+					} else if specification.Direction == research.MetricMinimize {
+						passed = passed && metric.Value <= *specification.Threshold
+					}
+				}
+				if thresholds > 0 && value.Outcome != research.EvaluationInvalid && (passed && value.Outcome != research.EvaluationPassed || !passed && value.Outcome != research.EvaluationFailed) {
+					inventory.addDiagnostic(document.Path, "evaluation.outcome_threshold", "Evaluation outcome does not match its declared metric thresholds")
+				}
+			}
+			mlflowOwner := ""
+			for _, reference := range value.ExternalRefs {
+				if reference.Provider != "mlflow" || reference.Role != research.ExternalTracker {
+					continue
+				}
+				if owner, ok := reference.Metadata["mlflow.owner_attempt"].(string); ok && owner != "" {
+					if mlflowOwner != "" && mlflowOwner != owner {
+						inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_conflict", "MLflow references claim different owner Attempts")
+					}
+					mlflowOwner = owner
+				}
+			}
 		case *research.Finding:
 			for index, evidence := range value.Evidence {
 				expected := research.KindRun
 				if evidence.Kind == research.FindingEvidenceExperiment {
 					expected = research.KindExperiment
 				}
-				inventory.require(document, fmt.Sprintf("evidence[%d].ref", index), evidence.Ref, expected)
+				evidenceDocument := inventory.require(document, fmt.Sprintf("evidence[%d].ref", index), evidence.Ref, expected)
+				if evidence.Kind == research.FindingEvidenceRun {
+					if !inventory.runHasSuccessfulDirectAttempt(evidence.Ref) {
+						inventory.addDiagnostic(document.Path, "finding.evidence_unexecuted", fmt.Sprintf("Finding evidence Run %s has no successful direct Attempt", evidence.Ref))
+					}
+					if evidenceDocument != nil {
+						run := evidenceDocument.Record.(*research.Run)
+						experimentDocument := inventory.unique(run.Experiment)
+						if experimentDocument == nil || !experimentIncludesRun(experimentDocument.Record.(*research.Experiment), run.ID) {
+							inventory.addDiagnostic(document.Path, "finding.evidence_excluded", fmt.Sprintf("Finding evidence Run %s is not included in its Experiment conclusion", run.ID))
+						}
+					}
+				}
 			}
 			for index, id := range value.Weakens {
 				inventory.require(document, fmt.Sprintf("weakens[%d]", index), id, research.KindFinding)
 			}
 			for index, id := range value.Overturns {
 				inventory.require(document, fmt.Sprintf("overturns[%d]", index), id, research.KindFinding)
+			}
+		case *research.Candidate:
+			experimentDocument := inventory.require(document, "experiment", value.Experiment, research.KindExperiment)
+			if experimentDocument != nil {
+				experiment := experimentDocument.Record.(*research.Experiment)
+				if experiment.Lifecycle != research.LifecycleClosed || experiment.Closure != research.ClosureConcluded || experiment.Verdict != research.VerdictSupported {
+					inventory.addDiagnostic(document.Path, "candidate.experiment_outcome", "Candidate requires a closed, concluded, supported Experiment")
+				}
+			}
+			evaluationDocument := inventory.require(document, "evaluation", value.Evaluation, research.KindEvaluation)
+			if evaluationDocument != nil {
+				evaluation := evaluationDocument.Record.(*research.Evaluation)
+				if evaluation.Subject != value.Experiment {
+					inventory.addDiagnostic(document.Path, "candidate.evaluation_subject", "Candidate Evaluation must evaluate its Experiment")
+				}
+				if evaluation.Outcome != research.EvaluationPassed {
+					inventory.addDiagnostic(document.Path, "candidate.evaluation_outcome", "Candidate requires a passed Evaluation")
+				}
+				if specDocument := inventory.unique(evaluation.Spec); specDocument == nil || specDocument.Kind() != research.KindEvaluationSpec || specDocument.Record.(*research.EvaluationSpec).Purpose != research.EvaluationScientific {
+					inventory.addDiagnostic(document.Path, "candidate.evaluation_spec", "Candidate Evaluation must use a scientific EvaluationSpec")
+				}
+			}
+			for index, id := range value.Parents {
+				inventory.require(document, fmt.Sprintf("parents[%d]", index), id, research.KindCandidate)
+			}
+			if !inventory.candidateHasSuccessfulAttempt(value, experimentDocument) {
+				inventory.addDiagnostic(document.Path, "candidate.attempt_provenance", "Candidate Git commit and change_set require a matching successful Attempt in its Experiment")
+			}
+		case *research.Release:
+			for index, slot := range value.Slots {
+				inventory.require(document, fmt.Sprintf("slots[%d].candidate", index), slot.Candidate, research.KindCandidate)
+			}
+			var combinationExperiment *research.Experiment
+			if !value.CombinationExperiment.IsZero() {
+				combination := inventory.require(document, "combination_experiment", value.CombinationExperiment, research.KindExperiment)
+				if combination != nil {
+					experiment := combination.Record.(*research.Experiment)
+					combinationExperiment = experiment
+					if experiment.Lifecycle != research.LifecycleClosed || experiment.Closure != research.ClosureConcluded || experiment.Verdict != research.VerdictSupported {
+						inventory.addDiagnostic(document.Path, "release.combination_outcome", "combination Experiment must be closed, concluded, and supported")
+					}
+					if experiment.Design.Kind != research.ExperimentCombination {
+						inventory.addDiagnostic(document.Path, "release.combination_kind", "combination_experiment must use design.kind = combination")
+					}
+					wanted := map[research.ID]struct{}{}
+					for _, slot := range value.Slots {
+						wanted[slot.Candidate] = struct{}{}
+					}
+					actual := map[research.ID]struct{}{}
+					for _, candidate := range experiment.CandidateInputs {
+						actual[candidate] = struct{}{}
+					}
+					if len(wanted) != len(actual) {
+						inventory.addDiagnostic(document.Path, "release.combination_inputs", "combination Experiment inputs do not match Release slot Candidates")
+					} else {
+						for candidate := range wanted {
+							if _, found := actual[candidate]; !found {
+								inventory.addDiagnostic(document.Path, "release.combination_inputs", "combination Experiment inputs do not match Release slot Candidates")
+								break
+							}
+						}
+					}
+				}
+			}
+			if !value.CombinationEvaluation.IsZero() {
+				combinationEvaluation := inventory.require(document, "combination_evaluation", value.CombinationEvaluation, research.KindEvaluation)
+				if combinationEvaluation != nil {
+					evaluation := combinationEvaluation.Record.(*research.Evaluation)
+					if combinationExperiment == nil || evaluation.Subject != combinationExperiment.ID {
+						inventory.addDiagnostic(document.Path, "release.combination_evaluation_subject", "combination Evaluation must evaluate the combination Experiment")
+					}
+					if evaluation.Outcome != research.EvaluationPassed {
+						inventory.addDiagnostic(document.Path, "release.combination_evaluation_outcome", "combination Evaluation must pass")
+					}
+					if specDocument := inventory.unique(evaluation.Spec); specDocument == nil || specDocument.Kind() != research.KindEvaluationSpec || specDocument.Record.(*research.EvaluationSpec).Purpose != research.EvaluationScientific {
+						inventory.addDiagnostic(document.Path, "release.combination_evaluation_spec", "combination Evaluation must use a scientific EvaluationSpec")
+					}
+				}
+			}
+			if !value.Evaluation.IsZero() {
+				evaluation := inventory.require(document, "evaluation", value.Evaluation, research.KindEvaluation)
+				if evaluation != nil {
+					result := evaluation.Record.(*research.Evaluation)
+					if result.Subject != value.ID {
+						inventory.addDiagnostic(document.Path, "release.evaluation_subject", "Release Evaluation must evaluate this Release")
+					}
+					if value.State == research.ReleaseValidated && result.Outcome != research.EvaluationPassed {
+						inventory.addDiagnostic(document.Path, "release.evaluation_outcome", "validated Release requires a passed Evaluation")
+					}
+					if value.State == research.ReleaseValidated {
+						specDocument := inventory.unique(result.Spec)
+						if specDocument == nil || specDocument.Kind() != research.KindEvaluationSpec {
+							inventory.addDiagnostic(document.Path, "release.evaluation_spec", "validated Release EvaluationSpec is missing")
+						} else {
+							spec := specDocument.Record.(*research.EvaluationSpec)
+							if spec.Purpose != research.EvaluationPromotion || spec.SealedAt == nil {
+								inventory.addDiagnostic(document.Path, "release.evaluation_spec", "validated Release requires a sealed promotion EvaluationSpec")
+							}
+						}
+					}
+				}
+			}
+		case *research.PromotionSpec:
+			evaluationSpec := inventory.require(document, "evaluation_spec", value.EvaluationSpec, research.KindEvaluationSpec)
+			if evaluationSpec != nil {
+				spec := evaluationSpec.Record.(*research.EvaluationSpec)
+				if spec.Purpose != research.EvaluationPromotion || spec.SealedAt == nil {
+					inventory.addDiagnostic(document.Path, "promotion.evaluation_spec", "PromotionSpec requires a sealed promotion EvaluationSpec")
+				}
+				if value.HoldoutBudgetHours > spec.BudgetHours {
+					inventory.addDiagnostic(document.Path, "promotion.holdout_budget", "PromotionSpec holdout budget exceeds its EvaluationSpec budget")
+				}
+			}
+		case *research.Promotion:
+			specDocument := inventory.require(document, "spec", value.Spec, research.KindPromotionSpec)
+			challenger := inventory.require(document, "challenger", value.Challenger, research.KindRelease)
+			var incumbent *Document
+			if !value.Incumbent.IsZero() {
+				incumbent = inventory.require(document, "incumbent", value.Incumbent, research.KindRelease)
+			}
+			evaluationDocument := inventory.require(document, "evaluation", value.Evaluation, research.KindEvaluation)
+			var previous *Document
+			if !value.Previous.IsZero() {
+				previous = inventory.require(document, "previous", value.Previous, research.KindPromotion)
+			}
+			if specDocument != nil && specDocument.Record.(*research.PromotionSpec).Target != value.Target {
+				inventory.addDiagnostic(document.Path, "promotion.target_mismatch", "Promotion target does not match PromotionSpec")
+			}
+			for _, releaseDocument := range []*Document{challenger, incumbent} {
+				if releaseDocument != nil && releaseDocument.Record.(*research.Release).Target != value.Target {
+					inventory.addDiagnostic(document.Path, "promotion.target_mismatch", "Promotion release target does not match Promotion target")
+				}
+			}
+			if evaluationDocument != nil && evaluationDocument.Record.(*research.Evaluation).Subject != value.Challenger {
+				inventory.addDiagnostic(document.Path, "promotion.evaluation_subject", "Promotion Evaluation must evaluate the challenger Release")
+			}
+			if specDocument != nil && evaluationDocument != nil {
+				spec := specDocument.Record.(*research.PromotionSpec)
+				evaluation := evaluationDocument.Record.(*research.Evaluation)
+				if evaluation.Spec != spec.EvaluationSpec {
+					inventory.addDiagnostic(document.Path, "promotion.evaluation_spec", "Promotion Evaluation does not use the sealed EvaluationSpec")
+				}
+				if (value.Outcome == research.PromotionAccepted || value.Outcome == research.PromotionRolledBack) && evaluation.Outcome != research.EvaluationPassed {
+					inventory.addDiagnostic(document.Path, "promotion.evaluation_outcome", "champion-setting Promotion requires a passed Evaluation")
+				}
+			}
+			if previous != nil && previous.Record.(*research.Promotion).Target != value.Target {
+				inventory.addDiagnostic(document.Path, "promotion.target_mismatch", "previous Promotion has a different target")
 			}
 		case *research.Decision:
 			for index, id := range value.BasedOn {
@@ -668,6 +1137,103 @@ func (inventory *Inventory) validateRelationships() {
 			}
 		}
 	}
+}
+
+func (inventory *Inventory) runHasSuccessfulDirectAttempt(run research.ID) bool {
+	for _, document := range inventory.OfKind(research.KindAttempt) {
+		attempt := document.Record.(*research.Attempt)
+		if attempt.Run == run && attempt.State == research.AttemptSucceeded && attempt.Terminal != nil && attempt.Terminal.Source == "direct" {
+			return true
+		}
+	}
+	return false
+}
+
+func experimentIncludesRun(experiment *research.Experiment, run research.ID) bool {
+	if experiment == nil || experiment.Conclusion == nil {
+		return false
+	}
+	for _, evidence := range experiment.Conclusion.Evidence {
+		if evidence.Run == run && evidence.Disposition == research.EvidenceIncluded {
+			return true
+		}
+	}
+	return false
+}
+
+func (inventory *Inventory) validatePlanExperimentSemantics() {
+	origins := map[research.ID][]*Document{}
+	for _, document := range inventory.OfKind(research.KindPlan) {
+		plan := document.Record.(*research.Plan)
+		if plan.ResultingExperiment.IsZero() {
+			continue
+		}
+		origins[plan.ResultingExperiment] = append(origins[plan.ResultingExperiment], document)
+		experimentDocument := inventory.unique(plan.ResultingExperiment)
+		if experimentDocument == nil || experimentDocument.Kind() != research.KindExperiment {
+			continue
+		}
+		experiment := experimentDocument.Record.(*research.Experiment)
+		if plan.State == research.PlanStarted && experiment.Lifecycle != research.LifecycleActive {
+			inventory.addDiagnostic(document.Path, "plan.experiment_state", "started Plan requires an active resulting Experiment")
+		}
+		if plan.State == research.PlanCompleted && experiment.Lifecycle != research.LifecycleClosed {
+			inventory.addDiagnostic(document.Path, "plan.experiment_state", "completed Plan requires a closed resulting Experiment")
+		}
+	}
+	for experiment, plans := range origins {
+		if len(plans) < 2 {
+			continue
+		}
+		for _, document := range plans {
+			inventory.addDiagnostic(document.Path, "experiment.multiple_origin_plans", fmt.Sprintf("Experiment %s is claimed by %d Plans", experiment, len(plans)))
+		}
+	}
+}
+
+func (inventory *Inventory) candidateHasSuccessfulAttempt(candidate *research.Candidate, experimentDocument *Document) bool {
+	if inventory == nil || candidate == nil || experimentDocument == nil {
+		return false
+	}
+	experiment := experimentDocument.Record.(*research.Experiment)
+	mlflowOwner := ""
+	mlflowOwnerConflict := false
+	if evaluationDocument := inventory.unique(candidate.Evaluation); evaluationDocument != nil {
+		for _, reference := range evaluationDocument.Record.(*research.Evaluation).ExternalRefs {
+			if reference.Provider == "mlflow" && reference.Role == research.ExternalTracker {
+				if owner, ok := reference.Metadata["mlflow.owner_attempt"].(string); ok {
+					if mlflowOwner != "" && owner != "" && mlflowOwner != owner {
+						mlflowOwnerConflict = true
+					}
+					if owner != "" {
+						mlflowOwner = owner
+					}
+				}
+			}
+		}
+	}
+	if mlflowOwnerConflict {
+		return false
+	}
+	for _, document := range inventory.OfKind(research.KindAttempt) {
+		attempt := document.Record.(*research.Attempt)
+		if attempt.Schema != research.SchemaAttemptV2 || attempt.State != research.AttemptSucceeded || attempt.Terminal == nil || attempt.Terminal.Source != "direct" ||
+			attempt.HeadCommit != candidate.GitCommit || !reflect.DeepEqual(attempt.ChangeSet, candidate.ChangeSet) {
+			continue
+		}
+		if mlflowOwner != "" && attempt.ID.String() != mlflowOwner {
+			continue
+		}
+		runDocument := inventory.unique(attempt.Run)
+		if runDocument != nil && runDocument.Record.(*research.Run).Experiment == candidate.Experiment && experiment.Conclusion != nil {
+			for _, evidence := range experiment.Conclusion.Evidence {
+				if evidence.Run == attempt.Run && evidence.Disposition == research.EvidenceIncluded {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (inventory *Inventory) require(source *Document, field string, id research.ID, expected research.Kind) *Document {
@@ -689,6 +1255,119 @@ func (inventory *Inventory) require(source *Document, field string, id research.
 		inventory.addDiagnostic(source.Path, "reference.ambiguous", fmt.Sprintf("%s target %s has duplicate records", field, id))
 		return nil
 	}
+}
+
+func (inventory *Inventory) requireAny(source *Document, field string, id research.ID, expected ...research.Kind) *Document {
+	if id.IsZero() {
+		return nil
+	}
+	allowed := false
+	for _, kind := range expected {
+		allowed = allowed || id.Kind() == kind
+	}
+	if !allowed {
+		inventory.addDiagnostic(source.Path, "reference.wrong_kind", fmt.Sprintf("%s points to %s, expected one of %v", field, id.Kind(), expected))
+		return nil
+	}
+	documents := inventory.byID[id]
+	switch len(documents) {
+	case 0:
+		inventory.addDiagnostic(source.Path, "reference.not_found", fmt.Sprintf("%s target %s does not exist", field, id))
+		return nil
+	case 1:
+		return documents[0]
+	default:
+		inventory.addDiagnostic(source.Path, "reference.ambiguous", fmt.Sprintf("%s target %s has duplicate records", field, id))
+		return nil
+	}
+}
+
+func (inventory *Inventory) validateClassificationValues(source *Document, classification *research.Classification) {
+	if inventory.Policy == nil || classification == nil {
+		return
+	}
+	policy, ok := inventory.Policy.Record.(*research.Policy)
+	if !ok {
+		return
+	}
+	checks := []struct {
+		field   string
+		value   string
+		allowed []string
+	}{
+		{"classification.domain", classification.Domain, policy.Taxonomy.Domains},
+		{"classification.work", classification.Work, policy.Taxonomy.Work},
+		{"classification.method", classification.Method, policy.Taxonomy.Methods},
+		{"classification.component", classification.Component, policy.Taxonomy.Components},
+	}
+	for _, check := range checks {
+		found := false
+		for _, allowed := range check.allowed {
+			found = found || check.value == allowed
+		}
+		if !found {
+			inventory.addDiagnostic(source.Path, "classification.not_allowed", fmt.Sprintf("%s value %q is not allowed by POLICY.md", check.field, check.value))
+		}
+	}
+}
+
+func (inventory *Inventory) validateClusterValue(source *Document, cluster string) {
+	if inventory.Policy == nil {
+		return
+	}
+	policy, ok := inventory.Policy.Record.(*research.Policy)
+	if !ok || len(policy.Clusters) == 0 {
+		return
+	}
+	for _, configured := range policy.Clusters {
+		if configured.Name == cluster {
+			return
+		}
+	}
+	inventory.addDiagnostic(source.Path, "classification.cluster_not_allowed", fmt.Sprintf("primary_cluster value %q is not configured by POLICY.md", cluster))
+}
+
+func (inventory *Inventory) clusterSaturated(cluster string) bool {
+	if inventory.Policy == nil {
+		return false
+	}
+	policy, ok := inventory.Policy.Record.(*research.Policy)
+	if !ok {
+		return false
+	}
+	for _, configured := range policy.Clusters {
+		if configured.Name == cluster {
+			return configured.State == research.ClusterSaturated
+		}
+	}
+	return false
+}
+
+// BeliefDigest returns the current digest for one Finding, including every
+// incoming weakens/overturns edge and the owning source revision.
+func (inventory *Inventory) BeliefDigest(id research.ID) (string, error) {
+	if inventory == nil || id.Kind() != research.KindFinding {
+		return "", research.ErrReferenceNotFound
+	}
+	target := inventory.unique(id)
+	if target == nil {
+		return "", fmt.Errorf("%s: %w", id, research.ErrReferenceNotFound)
+	}
+	var incoming []research.BeliefInfluence
+	for _, document := range inventory.OfKind(research.KindFinding) {
+		finding := document.Record.(*research.Finding)
+		for _, weakened := range finding.Weakens {
+			if weakened == id {
+				incoming = append(incoming, research.BeliefInfluence{Source: finding.ID, Relation: research.BeliefWeakens, Revision: document.Revision})
+			}
+		}
+		for _, overturned := range finding.Overturns {
+			if overturned == id {
+				incoming = append(incoming, research.BeliefInfluence{Source: finding.ID, Relation: research.BeliefOverturns, Revision: document.Revision})
+			}
+		}
+	}
+	return research.ComputeBeliefDigest(id, target.Revision, incoming)
 }
 
 func (inventory *Inventory) unique(id research.ID) *Document {
@@ -721,6 +1400,14 @@ func (inventory *Inventory) validateAttemptLocation(attemptDocument, runDocument
 }
 
 func (inventory *Inventory) validateCycles() {
+	inventory.findCycles(research.KindIdea, func(record research.Record) []research.ID {
+		idea := record.(*research.Idea)
+		edges := append([]research.ID(nil), idea.Parents...)
+		if !idea.MergedInto.IsZero() {
+			edges = append(edges, idea.MergedInto)
+		}
+		return edges
+	})
 	inventory.findCycles(research.KindFinding, func(record research.Record) []research.ID {
 		finding := record.(*research.Finding)
 		return append(append([]research.ID(nil), finding.Weakens...), finding.Overturns...)
@@ -730,11 +1417,52 @@ func (inventory *Inventory) validateCycles() {
 	})
 	inventory.findCycles(research.KindExperiment, func(record research.Record) []research.ID {
 		experiment := record.(*research.Experiment)
-		if experiment.ClosureDetail == nil || experiment.ClosureDetail.SupersededBy.IsZero() {
+		edges := append([]research.ID(nil), experiment.Parents...)
+		if experiment.ClosureDetail != nil && !experiment.ClosureDetail.SupersededBy.IsZero() {
+			edges = append(edges, experiment.ClosureDetail.SupersededBy)
+		}
+		return edges
+	})
+	inventory.findCycles(research.KindCandidate, func(record research.Record) []research.ID {
+		return append([]research.ID(nil), record.(*research.Candidate).Parents...)
+	})
+	inventory.findCycles(research.KindPromotion, func(record research.Record) []research.ID {
+		promotion := record.(*research.Promotion)
+		if promotion.Previous.IsZero() {
 			return nil
 		}
-		return []research.ID{experiment.ClosureDetail.SupersededBy}
+		return []research.ID{promotion.Previous}
 	})
+	inventory.validatePromotionForks()
+}
+
+func (inventory *Inventory) validatePromotionForks() {
+	followers := map[research.ID][]*Document{}
+	roots := map[string][]*Document{}
+	for _, document := range inventory.OfKind(research.KindPromotion) {
+		promotion := document.Record.(*research.Promotion)
+		if promotion.Previous.IsZero() {
+			roots[promotion.Target] = append(roots[promotion.Target], document)
+		} else {
+			followers[promotion.Previous] = append(followers[promotion.Previous], document)
+		}
+	}
+	for previous, documents := range followers {
+		if len(documents) < 2 {
+			continue
+		}
+		for _, document := range documents {
+			inventory.addDiagnostic(document.Path, "promotion.chain_fork", fmt.Sprintf("Promotion %s has %d followers", previous, len(documents)))
+		}
+	}
+	for target, documents := range roots {
+		if len(documents) < 2 {
+			continue
+		}
+		for _, document := range documents {
+			inventory.addDiagnostic(document.Path, "promotion.multiple_roots", fmt.Sprintf("target %s has %d Promotion chain roots", target, len(documents)))
+		}
+	}
 }
 
 func (inventory *Inventory) findCycles(kind research.Kind, edges func(research.Record) []research.ID) {
@@ -848,11 +1576,26 @@ func (inventory *Inventory) validateCommittedPathContainment(document *Document)
 		}
 	case *research.Attempt:
 		validate("cwd", value.CWD, true)
+		for index, changed := range value.ChangeSet {
+			validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+		}
+	case *research.Candidate:
+		for index, changed := range value.ChangeSet {
+			validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+		}
 	}
 }
 
 func reservedPathPrefix(relative string) bool {
-	return relative == ProjectFile || relative == PlansDir || relative == FindingsDir || relative == DecisionsDir || strings.HasPrefix(relative, PlansDir+"/") || strings.HasPrefix(relative, FindingsDir+"/") || strings.HasPrefix(relative, DecisionsDir+"/") || strings.HasPrefix(relative, "e-")
+	if relative == ProjectFile || relative == PolicyFile || strings.HasPrefix(relative, "e-") {
+		return true
+	}
+	for directory := range flatLayouts {
+		if relative == directory || strings.HasPrefix(relative, directory+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Valid reports whether the complete canonical inventory has no diagnostics.
@@ -890,14 +1633,14 @@ func (inventory *Inventory) ByID(id research.ID) (*Document, error) {
 
 // Resolve accepts a full ID, unique prefix/display code, or migration alias.
 func (inventory *Inventory) Resolve(query string, expected research.Kind) (*Document, error) {
-	candidates := make([]research.Candidate, 0, len(inventory.Documents))
+	candidates := make([]research.ReferenceCandidate, 0, len(inventory.Documents))
 	for _, document := range inventory.Documents {
 		id, ok := document.ID()
 		if !ok {
 			continue
 		}
 		common := document.Record.GetCommon()
-		candidates = append(candidates, research.Candidate{ID: id, Aliases: append([]string(nil), common.LegacyAliases...)})
+		candidates = append(candidates, research.ReferenceCandidate{ID: id, Aliases: append([]string(nil), common.LegacyAliases...)})
 	}
 	id, err := research.Resolve(query, expected, candidates)
 	if err != nil {

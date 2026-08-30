@@ -5,14 +5,18 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/agentcli"
 	"github.com/daviddwlee84/exp-cli/internal/execx"
+	"github.com/daviddwlee84/exp-cli/internal/operation"
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/projection"
 	"github.com/daviddwlee84/exp-cli/internal/provider"
@@ -28,10 +32,40 @@ type RecordStore interface {
 	ListPlans(context.Context) ([]*record.Document, []record.Diagnostic, error)
 }
 
+// TransactionalRecordStore is the canonical mutation boundary used by the
+// autonomous-control-plane commands. The legacy walking-path interface stays
+// narrow so existing command tests can continue to inject focused fakes.
+type TransactionalRecordStore interface {
+	Inventory(context.Context) (*record.Inventory, error)
+	Transact(context.Context, record.TransactionRequest) (*record.TransactionResult, error)
+	Recover(context.Context) error
+}
+
 // ProviderRegistry is the local-only discovery surface used by doctor.
 type ProviderRegistry interface {
 	List() []provider.Descriptor
 	DiscoverLocal(context.Context, provider.LocalDiscoveryOptions) ([]provider.ProbeResult, error)
+}
+
+type OperationalStore interface {
+	Close() error
+	Path() string
+	RuntimeState(context.Context) (operation.RuntimeState, error)
+	SetPaused(context.Context, bool, string) (operation.RuntimeState, error)
+	AcquireLease(context.Context, string, string, time.Duration) (operation.Lease, error)
+	RenewLease(context.Context, operation.Lease, time.Duration) (operation.Lease, error)
+	ReleaseLease(context.Context, operation.Lease) error
+	EnqueueJob(context.Context, operation.JobInput) (operation.Job, bool, error)
+	GetJob(context.Context, string) (operation.Job, error)
+	ClaimJob(context.Context, string, string, string, time.Duration) (operation.Job, error)
+	SetJobExternalRefs(context.Context, string, int64, *int64, string) error
+	FinishJob(context.Context, string, int64, operation.JobState, json.RawMessage, string) (operation.Job, error)
+	ListJobs(context.Context, ...operation.JobState) ([]operation.Job, error)
+	AddOutbox(context.Context, operation.OutboxInput, time.Time) (operation.OutboxItem, bool, error)
+	DueOutbox(context.Context, int) ([]operation.OutboxItem, error)
+	SetOutboxState(context.Context, string, operation.OutboxState, time.Time, string) error
+	Fairness(context.Context, string) (operation.Fairness, error)
+	RecordDispatch(context.Context, string, string, float64) (operation.Fairness, error)
 }
 
 // App contains every invocation-scoped dependency shared by commands. Function
@@ -43,13 +77,18 @@ type App struct {
 	Out     io.Writer
 	Err     io.Writer
 
-	Now          func() time.Time
-	Getwd        func() (string, error)
-	GenerateUUID research.UUIDGenerator
+	Now            func() time.Time
+	Getwd          func() (string, error)
+	GenerateUUID   research.UUIDGenerator
+	ExecutablePath func() (string, error)
 
-	DiscoverProject   func(context.Context, string) (*project.Info, error)
-	InitializeProject func(context.Context, project.InitRequest) (*project.Info, bool, error)
-	NewStore          func(*project.Info) (RecordStore, error)
+	DiscoverProject        func(context.Context, string) (*project.Info, error)
+	InitializeProject      func(context.Context, project.InitRequest) (*project.Info, bool, error)
+	NewStore               func(*project.Info) (RecordStore, error)
+	NewTransactionalStore  func(*project.Info) (TransactionalRecordStore, error)
+	OpenOperational        func(context.Context, *project.Info) (OperationalStore, error)
+	ResolveAgentConfigPath func() (string, error)
+	LoadAgentConfig        func(string) (agentcli.Config, error)
 
 	Registry     ProviderRegistry
 	BinaryLookup provider.BinaryLookup
@@ -96,6 +135,9 @@ func (a *App) setDefaults() {
 	if a.GenerateUUID == nil {
 		a.GenerateUUID = research.DefaultUUIDGenerator
 	}
+	if a.ExecutablePath == nil {
+		a.ExecutablePath = os.Executable
+	}
 	if a.DiscoverProject == nil {
 		a.DiscoverProject = project.Discover
 	}
@@ -117,6 +159,37 @@ func (a *App) setDefaults() {
 				record.WithUUIDGenerator(a.GenerateUUID),
 			), nil
 		}
+	}
+	if a.NewTransactionalStore == nil {
+		a.NewTransactionalStore = func(info *project.Info) (TransactionalRecordStore, error) {
+			if info == nil {
+				return nil, fmt.Errorf("project information is required")
+			}
+			return record.NewStore(info.Root, info.Repository.GitCommonDir,
+				record.WithClock(a.clock),
+				record.WithUUIDGenerator(a.GenerateUUID),
+			), nil
+		}
+	}
+	if a.OpenOperational == nil {
+		a.OpenOperational = func(ctx context.Context, info *project.Info) (OperationalStore, error) {
+			if info == nil {
+				return nil, fmt.Errorf("project information is required")
+			}
+			return operation.Open(ctx, info.Repository.GitCommonDir, operation.WithClock(a.clock))
+		}
+	}
+	if a.ResolveAgentConfigPath == nil {
+		a.ResolveAgentConfigPath = func() (string, error) {
+			root, err := os.UserConfigDir()
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(root, "exp", "agents.toml"), nil
+		}
+	}
+	if a.LoadAgentConfig == nil {
+		a.LoadAgentConfig = agentcli.Load
 	}
 	if a.Registry == nil {
 		a.Registry = provider.CompiledRegistry()

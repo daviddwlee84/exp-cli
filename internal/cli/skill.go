@@ -32,7 +32,7 @@ func newSkillCommand(app *App) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newSkillPrintCommand(app), newSkillInstallCommand(app), newSkillCheckCommand(app))
+	command.AddCommand(newSkillPrintCommand(app), newSkillInstallCommand(app), newSkillCheckCommand(app), newSkillSyncCommand(app))
 	return command
 }
 
@@ -42,16 +42,20 @@ func newSkillPrintCommand(app *App) *cobra.Command {
 		Short: "Print this build's embedded SKILL.md",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			if err := command.Context().Err(); err != nil {
-				return err
-			}
-			content, err := app.RenderSkill()
-			if err != nil {
-				return err
-			}
-			return app.WriteHuman(content)
+			return runSkillPrint(command, app)
 		},
 	}
+}
+
+func runSkillPrint(command *cobra.Command, app *App) error {
+	if err := command.Context().Err(); err != nil {
+		return err
+	}
+	content, err := app.RenderSkill()
+	if err != nil {
+		return err
+	}
+	return app.WriteHuman(content)
 }
 
 func newSkillInstallCommand(app *App) *cobra.Command {

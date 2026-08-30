@@ -161,10 +161,27 @@ func runContext(command *cobra.Command, app *App, rootOptions *rootOptions, opti
 	if queued == nil {
 		queued = []planView{}
 	}
+	frontier := []contextFrontierView{}
+	for _, entry := range inventory.QueueFrontier() {
+		title := ""
+		if document, resolveErr := inventory.ByID(entry.Entry.Plan); resolveErr == nil {
+			title = document.Record.(*research.Plan).Title
+		}
+		frontier = append(frontier, contextFrontierView{Queue: entry.Queue.String(), Pool: entry.Pool.String(), Lane: string(entry.Lane), Plan: entry.Entry.Plan.String(), Title: title, Score: entry.Entry.Score})
+	}
+	champions, championErr := inventory.CurrentChampions()
+	if championErr != nil {
+		return commandFailure(app, options.json, "context", contextData{Project: projectData, QueuedPlans: queued, QueueFrontier: frontier}, false, nil, championErr)
+	}
+	if champions == nil {
+		champions = []record.Champion{}
+	}
 	data := contextData{
 		Project:          projectData,
 		Counts:           countsFor(inventory),
 		QueuedPlans:      queued,
+		QueueFrontier:    frontier,
+		Champions:        champions,
 		ProviderRefresh:  false,
 		LiveObservations: false,
 		ObservationScope: "local_canonical_records_only",
@@ -238,18 +255,31 @@ func renderContextHuman(data contextData) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "%s (%s)\n", data.Project.Name, data.Project.ID)
 	fmt.Fprintf(&output, "Root: %s\n", data.Project.Root)
-	fmt.Fprintf(&output, "Records: plans=%d experiments=%d runs=%d attempts=%d findings=%d decisions=%d\n",
-		data.Counts.Plans, data.Counts.Experiments, data.Counts.Runs, data.Counts.Attempts, data.Counts.Findings, data.Counts.Decisions)
+	fmt.Fprintf(&output, "Records: ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
+		data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
+		data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
 	output.WriteString("Provider refresh: false; live observations: false (local canonical records only)\n")
 	if len(data.QueuedPlans) == 0 {
 		output.WriteString("Queued Plans: none\n")
-		return output.String()
+	} else {
+		output.WriteString("Queued Plans:\n")
+		writer := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
+		for _, plan := range data.QueuedPlans {
+			_, _ = fmt.Fprintf(writer, "  %s\t%s/%s\t%s\t%s\t%s\n", plan.Display, plan.Priority, plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
+		}
+		_ = writer.Flush()
 	}
-	output.WriteString("Queued Plans:\n")
-	writer := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-	for _, plan := range data.QueuedPlans {
-		_, _ = fmt.Fprintf(writer, "  %s\t%s/%s\t%s\t%s\t%s\n", plan.Display, plan.Priority, plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
+	if len(data.QueueFrontier) > 0 {
+		output.WriteString("Queue frontiers:\n")
+		for _, entry := range data.QueueFrontier {
+			fmt.Fprintf(&output, "  %s/%s  %.6g  %s  %s\n", entry.Pool, entry.Lane, entry.Score, entry.Plan, singleLineHuman(entry.Title))
+		}
 	}
-	_ = writer.Flush()
+	if len(data.Champions) > 0 {
+		output.WriteString("Champions:\n")
+		for _, champion := range data.Champions {
+			fmt.Fprintf(&output, "  %s  %s\n", champion.Target, champion.Release)
+		}
+	}
 	return output.String()
 }

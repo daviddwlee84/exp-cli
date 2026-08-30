@@ -21,10 +21,19 @@ printf '%s\n' \
 	'' \
 	'import (' \
 	'    "fmt"' \
+	'    "os"' \
 	'    "github.com/daviddwlee84/exp-cli/internal/cli"' \
 	')' \
 	'' \
-	'func main() { fmt.Printf("exp version %s\n", cli.Version) }' >"$source_dir/cmd/exp/main.go"
+	'func main() {' \
+	'    if len(os.Args) == 4 && os.Args[1] == "skill" && os.Args[2] == "install" && os.Args[3] == "--link" {' \
+	'        if marker := os.Getenv("EXP_SKILL_INSTALL_MARKER"); marker != "" {' \
+	'            if err := os.WriteFile(marker, []byte("called\n"), 0o600); err != nil { panic(err) }' \
+	'        }' \
+	'        return' \
+	'    }' \
+	'    fmt.Printf("exp version %s\n", cli.Version)' \
+	'}' >"$source_dir/cmd/exp/main.go"
 
 git -C "$source_dir" init -q
 git -C "$source_dir" config user.name "exp build regression"
@@ -137,13 +146,18 @@ if [ "$actual_make_version" != "exp version $make_expression" ]; then
 fi
 
 prefix="$work/prefix with spaces"
+skill_install_marker="$work/installed-binary-skill-install-called"
 (
 	cd "$source_dir"
-	PREFIX="$prefix" VERSION=portability-test make BINARY=exp-install-test install
+	EXP_SKILL_INSTALL_MARKER="$skill_install_marker" PREFIX="$prefix" VERSION=portability-test make BINARY=exp-install-test install
 )
 installed="$prefix/bin/exp-install-test"
 if [ ! -x "$installed" ]; then
 	printf 'expected executable was not installed at %s\n' "$installed" >&2
+	exit 1
+fi
+if [ ! -f "$skill_install_marker" ]; then
+	printf '%s\n' 'make install did not invoke the installed binary for skill install --link' >&2
 	exit 1
 fi
 actual_version=$("$installed" --version)

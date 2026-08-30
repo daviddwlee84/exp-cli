@@ -2,9 +2,19 @@
 
 ## Status of this contract
 
-The current walking-skeleton milestone implements receipt-backed project initialization, linked-worktree ID reservations, common-directory coordination, atomic no-clobber single-record creation, and canonical compare-and-swap replacement only where a safe atomic-exchange primitive is available. Canonical replacement fails closed on other platforms. Generated projections use their own rebuildable replacement path; they are not canonical transaction participants. The milestone does not claim a generalized multi-record transaction engine.
+The prepared multi-record journal and roll-forward recovery protocol in this
+document are implemented. They back Idea qualification, Queue mutation,
+dispatch preparation, Experiment closure, Candidate/Release/Promotion
+operations, harness migration coordination, and the public low-risk
+`exp record transaction` / `exp record recover` surface. Public raw transactions
+are restricted to Idea and ResourcePool changes; scientific lifecycle records
+must use their domain services.
 
-The prepared journal and recovery protocol below is the required design for the next lifecycle milestone, before `plan start`, `experiment conclude`, Finding belief transitions, or any other compound canonical mutation ships. Projections are derived and follow canonical publication; they are not transaction participants.
+Receipt-backed initialization, linked-worktree ID reservations, and
+single-record publication remain available. Canonical replacement still fails
+closed on a platform without the required safe compare-and-swap primitive.
+Generated projections use their own rebuildable replacement path and are never
+transaction participants.
 
 ## Shared coordination
 
@@ -29,7 +39,7 @@ The lock covers:
 - expected-revision checks;
 - candidate validation;
 - canonical publication;
-- journal recovery when the future journal protocol is implemented;
+- prepared-journal recovery before a new mutation reads candidate state;
 - projection refresh associated with the mutation.
 
 Lock acquisition honors context cancellation and reports the owner metadata when safely available. A process must not break a lock merely because a PID appears absent; platform advisory locking is authoritative.
@@ -48,15 +58,20 @@ This ordering makes crashes idempotent. Failure after receipt publication but be
 
 Reservations are repository-local durable non-reuse authority, not canonical record authority. A reservation left after a crash or failed publication intentionally burns the ID; record deletion does not remove it. Missing reservations for records still visible in a linked worktree are rebuilt by the pre-mutation scan. A tombstone for an ID absent from every current linked-worktree inventory cannot be reconstructed by that scan, so the reservations directory is not a disposable cache and must not be wholesale rebuilt or cleared. Conversely, a reservation without a canonical Markdown record does not create evidence or participate in relationships, lifecycle validation, rendering, or revisions.
 
-Ordinary record and relationship validation remains UUIDv7-only, including records carrying migration extensions. Reservation filenames do not authorize UUIDv5. Only the future fingerprinted migration engine may introduce deterministic UUIDv5 IDs after recomputing them from reviewed provenance; that engine must reserve those validated imported IDs under the same no-reuse rule.
+Ordinary native record and relationship creation remains UUIDv7-only, including
+records carrying migration extensions. Reservation filenames do not authorize
+UUIDv5. Only the explicit fingerprinted migration engine may introduce
+deterministic UUIDv5 IDs after recomputing them from reviewed provenance; it
+reserves those validated imported IDs under the same no-reuse rule.
 
-## Current single-record write
+## Single-record write
 
-The walking skeleton uses this complete sequence:
+The single-record path uses this sequence:
 
 1. Discover the Git repository and fixed `<git-root>/experiments` root.
 2. Resolve the Git common directory, acquire `exp/v1/lock`, and ensure private coordination directories have mode `0700`.
-3. Reject any nonempty `transactions/` directory. The walking skeleton does not recover or interpret journals; recognition and roll-forward belong to the next-milestone protocol below.
+3. Recover any prepared transaction journal before reading the mutation's own
+   candidate state; a conflict or unsupported journal blocks publication.
 4. Open the canonical root without following symlinks and clean only abandoned atomic temporary files.
 5. Enumerate present linked worktrees, load each fixed-root inventory, require valid inventories with one Project identity, and seed missing `0600` reservations for every canonical typed ID. Recheck that registered missing worktrees did not appear during the operation.
 6. Re-read the current worktree’s inventory while locked through the opened canonical root, applying the 8 MiB per-record bound and no-follow/identity checks.
@@ -72,7 +87,29 @@ A crash before canonical publication leaves the old record authoritative. A cras
 
 No process may validate, unlock, and then publish. No writer may write directly to a destination, use a cross-filesystem temp directory, or rely on rename without file and directory fsync.
 
-## Next-milestone prepared journal
+## Prepared journal
+
+The public machine request is strict JSON. `document` contains a complete
+canonical Markdown/TOML envelope; replace/delete operations require the exact
+current normalized revision.
+
+```json
+{
+  "schema_version": "exp.request.record-transaction/v1",
+  "operation": "reviewed.batch-update",
+  "changes": [
+    {
+      "operation": "replace",
+      "document": "+++\nschema = \"exp.idea/v1\"\n...\n+++\n\n# Updated Idea\n",
+      "expected_revision": "sha256:<normalized-record-revision>"
+    }
+  ]
+}
+```
+
+Use `exp record transaction --input request.json --json`. Domain commands are
+preferred when one exists because they construct and validate the scientific
+transition rather than asking the caller to author raw canonical documents.
 
 ### Journal location and identity
 
@@ -137,6 +174,11 @@ Still holding the lock, process entries in journal order:
 
 After each operation, fsync its parent directory. Re-read and hash the resulting destination (or confirm absence) before moving to the next entry. Progress need not be recorded because recovery derives it from destination hashes.
 
+After commit, exp retains only a bounded tail of committed journals for local
+diagnostics. UUID-scoped staging left before journal publication has no durable
+authority and is safely removed under the same common lock; an unknown artifact
+or published prepared journal still fails closed.
+
 After every destination matches `new_hash`/`absent`, atomically replace the journal with `phase = "committed"` and fsync its directories. Canonical publication is then complete. Projections are regenerated last from the committed inventory.
 
 Committed journals may be removed only after directory fsync; retaining them for bounded diagnostics is also safe. Cleanup policy must not affect correctness.
@@ -172,14 +214,21 @@ This prevents a generated-file conflict from blocking or corrupting scientific s
 
 ## Attempt markers
 
-Local direct execution may write:
+The private worker writes one terminal marker before finishing its SQLite job:
 
 ```text
-<git-common-dir>/exp/v1/attempts/<attempt-id>/start.json
-<git-common-dir>/exp/v1/attempts/<attempt-id>/terminal.json
+<git-common-dir>/exp/v1/attempts/job-<sha256-prefix-of-operational-job-id>.json
 ```
 
-Each file is bounded, secret-safe JSON and uses temp/fsync/rename publication. `start.json` records that execution began; `terminal.json` records a terminal operational observation. Its absence means `unknown`, even if a process is not found. Marker import is an explicit revision-checked mutation of the committed Attempt record. Markers are local coordination state, not scientific evidence and not substitutes for committed Attempt records.
+The fixed-size hash keeps attacker-controlled job IDs out of filenames. The
+bounded, secret-safe `exp.worker-terminal/v1` JSON includes the original job ID,
+canonical Attempt ID, fencing token, operational state, process timing, exit
+code, and optional result digest/size. Publication uses a private temporary,
+file fsync, rename, and directory fsync. The same job/fencing claim returns an
+existing marker instead of executing the workload again. Absence still means
+`unknown`, even if no process is found. Reconciliation imports the observation
+through a revision-checked canonical Attempt mutation; the marker is neither
+scientific evidence nor a substitute for the Attempt record.
 
 ## Required verification
 

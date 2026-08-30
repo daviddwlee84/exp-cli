@@ -1,113 +1,124 @@
 # Implementation roadmap
 
-Each milestone must deliver working behavior; command names are not added as inert stubs.
+The current release is the local research control-plane foundation. Milestones
+below separate delivered behavior from deliberate future integrations. Commands
+are added only when their behavior is functional.
 
-## Milestone 1: contracts and walking skeleton
+## Delivered: canonical research foundation
 
-Freeze the durable record, provider, privacy, projection, and future transaction contracts. Implement one local write/read/render path with no required provider.
+- fixed `<git-root>/experiments` discovery and idempotent initialization;
+- strict, versioned Markdown/TOML records with UUID identity, privacy checks,
+  graph validation, deterministic projections, and stable JSON envelopes;
+- linked-worktree ID reservations and Git-common locking;
+- prepared multi-record create/replace/delete transactions with exact-byte
+  journals, hash-checked roll-forward recovery, failure injection, and explicit
+  `record recover`;
+- local `record list/show/transaction`, `validate`, `render`, and `context`.
 
-Functional commands:
+## Delivered: research queue and agent collaboration
 
-```text
-exp init
-exp doctor [--json] [--live]
-exp plan add [flags | --input -] [--json]
-exp plan list [--json]
-exp validate [--json]
-exp render [--check]
-exp context [--json]
-exp skill print|install|check
-```
+- explicit `POLICY.md`, default-manual autonomy, controlled classification,
+  cluster saturation data, and 80/20 exploit/explore shares;
+- human or agent Ideas, parent Idea lineage, and atomic qualification into
+  resource-priced Plan v2 records;
+- named ResourcePools and ordered pool/lane Queue partitions;
+- transparent expected-value scoring, global listwise advice, order-swapped
+  adjacent pairwise battles, immutable audit records, and human-review fallback;
+- fresh single-shot agent CLI profiles with strict JSON Schema output,
+  environment allowlists, secret references, bounded output, and no SDK session.
 
-Required behavior:
+## Delivered: local execution control plane
 
-- discover only the fixed `<git-root>/experiments` root; ignore out-of-scope nested `PROJECT.md` files and defer named or multiple roots;
-- initialize idempotently without replacing an unrelated or harness-v0 tree;
-- create UUIDv7 Plans through strict TOML/Markdown validation, common-Git-directory locking, expected revisions, and atomic single-record publication;
-- render and byte-check deterministic README, roadmap, ledger, and decision projections;
-- read/validate/context locally without network or provider calls;
-- perform only `LookPath` executable discovery in default `doctor`; do not execute third-party `--version`, leaving versions and capabilities unknown until a future explicit adapter probe;
-- provide stable versioned JSON without prompts or stdout contamination;
-- embed/install/check a version-matched guidance skill without executing external skill scripts.
+- strict `.exp/runtime.json` bindings from Pools/Plans to Pueue groups and exact
+  workload argv/Git identity;
+- local frontier inspection, one-shot daemon tick, continuous daemon loop,
+  pause/resume, lease fencing, weighted fairness, and outbox recovery;
+- SQLite operational state under the Git common directory, never canonical;
+- sanitized Pueue status, audited private-worker submission, explicit cancel;
+- durable worker terminal markers and replay-safe completion;
+- isolated XDG Git worktrees and exact allowlisted experiment auto-commits,
+  without merge or cleanup authority;
+- read-only MLflow run verification; workloads own run creation and logging.
 
-This milestone does **not** implement Runs, Attempts, lifecycle transitions, harness migration, provider reads, or the generalized transaction journal merely because their contracts and fixtures exist.
+## Delivered: scientific closure and production boundary
 
-## Milestone 2: local vertical lifecycle
+- atomic Experiment closure, Plan completion, evidence dispositions, and
+  Finding publication;
+- revision-aware belief dependencies and stale-queue detection;
+- immutable EvaluationSpecs and Evaluations;
+- Candidate creation from supported evidence with full Git commit/ChangeSet;
+- typed Release slots and mandatory evaluated combination evidence for
+  multi-Candidate Releases;
+- sealed promotion-purpose evaluation, append-only human Promotion chains, and
+  derived Champion manifests.
 
-Close the full provider-free loop:
+## Delivered: compatibility and extension contracts
 
-```text
-plan start
-experiment list|show|conclude
-run add|wrap|attach|status
-a finding add/weaken/overturn path
-decision record|list|show
-search
-context for a selected experiment
-```
+- explicit harness-v0 migration plan/apply with exact-byte archive,
+  deterministic UUIDv5 identities, reviewed ambiguity resolutions, fingerprint
+  revalidation, and recoverable root swap;
+- provider-neutral `exp.search-adapter/v1` contract for idempotent Plan-scoped
+  Study open/ask/tell/prune/observe;
+- version-matched embedded skill and generated command reference;
+- repository-local Go 1.26.4 pin through `mise.toml`.
 
-Required foundation before those compound commands ship:
+## Next: harden unattended operation
 
-- prepared multi-record journal and idempotent hash-checked recovery;
-- design digest lock on first Attempt and explicit amendments;
-- Run as evidence unit and committed redacted Attempt records;
-- direct-process durable start/terminal markers;
-- explicit included/excluded Run dispositions at conclusion;
-- transactional Plan/Experiment/Finding/Decision transitions;
-- local resume context and complete stable JSON requests/responses.
+Priority work should improve recovery and observability without weakening the
+authority model:
 
-Exit criterion: a human and an agent can complete `plan -> experiment -> run -> attempt -> conclusion -> finding -> decision/action -> context` without an external provider, and process success never changes scientific state implicitly.
+- long-running daemon soak and crash tests around Pueue submit ambiguity,
+  expired job leases, worker interruption, and provider restart;
+- clearer bounded event/audit inspection for SQLite operations and outbox state;
+- policy-level semantic distinction between `assisted` and `limited` beyond the
+  shared explicit dispatch gate;
+- richer queue saturation and budget-consumption feedback from completed work;
+- first-class follow-up and combination Experiment creation, including a
+  supported path from an agent-prepared exact commit into a new executable
+  Plan/Attempt instead of hand-authored canonical records;
+- explicit holdout-budget consumption accounting and immutable Release
+  supersession ergonomics;
+- migration fixtures from more real harness-v0 layouts;
+- runtime Windows support only after process-tree and SQLite behavior is tested;
+  AIX remains an explicit operational-store non-support target.
 
-## Milestone 3: harness-v0 compatibility and migration
+## Next: concrete Plan-scoped search
 
-Add read-only compatibility before writes:
+Implement an Optuna adapter only after the integration can prove:
 
-```text
-exp migrate plan
-exp migrate apply
-```
+1. supported Optuna/storage versions and safe capability probes;
+2. durable idempotency for `open`, `ask`, `tell`, and `prune`;
+3. recovery for timeout-after-provider-commit ambiguity;
+4. secret-reference-only storage configuration;
+5. multi-objective and trial-state mapping;
+6. bounded, structurally sanitized observations.
 
-Also allow local list/show/search/validate/context over harness-v0 input where meaning is available. Migration must use deterministic UUIDv5, preserve `#NNN`/`F-NNN`, bodies, exact source bytes and unknown spans, require a fingerprinted reviewed plan, and retain ambiguity as `needs_review`. Test against a sanitized real-world tree; never execute legacy scripts or infer repairs.
+Optuna remains subordinate to one Plan revision. It will not replace the global
+Queue or allocate ResourcePools.
 
-## Milestone 4: provider reads
+## Later provider capabilities
 
-Add adapters one capability at a time, with explicit refresh only:
+Add external operations one verified capability at a time:
 
-1. **Pueue 4.x**: status/groups/bounded logs; structurally remove `envs` before any result crosses the adapter boundary.
-2. **MLflow 3.9**: native JSON/stdout CSV reads first; URI redaction; optional explicit SDK/REST only where CLI coverage is absent.
-3. **DVC**: local discovery and verified repository reads after a real binary/version is available; otherwise `unsupported` or `raw_only`.
-4. **Slurm**: named site/version probes, verified JSON or fixed `--parsable2` fields, accounting fallback, preserved native reasons, and no `--export=ALL`.
+- richer Pueue observation/cancellation reconciliation and bounded logs;
+- MLflow artifact/registry reads only where the CLI has a stable safe surface;
+- DVC artifact and queue reads, then narrowly scoped writes;
+- named-site Slurm probes and scheduling with explicit environment export;
+- notebook runners as workload entrypoints, not durable schedulers.
 
-Provider absence remains nonfatal. Default context/status remains local. Caches are disposable dated observations.
-
-## Milestone 5: controlled writes and runners
-
-Only after read parsing, effects, and secret policy are stable:
-
-- Pueue submit/wait/cancel through one durable Attempt owner;
-- Marimo and Jupyter preparation/execution through direct process or a selected Scheduler;
-- DVC queue/artifact operations capability-by-capability;
-- Slurm submit/cancel after testing a real site;
-- narrowly verified MLflow artifact/registry reads and, later, explicit writes.
-
-Every mutation first exposes a reviewable argument-array plan and effect set. No adapter installs packages, starts services, authenticates, or downloads implicitly.
+Every new mutation must declare effects, preserve argument boundaries, expose
+reviewable identity, and avoid implicit installation, authentication, daemon
+startup, or artifact download.
 
 ## Explicitly deferred
 
-The roadmap does not currently promise:
-
-- a TUI or mandatory FTS index;
-- dynamic Go plugins;
-- sweep or DAG orchestration;
-- per-trial registration for tracker-owned sweeps;
-- standardized metrics or `exp compare`;
-- artifact transfer, garbage collection, or retention management;
-- registry mutation in early provider milestones;
-- W&B, Kaggle, Ray, Kubernetes, Azure ML, Databricks, Modal, RunPod, or general cloud adapters;
-- control of consumer Colab browser sessions;
-- multiple experiments roots in one Git repository;
-- cross-repository knowledge graphs;
-- automatic TODO/backlog/pitfall/invariant mutation;
-- automatic scientific interpretation or generated verdicts.
-
-A deferred item enters the roadmap only with a verified upstream control surface, explicit authority and effects, secret-safe fixtures, and a vertical user outcome that cannot be achieved cleanly with the upstream CLI itself.
+- automatic production deployment or rollback execution;
+- agent-approved Promotion;
+- a universal cloud scheduler or model registry abstraction;
+- W&B, Kaggle, Ray, Kubernetes, Azure ML, Databricks, Modal, RunPod, or generic
+  browser-session control;
+- multiple `experiments/` roots in one repository or cross-repository graphs;
+- dynamic Go plugins, a mandatory FTS index, or a TUI;
+- raw telemetry/log mirroring and artifact-byte storage;
+- assuming gains from independent Candidates combine without a dedicated
+  Experiment and Evaluation.

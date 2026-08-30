@@ -21,13 +21,25 @@ type projectView struct {
 }
 
 type recordCounts struct {
-	Plans       int `json:"plans"`
-	Experiments int `json:"experiments"`
-	Runs        int `json:"runs"`
-	Attempts    int `json:"attempts"`
-	Findings    int `json:"findings"`
-	Decisions   int `json:"decisions"`
-	Total       int `json:"total"`
+	Policy          int `json:"policy"`
+	Ideas           int `json:"ideas"`
+	ResourcePools   int `json:"resource_pools"`
+	Queues          int `json:"queues"`
+	QueueAdvice     int `json:"queue_advice"`
+	Battles         int `json:"battles"`
+	Plans           int `json:"plans"`
+	Experiments     int `json:"experiments"`
+	Runs            int `json:"runs"`
+	Attempts        int `json:"attempts"`
+	EvaluationSpecs int `json:"evaluation_specs"`
+	Evaluations     int `json:"evaluations"`
+	Findings        int `json:"findings"`
+	Candidates      int `json:"candidates"`
+	Releases        int `json:"releases"`
+	PromotionSpecs  int `json:"promotion_specs"`
+	Promotions      int `json:"promotions"`
+	Decisions       int `json:"decisions"`
+	Total           int `json:"total"`
 }
 
 type payoffView struct {
@@ -81,12 +93,23 @@ type renderData struct {
 }
 
 type contextData struct {
-	Project          projectView  `json:"project"`
-	Counts           recordCounts `json:"counts"`
-	QueuedPlans      []planView   `json:"queued_plans"`
-	ProviderRefresh  bool         `json:"provider_refresh"`
-	LiveObservations bool         `json:"live_observations"`
-	ObservationScope string       `json:"observation_scope"`
+	Project          projectView           `json:"project"`
+	Counts           recordCounts          `json:"counts"`
+	QueuedPlans      []planView            `json:"queued_plans"`
+	QueueFrontier    []contextFrontierView `json:"queue_frontier"`
+	Champions        []record.Champion     `json:"champions"`
+	ProviderRefresh  bool                  `json:"provider_refresh"`
+	LiveObservations bool                  `json:"live_observations"`
+	ObservationScope string                `json:"observation_scope"`
+}
+
+type contextFrontierView struct {
+	Queue string  `json:"queue"`
+	Pool  string  `json:"pool"`
+	Lane  string  `json:"lane"`
+	Plan  string  `json:"plan"`
+	Title string  `json:"title"`
+	Score float64 `json:"score"`
 }
 
 type doctorCapabilityView struct {
@@ -129,23 +152,39 @@ func countsFor(inventory *record.Inventory) recordCounts {
 		return recordCounts{}
 	}
 	counts := recordCounts{
-		Plans:       len(inventory.OfKind(research.KindPlan)),
-		Experiments: len(inventory.OfKind(research.KindExperiment)),
-		Runs:        len(inventory.OfKind(research.KindRun)),
-		Attempts:    len(inventory.OfKind(research.KindAttempt)),
-		Findings:    len(inventory.OfKind(research.KindFinding)),
-		Decisions:   len(inventory.OfKind(research.KindDecision)),
+		Ideas:           len(inventory.OfKind(research.KindIdea)),
+		ResourcePools:   len(inventory.OfKind(research.KindResourcePool)),
+		Queues:          len(inventory.OfKind(research.KindQueue)),
+		QueueAdvice:     len(inventory.OfKind(research.KindQueueAdvice)),
+		Battles:         len(inventory.OfKind(research.KindBattle)),
+		Plans:           len(inventory.OfKind(research.KindPlan)),
+		Experiments:     len(inventory.OfKind(research.KindExperiment)),
+		Runs:            len(inventory.OfKind(research.KindRun)),
+		Attempts:        len(inventory.OfKind(research.KindAttempt)),
+		EvaluationSpecs: len(inventory.OfKind(research.KindEvaluationSpec)),
+		Evaluations:     len(inventory.OfKind(research.KindEvaluation)),
+		Findings:        len(inventory.OfKind(research.KindFinding)),
+		Candidates:      len(inventory.OfKind(research.KindCandidate)),
+		Releases:        len(inventory.OfKind(research.KindRelease)),
+		PromotionSpecs:  len(inventory.OfKind(research.KindPromotionSpec)),
+		Promotions:      len(inventory.OfKind(research.KindPromotion)),
+		Decisions:       len(inventory.OfKind(research.KindDecision)),
 	}
-	counts.Total = counts.Plans + counts.Experiments + counts.Runs + counts.Attempts + counts.Findings + counts.Decisions
+	if inventory.Policy != nil {
+		counts.Policy = 1
+	}
+	counts.Total = counts.Policy + counts.Ideas + counts.ResourcePools + counts.Queues + counts.QueueAdvice + counts.Battles +
+		counts.Plans + counts.Experiments + counts.Runs + counts.Attempts + counts.EvaluationSpecs + counts.Evaluations +
+		counts.Findings + counts.Candidates + counts.Releases + counts.PromotionSpecs + counts.Promotions + counts.Decisions
 	return counts
 }
 
 func makePlanViews(info *project.Info, documents []*record.Document) ([]planView, error) {
-	candidates := make([]research.Candidate, 0, len(documents))
+	candidates := make([]research.ReferenceCandidate, 0, len(documents))
 	for _, document := range documents {
 		id, ok := document.ID()
 		if ok && id.Kind() == research.KindPlan {
-			candidates = append(candidates, research.Candidate{ID: id})
+			candidates = append(candidates, research.ReferenceCandidate{ID: id})
 		}
 	}
 	views := make([]planView, 0, len(documents))

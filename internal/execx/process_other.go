@@ -8,3 +8,5 @@ import "os/exec"
 // on Windows. Descendant termination requires Job Object integration, which is
 // not implemented or claimed by this milestone.
 func configureProcessCancellation(_ *exec.Cmd) {}
+
+func cleanupProcessGroup(_ *exec.Cmd) error { return nil }

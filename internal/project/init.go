@@ -161,6 +161,9 @@ func Initialize(ctx context.Context, request InitRequest, options ...InitOption)
 				}
 			}
 		case receipt != nil:
+			if project, ok := receipt.document.Record.(*research.Project); ok && project.ProjectID.IsImported() {
+				return errors.New("an imported Project receipt cannot initialize a worktree without its authenticated canonical archive")
+			}
 			selectedDocument = receipt.document.Clone()
 			selectedContent = append([]byte(nil), receipt.content...)
 		default:
@@ -386,7 +389,7 @@ func ensureCanonicalRootDirectories(rootPath string, syncHook func(string) error
 	if chmodErr != nil || closeErr != nil {
 		return nil, errors.Join(chmodErr, closeErr)
 	}
-	for _, name := range []string{record.PlansDir, record.FindingsDir, record.DecisionsDir} {
+	for _, name := range record.CanonicalFlatDirs() {
 		directory, directoryCreated, err := pathx.EnsureRootAtNoSymlinks(experiments, name, 0o755)
 		if err != nil {
 			return nil, fmt.Errorf("create canonical directory %s: %w", name, err)

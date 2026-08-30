@@ -21,14 +21,31 @@ func Validate(record Record) error {
 	}
 	validateExtensions(record.GetExtensions(), collector)
 
-	expectedSchema, schemaErr := record.GetKind().Schema()
-	if schemaErr != nil || record.GetSchema() != expectedSchema {
+	schemaKind, schemaErr := KindForSchema(record.GetSchema())
+	if schemaErr != nil || schemaKind != record.GetKind() {
 		collector.add("record.schema", "schema", "schema %q does not match %s", record.GetSchema(), record.GetKind())
 	}
 
 	switch value := record.(type) {
 	case *Project:
 		validateProject(value, collector)
+	case *Policy:
+		validatePolicy(value, collector)
+	case *Idea:
+		validateCommon(record, &value.Common, collector)
+		validateIdea(value, collector)
+	case *ResourcePool:
+		validateCommon(record, &value.Common, collector)
+		validateResourcePool(value, collector)
+	case *Queue:
+		validateCommon(record, &value.Common, collector)
+		validateQueue(value, collector)
+	case *QueueAdvice:
+		validateCommon(record, &value.Common, collector)
+		validateQueueAdvice(value, collector)
+	case *Battle:
+		validateCommon(record, &value.Common, collector)
+		validateBattle(value, collector)
 	case *Plan:
 		validateCommon(record, &value.Common, collector)
 		validatePlan(value, collector)
@@ -41,9 +58,27 @@ func Validate(record Record) error {
 	case *Attempt:
 		validateCommon(record, &value.Common, collector)
 		validateAttempt(value, collector)
+	case *EvaluationSpec:
+		validateCommon(record, &value.Common, collector)
+		validateEvaluationSpec(value, collector)
+	case *Evaluation:
+		validateCommon(record, &value.Common, collector)
+		validateEvaluation(value, collector)
 	case *Finding:
 		validateCommon(record, &value.Common, collector)
 		validateFinding(value, collector)
+	case *Candidate:
+		validateCommon(record, &value.Common, collector)
+		validateCandidate(value, collector)
+	case *Release:
+		validateCommon(record, &value.Common, collector)
+		validateRelease(value, collector)
+	case *PromotionSpec:
+		validateCommon(record, &value.Common, collector)
+		validatePromotionSpec(value, collector)
+	case *Promotion:
+		validateCommon(record, &value.Common, collector)
+		validatePromotion(value, collector)
 	case *Decision:
 		validateCommon(record, &value.Common, collector)
 		validateDecision(value, collector)
@@ -154,6 +189,7 @@ func validatePlan(plan *Plan, collector *issueCollector) {
 	if plan.ExpectedPayoff.Estimate != nil && !finite(*plan.ExpectedPayoff.Estimate) {
 		collector.add("plan.payoff_estimate", "expected_payoff.estimate", "payoff estimate must be finite")
 	}
+	validatePlanVersion(plan, collector)
 }
 
 func validateExperiment(experiment *Experiment, collector *issueCollector) {
@@ -219,8 +255,12 @@ func validateDesign(experiment *Experiment, collector *issueCollector) {
 	}
 	switch design.Kind {
 	case ExperimentSingleFactor, ExperimentFactorial, ExperimentObservational:
+	case ExperimentReplication, ExperimentSweep, ExperimentCombination:
+		if experiment.Schema != SchemaExperimentV2 {
+			collector.add("record.schema_field", "design.kind", "replication, sweep, and combination require exp.experiment/v2")
+		}
 	default:
-		collector.add("experiment.design_kind", "design.kind", "kind must be single_factor, factorial, or observational")
+		collector.add("experiment.design_kind", "design.kind", "kind is not recognized")
 	}
 	if design.SecondaryFactors == nil {
 		collector.add("record.list_required", "design.secondary_factors", "required array must be present, even when empty")
@@ -279,6 +319,7 @@ func validateDesign(experiment *Experiment, collector *issueCollector) {
 			collector.add("experiment.amendment_chain", "design.design_digest", "the current design digest must equal the final amendment's new_digest")
 		}
 	}
+	validateExperimentVersion(experiment, collector)
 }
 
 func validateConclusion(experiment *Experiment, collector *issueCollector) {
@@ -296,6 +337,7 @@ func validateConclusion(experiment *Experiment, collector *issueCollector) {
 		collector.add("experiment.evidence", "conclusion.evidence", "a conclusion requires at least one Run evidence entry")
 	}
 	seen := map[string]struct{}{}
+	included := 0
 	for index, evidence := range conclusion.Evidence {
 		field := fmt.Sprintf("conclusion.evidence[%d]", index)
 		validateReferenceKind(evidence.Run, KindRun, field+".run", collector)
@@ -307,6 +349,7 @@ func validateConclusion(experiment *Experiment, collector *issueCollector) {
 		}
 		switch evidence.Disposition {
 		case EvidenceIncluded:
+			included++
 		case EvidenceExcluded:
 			if !nonempty(evidence.Reason) {
 				collector.add("experiment.evidence_reason", field+".reason", "excluded evidence requires a reason")
@@ -315,6 +358,9 @@ func validateConclusion(experiment *Experiment, collector *issueCollector) {
 			collector.add("experiment.evidence_disposition", field+".disposition", "disposition must be included or excluded")
 		}
 		validateCommitSafeString(evidence.Reason, field+".reason", collector)
+	}
+	if (experiment.Verdict == VerdictSupported || experiment.Verdict == VerdictRefuted) && included == 0 {
+		collector.add("experiment.evidence", "conclusion.evidence", "supported and refuted verdicts require at least one included Run")
 	}
 }
 
@@ -382,6 +428,7 @@ func validateAttempt(attempt *Attempt, collector *issueCollector) {
 	if attempt.Terminal != nil {
 		validateTerminal(attempt, collector)
 	}
+	validateAttemptVersion(attempt, collector)
 }
 
 func isTerminalState(state AttemptState) bool {

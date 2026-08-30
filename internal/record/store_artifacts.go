@@ -20,13 +20,13 @@ import (
 
 const coordinationRelative = "exp/v1"
 
-func (store *Store) rejectTransactionArtifactsReadOnly() error {
+func (store *Store) inspectTransactionArtifactsReadOnly(ctx context.Context, canonical *os.Root) error {
 	common, err := pathx.OpenCanonicalRootNoSymlinks(store.GitCommonDir)
 	if err != nil {
 		return fmt.Errorf("open Git common directory: %w", err)
 	}
 	defer common.Close()
-	coordination, err := pathx.OpenRootAtNoSymlinks(common, "exp/v1")
+	coordination, err := pathx.OpenRootAtNoSymlinks(common, coordinationRelative)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -34,7 +34,10 @@ func (store *Store) rejectTransactionArtifactsReadOnly() error {
 		return fmt.Errorf("inspect Git-common coordination directory: %w", err)
 	}
 	defer coordination.Close()
-	return rejectTransactionArtifacts(coordination)
+	if err := inspectTransactionJournalsReadOnly(ctx, coordination, canonical); err != nil {
+		return err
+	}
+	return errors.Join(pathx.VerifyRootPath(store.GitCommonDir, common), pathx.VerifyRootPath(store.CoordinationDir(), coordination))
 }
 
 // CheckTransactionArtifacts refuses nonempty unknown transaction state without
@@ -161,7 +164,7 @@ func (store *Store) seedCanonicalIDReservations(ctx context.Context, coordinatio
 	if err != nil {
 		return err
 	}
-	if !currentInventory.Valid() {
+	if !currentInventory.Valid() && !onlyRepairableStaleness(currentInventory) {
 		return fmt.Errorf("current worktree inventory is invalid: %w", currentInventory.Error())
 	}
 	worktrees, err := gitx.Worktrees(ctx, repository.Root, gitx.ExecRunner{})
@@ -213,7 +216,7 @@ func (store *Store) seedCanonicalIDReservations(ctx context.Context, coordinatio
 		if loadErr != nil || verifyErr != nil || closeErr != nil {
 			return fmt.Errorf("load linked-worktree inventory %s: %w", rootPath, errors.Join(loadErr, verifyErr, closeErr))
 		}
-		if !inventory.Valid() {
+		if !inventory.Valid() && !onlyRepairableStaleness(inventory) {
 			return fmt.Errorf("linked-worktree inventory %s is invalid: %w", rootPath, inventory.Error())
 		}
 		if !sameProjectRecordIdentity(currentInventory.Project, inventory.Project) {

@@ -31,8 +31,8 @@ func TestRootInjectsContextStreamsAndProductThesis(t *testing.T) {
 	help := stdout.String()
 	for _, phrase := range []string{
 		"Git-native research control plane, not another tracker or scheduler",
-		"delegated to the upstream tools",
-		"walking-skeleton build",
+		"Private SQLite state coordinates leases and jobs",
+		"production Promotion always requires a named",
 	} {
 		if !strings.Contains(help, phrase) {
 			t.Errorf("help does not contain %q:\n%s", phrase, help)
@@ -50,15 +50,37 @@ func TestBareRootShowsOnlyApprovedFunctionalCommands(t *testing.T) {
 	if !strings.Contains(help, "Usage:") || !strings.Contains(help, "Available Commands:") {
 		t.Fatalf("bare root did not render command help:\n%s", help)
 	}
-	for _, command := range []string{"context", "doctor", "init", "plan", "render", "skill", "validate"} {
+	for _, command := range []string{"agent", "candidate", "champion", "context", "daemon", "doctor", "evaluation", "experiment", "idea", "init", "migrate", "plan", "policy", "pool", "promotion", "provider", "queue", "record", "release", "render", "skill", "validate"} {
 		if !strings.Contains(help, "  "+command) {
 			t.Errorf("bare root help is missing %q:\n%s", command, help)
 		}
 	}
-	for _, deferred := range []string{"experiment", "finding", "run", "provider", "migrate"} {
+	for _, deferred := range []string{"finding", "run"} {
 		if strings.Contains(help, "  "+deferred+" ") {
 			t.Errorf("bare root advertises deferred command %q:\n%s", deferred, help)
 		}
+	}
+}
+
+func TestRootSkillFlagUsesTheSkillPrintPath(t *testing.T) {
+	app := NewApp(t.Context(), nil, nil, nil)
+	const content = "embedded skill bytes without normalization\n"
+	renders := 0
+	app.RenderSkill = func() (string, error) {
+		renders++
+		return content, nil
+	}
+
+	rootFlag := invokeCommand(t, app, "", "--skill")
+	if rootFlag.err != nil || rootFlag.stdout != content || rootFlag.stderr != "" {
+		t.Fatalf("exp --skill = stdout %q stderr %q error %v", rootFlag.stdout, rootFlag.stderr, rootFlag.err)
+	}
+	printCommand := invokeCommand(t, app, "", "skill", "print")
+	if printCommand.err != nil || printCommand.stdout != content || printCommand.stderr != "" {
+		t.Fatalf("exp skill print = stdout %q stderr %q error %v", printCommand.stdout, printCommand.stderr, printCommand.err)
+	}
+	if rootFlag.stdout != printCommand.stdout || renders != 2 {
+		t.Fatalf("skill render path diverged: flag=%q command=%q renders=%d", rootFlag.stdout, printCommand.stdout, renders)
 	}
 }
 

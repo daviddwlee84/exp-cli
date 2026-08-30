@@ -86,7 +86,10 @@ func CleanupAtomicTempsRoot(root *os.Root) error {
 }
 
 func isAtomicWriterParent(parent string) bool {
-	if parent == "." || parent == PlansDir || parent == FindingsDir || parent == DecisionsDir {
+	if parent == "." {
+		return true
+	}
+	if _, flat := flatLayouts[parent]; flat {
 		return true
 	}
 	components := strings.Split(parent, "/")

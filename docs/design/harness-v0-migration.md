@@ -2,9 +2,11 @@
 
 ## Scope and status
 
-The unversioned experiment-knowledge-harness layout is named `harness-v0`. This document specifies future behavior: native read-only compatibility, its reader, and migration commands are not implemented by the walking skeleton and remain deferred until after the local lifecycle milestone.
-
-When added, compatibility and migration will be implemented in Go. They will not execute the legacy parser, mutating scripts, provenance helpers, or job wrappers.
+The unversioned experiment-knowledge-harness layout is named `harness-v0`.
+The Go lossless reader and the explicit `migrate plan` / `migrate apply` path
+are implemented. Native list/show/search/context compatibility over an
+unmigrated v0 tree is still deferred. The implementation never executes the
+legacy parser, mutating scripts, provenance helpers, or job wrappers.
 
 Recognized source surfaces are:
 
@@ -13,10 +15,11 @@ ROADMAP.md
 LEDGER.md
 INBOX.md
 <NNN>-<slug>/REPORT.md
-README.md and optional executive summaries (views only)
+README.md and other root-level Markdown summaries (views only)
 ```
 
-A v0 tree is legacy input, not malformed v1. Read-only commands report parsed records, raw spans, and diagnostics without rewriting any byte.
+A v0 tree is legacy input, not malformed v1. `migrate plan` reports parsed
+records, raw spans, and diagnostics without rewriting any source byte.
 
 ## Lossless reader
 
@@ -29,11 +32,14 @@ The reader first captures each source file as bytes and a SHA-256 hash. Parsing 
 
 Overlapping or unaccounted spans are a parser error. Unsupported YAML-like syntax, comments, unusual wrapping, custom sections, and malformed bullets remain unknown spans; the reader must not discard or normalize them. Invalid UTF-8 blocks semantic migration but remains reportable by hash and byte range.
 
-The compatibility view may normalize values for querying, but it always retains source coordinates and exact raw text. It never treats generated README tables or graphs as authority.
+The migration plan may normalize values for candidate construction, but it
+always retains source coordinates and exact archive hashes. It never treats
+generated README tables or graphs as authority.
 
 ## Deterministic migration identity
 
-New native records use UUIDv7. The future migration engine uses UUIDv5 only, so repeating a plan for identical source bytes yields identical IDs.
+New native records use UUIDv7. The migration engine uses UUIDv5 only, so
+repeating a plan for identical source bytes yields identical IDs.
 
 The fixed harness-v0 namespace is:
 
@@ -69,7 +75,11 @@ Stable source keys are:
 - Plan: `ROADMAP.md:<start-byte>:<end-byte>:<span-sha256>`;
 - Decision: `<source-path>:<start-byte>:<end-byte>:<span-sha256>` when an explicit action-bearing decision is unambiguous.
 
-The typed v1 prefix is added after UUID generation. The walking-skeleton validator rejects UUIDv5 regardless of extension presence. Only the future fingerprinted migration engine may accept a migrated record, after it recomputes the UUIDv5 from the reviewed source fingerprint and provenance; UUIDv5 is never used for ordinary creation or trusted merely because an extension is present.
+The typed v1 prefix is added after UUID generation. Ordinary `Decode`,
+`Encode`, and creation validation reject UUIDv5 regardless of extension
+presence. Inventory loading accepts an imported document only after it
+recomputes the UUIDv5 and verifies the extension's file and span hashes against
+the committed archive; an extension alone never authorizes UUIDv5.
 
 ## Mapping
 
@@ -94,7 +104,7 @@ Conservative status mapping is:
 | `inconclusive` | closed/concluded/inconclusive |
 | `superseded` | closed/superseded, but `needs_review` if the replacement is not explicit |
 
-A mapped conclusion still must satisfy v1 requirements. Missing verdict meaning, inconsistent dates, absent evidence disposition, ambiguous factors, or a status/body disagreement is `needs_review`; migration does not invent values merely to pass validation.
+A mapped conclusion still must satisfy v1 requirements. Missing verdict meaning, inconsistent dates, absent evidence disposition, ambiguous factors, or a status/body disagreement is `needs_review`; migration does not invent values merely to pass validation. The current migrator therefore requires `archive_only` for concluded reports that have no reviewed v1 Run evidence dispositions.
 
 Legacy `axis` text is preserved. A clearly single factor may map to `primary_factor`; multi-factor or ambiguous text remains in migration extension data and is `needs_review`. The migrator does not select a primary factor.
 
@@ -122,7 +132,13 @@ Create a Decision only for an explicit action-bearing statement with unambiguous
 
 ### Inbox
 
-Version 1 has no canonical Idea entity. `INBOX.md` is therefore never silently converted to Plans. Read-only compatibility exposes its parsed bullets as legacy items. Migration archives the file exactly, records each recognized item/span, and marks unresolved items `needs_review`. Adding a future Idea schema may provide a lossless canonical destination; until then, the archive is the retained source.
+The current migrator never silently upgrades `INBOX.md` bullets into qualified
+Plans or canonical Ideas. A v0 bullet lacks the controlled classification,
+origin, cluster, and other meaning required by the current Idea schema. The
+reader archives the file exactly, records each recognized item/span, and marks
+it `needs_review`; the supported conservative resolution is `archive_only`.
+After migration, a human may create a new native Idea while citing the archived
+span in its Markdown rationale.
 
 ### Generated and curated views
 
@@ -154,7 +170,34 @@ Unknown spans are not copied into free-form core fields. Their archive path, ran
 
 ## Plan/apply protocol
 
-`exp migrate plan` is read-only. It emits a versioned plan containing:
+`exp migrate plan` is read-only unless the caller explicitly supplies
+`--output`. Typical review flow is:
+
+```sh
+exp migrate plan --output draft.json
+# copy needs_review keys into a resolution file
+exp migrate plan --resolutions resolutions.json --output reviewed.json
+exp migrate apply --plan reviewed.json
+```
+
+The resolution input is strict JSON:
+
+```json
+{
+  "schema_version": "exp.migration-resolutions.harness-v0/v1",
+  "resolutions": [
+    {"key": "plan:ROADMAP.md:123:456:...", "action": "migrate"},
+    {"key": "inbox:INBOX.md:10:42:...", "action": "archive_only"}
+  ]
+}
+```
+
+`migrate` approves the exact candidate already shown in the plan;
+`archive_only` retains the bytes without creating a canonical record. Items
+without a valid conservative candidate (for example a concluded report with no
+v1 evidence disposition) only accept `archive_only`.
+
+The versioned plan contains:
 
 - reader and target schema versions;
 - exact source-tree fingerprint and per-file hashes;
@@ -175,11 +218,23 @@ A plan with unresolved `needs_review` is not applicable. Resolution is explicit 
 3. recomputes all UUIDv5 values and candidate hashes;
 4. requires all review items to have explicit resolutions;
 5. validates the complete v1 candidate inventory;
-6. publishes archive and canonical changes through the prepared multi-record transaction protocol;
-7. generates projections last;
+6. copies the complete legacy tree into a sibling stage, adds the exact archive
+   and canonical files, validates the provenance-backed candidate inventory,
+   and durably publishes a prepared journal under the Git common directory;
+7. generates projections last in the stage, then completes a recoverable
+   two-rename root swap while preserving the original root as a verified backup;
 8. reports exact old/new paths and revisions.
 
-Apply never reparses and makes new choices behind the reviewed plan. Reapplying an already completed plan is an idempotent no-op only when every destination hash matches.
+Apply re-reads only to re-fingerprint and verify exact spans; it never reparses
+semantic mappings or makes new choices behind the reviewed plan. A crash after
+either rename resumes from the prepared journal. The verified backup is removed
+only after the new root, archive, and inventory match. Reapplying an already
+completed plan is an idempotent no-op only when every destination hash matches.
+
+Migration preserves v0 meaning in v1-compatible records; it does not silently
+enable autonomous dispatch. After reviewing the migrated inventory, initialize
+`POLICY.md`, native ResourcePools, and Queues explicitly before qualifying new
+Plan v2 work.
 
 ## Required ambiguity diagnostics
 

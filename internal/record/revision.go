@@ -17,6 +17,17 @@ const revisionPrefix = "sha256:"
 // Encode validates, normalizes, and deterministically encodes one document.
 // Markdown body bytes are not reflowed or trimmed; only a missing final LF is added.
 func Encode(document *Document) ([]byte, error) {
+	return encodeWithValidator(document, research.Validate)
+}
+
+// EncodeImported deterministically encodes a migration candidate. It does not
+// authenticate provenance; migration callers must validate the completed
+// inventory against the exact source archive before publication.
+func EncodeImported(document *Document) ([]byte, error) {
+	return encodeWithValidator(document, research.ValidateImported)
+}
+
+func encodeWithValidator(document *Document, validate func(research.Record) error) ([]byte, error) {
 	if document == nil || document.Record == nil {
 		return nil, &Error{Code: "record.nil", Message: "document or typed record is nil", Err: ErrInvalidEnvelope}
 	}
@@ -29,7 +40,7 @@ func Encode(document *Document) ([]byte, error) {
 	if err := research.ValidateCommitSafeText(document.Body); err != nil {
 		return nil, &Error{Code: "record.body_privacy", Message: fmt.Sprintf("Markdown body is not safe to commit: %v", err), Err: err}
 	}
-	if err := research.Validate(document.Record); err != nil {
+	if err := validate(document.Record); err != nil {
 		return nil, err
 	}
 	normalized := research.Clone(document.Record)
@@ -37,12 +48,12 @@ func Encode(document *Document) ([]byte, error) {
 		return nil, &Error{Code: "record.type", Message: fmt.Sprintf("unsupported record type %T", document.Record), Err: ErrInvalidEnvelope}
 	}
 	research.Normalize(normalized)
-	if err := research.Validate(normalized); err != nil {
+	if err := validate(normalized); err != nil {
 		return nil, err
 	}
 	var front bytes.Buffer
 	encoder := toml.NewEncoder(&front)
-	if err := encoder.Encode(normalized); err != nil {
+	if err := encoder.Encode(frontMatterValue(normalized)); err != nil {
 		return nil, &Error{Code: "record.frontmatter", Message: fmt.Sprintf("encode front matter: %v", err), Err: ErrInvalidEnvelope}
 	}
 	if front.Len() == 0 || front.Bytes()[front.Len()-1] != '\n' {
@@ -63,7 +74,17 @@ func Encode(document *Document) ([]byte, error) {
 
 // Revision computes the normalized optimistic revision; it is never persisted.
 func Revision(document *Document) (string, error) {
-	content, err := Encode(document)
+	return revisionWithEncoder(document, Encode)
+}
+
+// RevisionImported computes a revision for a provenance-pending migration
+// candidate. Ordinary callers should use Revision.
+func RevisionImported(document *Document) (string, error) {
+	return revisionWithEncoder(document, EncodeImported)
+}
+
+func revisionWithEncoder(document *Document, encode func(*Document) ([]byte, error)) (string, error) {
+	content, err := encode(document)
 	if err != nil {
 		return "", err
 	}

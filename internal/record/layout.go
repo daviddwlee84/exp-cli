@@ -4,16 +4,29 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/daviddwlee84/exp-cli/internal/research"
 )
 
 const (
-	ProjectFile  = "PROJECT.md"
-	PlansDir     = "plans"
-	FindingsDir  = "findings"
-	DecisionsDir = "decisions"
+	ProjectFile        = "PROJECT.md"
+	PolicyFile         = "POLICY.md"
+	IdeasDir           = "ideas"
+	ResourcePoolsDir   = "resource-pools"
+	QueuesDir          = "queues"
+	QueueAdviceDir     = "queue-advice"
+	BattlesDir         = "battles"
+	PlansDir           = "plans"
+	EvaluationSpecsDir = "evaluation-specs"
+	EvaluationsDir     = "evaluations"
+	FindingsDir        = "findings"
+	CandidatesDir      = "candidates"
+	ReleasesDir        = "releases"
+	PromotionSpecsDir  = "promotion-specs"
+	PromotionsDir      = "promotions"
+	DecisionsDir       = "decisions"
 )
 
 var generatedProjectionNames = map[string]struct{}{
@@ -21,13 +34,56 @@ var generatedProjectionNames = map[string]struct{}{
 }
 
 var (
-	planNamePattern      = regexp.MustCompile(`^(plan_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
-	findingNamePattern   = regexp.MustCompile(`^(fnd_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
-	decisionNamePattern  = regexp.MustCompile(`^(dec_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
-	runNamePattern       = regexp.MustCompile(`^(run_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
-	attemptNamePattern   = regexp.MustCompile(`^(att_[0-9a-f-]{36})\.md$`)
-	experimentDirPattern = regexp.MustCompile(`^e-([0-9a-f]{8,32})-([a-z0-9]+(?:-[a-z0-9]+)*)$`)
+	ideaNamePattern          = regexp.MustCompile(`^(idea_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	poolNamePattern          = regexp.MustCompile(`^(pool_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	queueNamePattern         = regexp.MustCompile(`^(queue_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	adviceNamePattern        = regexp.MustCompile(`^(advice_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	battleNamePattern        = regexp.MustCompile(`^(battle_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	planNamePattern          = regexp.MustCompile(`^(plan_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	evalSpecNamePattern      = regexp.MustCompile(`^(evalspec_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	evaluationNamePattern    = regexp.MustCompile(`^(eval_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	findingNamePattern       = regexp.MustCompile(`^(fnd_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	candidateNamePattern     = regexp.MustCompile(`^(cand_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	releaseNamePattern       = regexp.MustCompile(`^(rel_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	promotionSpecNamePattern = regexp.MustCompile(`^(promspec_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	promotionNamePattern     = regexp.MustCompile(`^(prom_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	decisionNamePattern      = regexp.MustCompile(`^(dec_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	runNamePattern           = regexp.MustCompile(`^(run_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
+	attemptNamePattern       = regexp.MustCompile(`^(att_[0-9a-f-]{36})\.md$`)
+	experimentDirPattern     = regexp.MustCompile(`^e-([0-9a-f]{8,32})-([a-z0-9]+(?:-[a-z0-9]+)*)$`)
 )
+
+type flatLayout struct {
+	kind    research.Kind
+	pattern *regexp.Regexp
+}
+
+var flatLayouts = map[string]flatLayout{
+	IdeasDir:           {kind: research.KindIdea, pattern: ideaNamePattern},
+	ResourcePoolsDir:   {kind: research.KindResourcePool, pattern: poolNamePattern},
+	QueuesDir:          {kind: research.KindQueue, pattern: queueNamePattern},
+	QueueAdviceDir:     {kind: research.KindQueueAdvice, pattern: adviceNamePattern},
+	BattlesDir:         {kind: research.KindBattle, pattern: battleNamePattern},
+	PlansDir:           {kind: research.KindPlan, pattern: planNamePattern},
+	EvaluationSpecsDir: {kind: research.KindEvaluationSpec, pattern: evalSpecNamePattern},
+	EvaluationsDir:     {kind: research.KindEvaluation, pattern: evaluationNamePattern},
+	FindingsDir:        {kind: research.KindFinding, pattern: findingNamePattern},
+	CandidatesDir:      {kind: research.KindCandidate, pattern: candidateNamePattern},
+	ReleasesDir:        {kind: research.KindRelease, pattern: releaseNamePattern},
+	PromotionSpecsDir:  {kind: research.KindPromotionSpec, pattern: promotionSpecNamePattern},
+	PromotionsDir:      {kind: research.KindPromotion, pattern: promotionNamePattern},
+	DecisionsDir:       {kind: research.KindDecision, pattern: decisionNamePattern},
+}
+
+// CanonicalFlatDirs returns every reserved flat record directory.
+func CanonicalFlatDirs() []string {
+	directories := make([]string, 0, len(flatLayouts))
+	for directory := range flatLayouts {
+		directories = append(directories, directory)
+	}
+	sort.Strings(directories)
+	return directories
+}
 
 // Location is the identity information encoded by one canonical relative path.
 type Location struct {
@@ -39,12 +95,15 @@ type Location struct {
 	ExperimentPrefix string
 }
 
-// ClassifyPath recognizes every canonical v1 path. recognized is true for an
+// ClassifyPath recognizes every canonical path. recognized is true for an
 // invalid entry placed inside a reserved canonical location, so callers can
 // report it rather than silently treating it as unrelated Markdown.
 func ClassifyPath(relative string) (location Location, recognized bool, err error) {
 	if relative == ProjectFile {
 		return Location{Relative: relative, Kind: research.KindProject}, true, nil
+	}
+	if relative == PolicyFile {
+		return Location{Relative: relative, Kind: research.KindPolicy}, true, nil
 	}
 	if _, generated := generatedProjectionNames[relative]; generated {
 		return Location{}, false, nil
@@ -54,30 +113,23 @@ func ClassifyPath(relative string) (location Location, recognized bool, err erro
 	}
 	parts := strings.Split(relative, "/")
 	if len(parts) == 2 {
-		var kind research.Kind
-		var pattern *regexp.Regexp
-		switch parts[0] {
-		case PlansDir:
-			kind, pattern = research.KindPlan, planNamePattern
-		case FindingsDir:
-			kind, pattern = research.KindFinding, findingNamePattern
-		case DecisionsDir:
-			kind, pattern = research.KindDecision, decisionNamePattern
-		}
-		if pattern != nil {
-			match := pattern.FindStringSubmatch(parts[1])
+		if layout, found := flatLayouts[parts[0]]; found {
+			match := layout.pattern.FindStringSubmatch(parts[1])
 			if match == nil {
-				return Location{}, true, layoutError(relative, "filename does not match the canonical %s layout", kind)
+				return Location{}, true, layoutError(relative, "filename does not match the canonical %s layout", layout.kind)
 			}
-			id, parseErr := research.ParseIDForKind(match[1], kind)
+			id, parseErr := research.ParseIDForKind(match[1], layout.kind)
 			if parseErr != nil {
 				return Location{}, true, layoutError(relative, "%v", parseErr)
 			}
-			return Location{Relative: relative, Kind: kind, ID: id, Slug: match[2]}, true, nil
+			return Location{Relative: relative, Kind: layout.kind, ID: id, Slug: match[2]}, true, nil
 		}
 	}
-	if len(parts) > 0 && (parts[0] == PlansDir || parts[0] == FindingsDir || parts[0] == DecisionsDir) {
-		return Location{}, true, layoutError(relative, "nested path is not allowed in the reserved %s tree", parts[0])
+	if len(parts) > 0 {
+		_, reserved := flatLayouts[parts[0]]
+		if reserved {
+			return Location{}, true, layoutError(relative, "nested path is not allowed in the reserved %s tree", parts[0])
+		}
 	}
 	if len(parts) == 0 || !strings.HasPrefix(parts[0], "e-") {
 		return Location{}, false, nil
@@ -135,7 +187,7 @@ func ValidateDocumentPath(location Location, document *Document) error {
 	if location.Kind != document.Kind() {
 		return layoutError(location.Relative, "path is for %s but front matter is %s", location.Kind, document.Kind())
 	}
-	if location.Kind == research.KindProject {
+	if location.Kind == research.KindProject || location.Kind == research.KindPolicy {
 		return nil
 	}
 	id, ok := document.ID()
@@ -199,24 +251,49 @@ func PathForNew(value research.Record, inventory *Inventory) (string, error) {
 	if value.GetKind() == research.KindProject {
 		return ProjectFile, nil
 	}
+	if value.GetKind() == research.KindPolicy {
+		return PolicyFile, nil
+	}
 	id, ok := value.GetID()
 	if !ok {
 		return "", layoutError("", "%s record has no ID", value.GetKind())
 	}
 	common := value.GetCommon()
 	switch record := value.(type) {
+	case *research.Idea:
+		return path.Join(IdeasDir, id.String()+"-"+Slug(common.Title, "idea")+".md"), nil
+	case *research.ResourcePool:
+		return path.Join(ResourcePoolsDir, id.String()+"-"+Slug(common.Title, "pool")+".md"), nil
+	case *research.Queue:
+		return path.Join(QueuesDir, id.String()+"-"+Slug(common.Title, "queue")+".md"), nil
+	case *research.QueueAdvice:
+		return path.Join(QueueAdviceDir, id.String()+"-"+Slug(common.Title, "advice")+".md"), nil
+	case *research.Battle:
+		return path.Join(BattlesDir, id.String()+"-"+Slug(common.Title, "battle")+".md"), nil
 	case *research.Plan:
 		return path.Join(PlansDir, id.String()+"-"+Slug(common.Title, "plan")+".md"), nil
+	case *research.EvaluationSpec:
+		return path.Join(EvaluationSpecsDir, id.String()+"-"+Slug(common.Title, "evaluation-spec")+".md"), nil
+	case *research.Evaluation:
+		return path.Join(EvaluationsDir, id.String()+"-"+Slug(common.Title, "evaluation")+".md"), nil
 	case *research.Finding:
 		return path.Join(FindingsDir, id.String()+"-"+Slug(common.Title, "finding")+".md"), nil
+	case *research.Candidate:
+		return path.Join(CandidatesDir, id.String()+"-"+Slug(common.Title, "candidate")+".md"), nil
+	case *research.Release:
+		return path.Join(ReleasesDir, id.String()+"-"+Slug(common.Title, "release")+".md"), nil
+	case *research.PromotionSpec:
+		return path.Join(PromotionSpecsDir, id.String()+"-"+Slug(common.Title, "promotion-spec")+".md"), nil
+	case *research.Promotion:
+		return path.Join(PromotionsDir, id.String()+"-"+Slug(common.Title, "promotion")+".md"), nil
 	case *research.Decision:
 		return path.Join(DecisionsDir, id.String()+"-"+Slug(common.Title, "decision")+".md"), nil
 	case *research.Experiment:
-		var candidates []research.Candidate
+		var candidates []research.ReferenceCandidate
 		if inventory != nil {
 			for _, document := range inventory.OfKind(research.KindExperiment) {
 				candidateID, _ := document.ID()
-				candidates = append(candidates, research.Candidate{ID: candidateID})
+				candidates = append(candidates, research.ReferenceCandidate{ID: candidateID})
 			}
 		}
 		code, err := research.DisplayCode(id, candidates)

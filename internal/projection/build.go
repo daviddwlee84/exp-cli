@@ -17,7 +17,7 @@ type inventoryView struct {
 }
 
 func newView(inventory *record.Inventory) (*inventoryView, error) {
-	candidates := make([]research.Candidate, 0, len(inventory.Documents))
+	candidates := make([]research.ReferenceCandidate, 0, len(inventory.Documents))
 	for _, document := range inventory.Documents {
 		id, ok := document.ID()
 		if !ok {
@@ -28,7 +28,7 @@ func newView(inventory *record.Inventory) (*inventoryView, error) {
 		if common != nil {
 			aliases = append(aliases, common.LegacyAliases...)
 		}
-		candidates = append(candidates, research.Candidate{ID: id, Aliases: aliases})
+		candidates = append(candidates, research.ReferenceCandidate{ID: id, Aliases: aliases})
 	}
 
 	view := &inventoryView{
@@ -64,6 +64,37 @@ func (view *inventoryView) readme() string {
 		len(view.inventory.OfKind(research.KindFinding)),
 		len(view.inventory.OfKind(research.KindDecision)),
 	)
+	controlKinds := []research.Kind{
+		research.KindIdea, research.KindResourcePool, research.KindQueue,
+		research.KindQueueAdvice, research.KindBattle, research.KindEvaluationSpec,
+		research.KindEvaluation, research.KindCandidate, research.KindRelease,
+		research.KindPromotionSpec, research.KindPromotion,
+	}
+	controlCount := 0
+	for _, kind := range controlKinds {
+		controlCount += len(view.inventory.OfKind(kind))
+	}
+	if controlCount > 0 || view.inventory.Policy != nil {
+		output.WriteString("\n## Research control plane\n\n")
+		output.WriteString("| Policy | Ideas | Pools | Queues | Advice | Battles | Evaluations | Candidates | Releases | Promotions |\n")
+		output.WriteString("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		policyCount := 0
+		if view.inventory.Policy != nil {
+			policyCount = 1
+		}
+		fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |\n",
+			policyCount,
+			len(view.inventory.OfKind(research.KindIdea)),
+			len(view.inventory.OfKind(research.KindResourcePool)),
+			len(view.inventory.OfKind(research.KindQueue)),
+			len(view.inventory.OfKind(research.KindQueueAdvice)),
+			len(view.inventory.OfKind(research.KindBattle)),
+			len(view.inventory.OfKind(research.KindEvaluation)),
+			len(view.inventory.OfKind(research.KindCandidate)),
+			len(view.inventory.OfKind(research.KindRelease)),
+			len(view.inventory.OfKind(research.KindPromotion)),
+		)
+	}
 
 	output.WriteString("\n## Experiments\n\n")
 	experiments := view.documents(research.KindExperiment)
@@ -95,11 +126,22 @@ func (view *inventoryView) readme() string {
 	output.WriteString("\n## Research graph\n\n")
 	output.WriteString("```mermaid\nflowchart LR\n")
 	for _, kind := range []research.Kind{
+		research.KindIdea,
+		research.KindResourcePool,
+		research.KindQueue,
+		research.KindQueueAdvice,
+		research.KindBattle,
 		research.KindPlan,
 		research.KindExperiment,
 		research.KindRun,
 		research.KindAttempt,
+		research.KindEvaluationSpec,
+		research.KindEvaluation,
 		research.KindFinding,
+		research.KindCandidate,
+		research.KindRelease,
+		research.KindPromotionSpec,
+		research.KindPromotion,
 		research.KindDecision,
 	} {
 		for _, document := range view.documents(kind) {
@@ -131,6 +173,23 @@ func (view *inventoryView) roadmap() string {
 	var output strings.Builder
 	output.WriteString(generatedHeader)
 	output.WriteString("\n# Roadmap\n")
+	frontier := view.inventory.QueueFrontier()
+	if len(frontier) > 0 {
+		output.WriteString("\n## Canonical queue frontier\n\n")
+		output.WriteString("| Queue | Pool | Lane | Plan | Score |\n")
+		output.WriteString("|---|---|---|---|---:|\n")
+		for _, entry := range frontier {
+			queueDocument, _ := view.inventory.ByID(entry.Queue)
+			poolDocument, _ := view.inventory.ByID(entry.Pool)
+			planDocument, _ := view.inventory.ByID(entry.Entry.Plan)
+			fmt.Fprintf(&output, "| [%s](%s) | [%s](%s) | %s | [%s](%s) | %s |\n",
+				view.codes[entry.Queue], queueDocument.Path,
+				view.codes[entry.Pool], poolDocument.Path,
+				entry.Lane, view.codes[entry.Entry.Plan], planDocument.Path,
+				strconv.FormatFloat(entry.Entry.Score, 'g', -1, 64),
+			)
+		}
+	}
 	if len(plans) == 0 {
 		output.WriteString("\n_No plans._\n")
 		return output.String()
@@ -218,6 +277,19 @@ func (view *inventoryView) decisions() string {
 	var output strings.Builder
 	output.WriteString(generatedHeader)
 	output.WriteString("\n# Decisions\n")
+	champions, _ := view.inventory.CurrentChampions()
+	if len(champions) > 0 {
+		output.WriteString("\n## Current champions\n\n")
+		output.WriteString("| Target | Release | Promotion |\n")
+		output.WriteString("|---|---|---|\n")
+		for _, champion := range champions {
+			release, _ := view.inventory.ByID(champion.Release)
+			promotion, _ := view.inventory.ByID(champion.Promotion)
+			fmt.Fprintf(&output, "| %s | [%s](%s) | [%s](%s) |\n",
+				tableCell(champion.Target), view.codes[champion.Release], release.Path,
+				view.codes[champion.Promotion], promotion.Path)
+		}
+	}
 	if len(decisions) == 0 {
 		output.WriteString("\n_No decisions._\n")
 		return output.String()
@@ -263,6 +335,35 @@ func (view *inventoryView) graphEdges() []graphEdge {
 		seen[key] = struct{}{}
 		edges = append(edges, graphEdge{from: from, to: to})
 	}
+	for _, document := range view.documents(research.KindIdea) {
+		idea := document.Record.(*research.Idea)
+		for _, parent := range sortedIDs(idea.Parents) {
+			add(parent, idea.ID)
+		}
+		add(idea.ID, idea.ResultingPlan)
+		add(idea.ID, idea.MergedInto)
+	}
+	for _, document := range view.documents(research.KindQueue) {
+		queue := document.Record.(*research.Queue)
+		for _, partition := range queue.Partitions {
+			add(partition.Pool, queue.ID)
+			for _, entry := range partition.Entries {
+				add(entry.Plan, queue.ID)
+			}
+		}
+	}
+	for _, document := range view.documents(research.KindQueueAdvice) {
+		advice := document.Record.(*research.QueueAdvice)
+		add(advice.Queue, advice.ID)
+		add(advice.CandidatePlan, advice.ID)
+		add(advice.Pool, advice.ID)
+	}
+	for _, document := range view.documents(research.KindBattle) {
+		battle := document.Record.(*research.Battle)
+		add(battle.Advice, battle.ID)
+		add(battle.CandidatePlan, battle.ID)
+		add(battle.IncumbentPlan, battle.ID)
+	}
 
 	for _, document := range view.documents(research.KindPlan) {
 		plan := document.Record.(*research.Plan)
@@ -271,6 +372,9 @@ func (view *inventoryView) graphEdges() []graphEdge {
 		}
 		for _, assumption := range sortedIDs(plan.Assumptions) {
 			add(assumption, plan.ID)
+		}
+		for _, dependency := range plan.Dependencies {
+			add(dependency.Finding, plan.ID)
 		}
 	}
 	for _, document := range view.documents(research.KindRun) {
@@ -283,9 +387,52 @@ func (view *inventoryView) graphEdges() []graphEdge {
 	}
 	for _, document := range view.documents(research.KindExperiment) {
 		experiment := document.Record.(*research.Experiment)
+		for _, parent := range sortedIDs(experiment.Parents) {
+			add(parent, experiment.ID)
+		}
+		for _, candidate := range sortedIDs(experiment.CandidateInputs) {
+			add(candidate, experiment.ID)
+		}
 		if experiment.ClosureDetail != nil {
 			add(experiment.ID, experiment.ClosureDetail.SupersededBy)
 		}
+	}
+	for _, document := range view.documents(research.KindEvaluation) {
+		evaluation := document.Record.(*research.Evaluation)
+		add(evaluation.Spec, evaluation.ID)
+		add(evaluation.Subject, evaluation.ID)
+	}
+	for _, document := range view.documents(research.KindEvaluationSpec) {
+		spec := document.Record.(*research.EvaluationSpec)
+		add(spec.BudgetPool, spec.ID)
+	}
+	for _, document := range view.documents(research.KindCandidate) {
+		candidate := document.Record.(*research.Candidate)
+		add(candidate.Experiment, candidate.ID)
+		add(candidate.Evaluation, candidate.ID)
+		for _, parent := range sortedIDs(candidate.Parents) {
+			add(parent, candidate.ID)
+		}
+	}
+	for _, document := range view.documents(research.KindRelease) {
+		release := document.Record.(*research.Release)
+		for _, slot := range release.Slots {
+			add(slot.Candidate, release.ID)
+		}
+		add(release.CombinationExperiment, release.ID)
+		add(release.CombinationEvaluation, release.ID)
+		add(release.Evaluation, release.ID)
+	}
+	for _, document := range view.documents(research.KindPromotionSpec) {
+		spec := document.Record.(*research.PromotionSpec)
+		add(spec.EvaluationSpec, spec.ID)
+	}
+	for _, document := range view.documents(research.KindPromotion) {
+		promotion := document.Record.(*research.Promotion)
+		add(promotion.Spec, promotion.ID)
+		add(promotion.Previous, promotion.ID)
+		add(promotion.Challenger, promotion.ID)
+		add(promotion.Evaluation, promotion.ID)
 	}
 	for _, document := range view.documents(research.KindFinding) {
 		finding := document.Record.(*research.Finding)
@@ -429,6 +576,16 @@ func planStateHeading(value research.PlanState) string {
 
 func graphKind(kind research.Kind) string {
 	switch kind {
+	case research.KindIdea:
+		return "Idea"
+	case research.KindResourcePool:
+		return "Pool"
+	case research.KindQueue:
+		return "Queue"
+	case research.KindQueueAdvice:
+		return "Advice"
+	case research.KindBattle:
+		return "Battle"
 	case research.KindPlan:
 		return "Plan"
 	case research.KindExperiment:
@@ -437,8 +594,20 @@ func graphKind(kind research.Kind) string {
 		return "Run"
 	case research.KindAttempt:
 		return "Attempt"
+	case research.KindEvaluationSpec:
+		return "EvalSpec"
+	case research.KindEvaluation:
+		return "Evaluation"
 	case research.KindFinding:
 		return "Finding"
+	case research.KindCandidate:
+		return "Candidate"
+	case research.KindRelease:
+		return "Release"
+	case research.KindPromotionSpec:
+		return "PromotionSpec"
+	case research.KindPromotion:
+		return "Promotion"
 	case research.KindDecision:
 		return "Decision"
 	default:

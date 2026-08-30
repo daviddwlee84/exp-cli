@@ -8,7 +8,8 @@ const MigrationExtension = "io.github.daviddwlee84.exp-cli.harness-v0"
 // lower-case reverse-DNS namespace and each value is a TOML table.
 type Extensions map[string]map[string]any
 
-// Common contains fields shared by every non-Project record.
+// Common contains fields shared by every typed record. Project and the
+// singleton Policy are intentionally ID-less special records.
 type Common struct {
 	Schema        Schema    `toml:"schema"`
 	ID            ID        `toml:"id"`
@@ -77,15 +78,41 @@ type ExpectedPayoff struct {
 	Estimate *float64 `toml:"estimate,omitempty"`
 }
 
+type FindingDependency struct {
+	Finding      ID     `toml:"finding"`
+	Revision     string `toml:"revision"`
+	BeliefDigest string `toml:"belief_digest"`
+}
+
+type ResourceNeed struct {
+	Pool           ID      `toml:"pool"`
+	Units          uint64  `toml:"units"`
+	EstimatedHours float64 `toml:"estimated_hours"`
+}
+
+type UtilityEstimate struct {
+	Probability     float64 `toml:"probability"`
+	Impact          float64 `toml:"impact"`
+	InformationGain float64 `toml:"information_gain"`
+	UnblockValue    float64 `toml:"unblock_value"`
+	RiskPenalty     float64 `toml:"risk_penalty"`
+}
+
 type Plan struct {
 	Common
-	Priority            Priority       `toml:"priority"`
-	Effort              Effort         `toml:"effort"`
-	State               PlanState      `toml:"state"`
-	Assumptions         []ID           `toml:"assumptions,omitempty"`
-	ResultingExperiment ID             `toml:"resulting_experiment,omitempty"`
-	ExpectedPayoff      ExpectedPayoff `toml:"expected_payoff"`
-	Extensions          Extensions     `toml:"extensions,omitempty"`
+	Priority            Priority            `toml:"priority"`
+	Effort              Effort              `toml:"effort"`
+	State               PlanState           `toml:"state"`
+	Assumptions         []ID                `toml:"assumptions,omitempty"`
+	ResultingExperiment ID                  `toml:"resulting_experiment,omitempty"`
+	ExpectedPayoff      ExpectedPayoff      `toml:"expected_payoff"`
+	Idea                ID                  `toml:"idea,omitempty"`
+	PrimaryCluster      string              `toml:"primary_cluster,omitempty"`
+	Classification      *Classification     `toml:"classification,omitempty"`
+	Dependencies        []FindingDependency `toml:"dependencies,omitempty"`
+	Resources           []ResourceNeed      `toml:"resources,omitempty"`
+	Utility             *UtilityEstimate    `toml:"utility,omitempty"`
+	Extensions          Extensions          `toml:"extensions,omitempty"`
 }
 
 func (p *Plan) GetSchema() Schema         { return p.Schema }
@@ -125,6 +152,9 @@ const (
 	ExperimentSingleFactor  ExperimentKind = "single_factor"
 	ExperimentFactorial     ExperimentKind = "factorial"
 	ExperimentObservational ExperimentKind = "observational"
+	ExperimentReplication   ExperimentKind = "replication"
+	ExperimentSweep         ExperimentKind = "sweep"
+	ExperimentCombination   ExperimentKind = "combination"
 )
 
 type Design struct {
@@ -175,14 +205,16 @@ type Conclusion struct {
 
 type Experiment struct {
 	Common
-	Lifecycle     ExperimentLifecycle `toml:"lifecycle"`
-	Closure       ExperimentClosure   `toml:"closure,omitempty"`
-	Verdict       Verdict             `toml:"verdict,omitempty"`
-	Design        Design              `toml:"design"`
-	Amendments    []Amendment         `toml:"amendments,omitempty"`
-	ClosureDetail *ClosureDetail      `toml:"closure_detail,omitempty"`
-	Conclusion    *Conclusion         `toml:"conclusion,omitempty"`
-	Extensions    Extensions          `toml:"extensions,omitempty"`
+	Lifecycle       ExperimentLifecycle `toml:"lifecycle"`
+	Closure         ExperimentClosure   `toml:"closure,omitempty"`
+	Verdict         Verdict             `toml:"verdict,omitempty"`
+	Design          Design              `toml:"design"`
+	Amendments      []Amendment         `toml:"amendments,omitempty"`
+	ClosureDetail   *ClosureDetail      `toml:"closure_detail,omitempty"`
+	Conclusion      *Conclusion         `toml:"conclusion,omitempty"`
+	Parents         []ID                `toml:"parents,omitempty"`
+	CandidateInputs []ID                `toml:"candidate_inputs,omitempty"`
+	Extensions      Extensions          `toml:"extensions,omitempty"`
 }
 
 func (e *Experiment) GetSchema() Schema         { return e.Schema }
@@ -329,17 +361,25 @@ type Terminal struct {
 
 type Attempt struct {
 	Common
-	Run          ID            `toml:"run"`
-	State        AttemptState  `toml:"state"`
-	StateReason  string        `toml:"state_reason,omitempty"`
-	Runner       string        `toml:"runner"`
-	Scheduler    string        `toml:"scheduler"`
-	CWD          string        `toml:"cwd"`
-	Argv         []string      `toml:"argv"`
-	ExternalRefs []ExternalRef `toml:"external_refs,omitempty"`
-	Provenance   *Provenance   `toml:"provenance,omitempty"`
-	Terminal     *Terminal     `toml:"terminal,omitempty"`
-	Extensions   Extensions    `toml:"extensions,omitempty"`
+	Run           ID            `toml:"run"`
+	State         AttemptState  `toml:"state"`
+	StateReason   string        `toml:"state_reason,omitempty"`
+	Runner        string        `toml:"runner"`
+	Scheduler     string        `toml:"scheduler"`
+	CWD           string        `toml:"cwd"`
+	Argv          []string      `toml:"argv"`
+	ExternalRefs  []ExternalRef `toml:"external_refs,omitempty"`
+	Provenance    *Provenance   `toml:"provenance,omitempty"`
+	Terminal      *Terminal     `toml:"terminal,omitempty"`
+	Pool          ID            `toml:"pool,omitempty"`
+	Queue         ID            `toml:"queue,omitempty"`
+	QueueRevision uint64        `toml:"queue_revision,omitempty"`
+	Lane          ResearchLane  `toml:"lane,omitempty"`
+	DispatchID    string        `toml:"dispatch_id,omitempty"`
+	BaseCommit    string        `toml:"base_commit,omitempty"`
+	HeadCommit    string        `toml:"head_commit,omitempty"`
+	ChangeSet     []string      `toml:"change_set,omitempty"`
+	Extensions    Extensions    `toml:"extensions,omitempty"`
 }
 
 func (a *Attempt) GetSchema() Schema         { return a.Schema }

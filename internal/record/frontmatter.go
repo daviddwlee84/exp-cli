@@ -24,6 +24,17 @@ var (
 
 // Decode parses and validates one complete canonical Markdown record.
 func Decode(data []byte) (*Document, error) {
+	return decodeWithValidator(data, research.Validate)
+}
+
+// DecodeImported parses a candidate migration document while permitting the
+// UUIDv5 form. Callers must authenticate its migration extension against the
+// archived source tree before treating the result as canonical.
+func DecodeImported(data []byte) (*Document, error) {
+	return decodeWithValidator(data, research.ValidateImported)
+}
+
+func decodeWithValidator(data []byte, validate func(research.Record) error) (*Document, error) {
 	front, body, err := Split(data)
 	if err != nil {
 		return nil, err
@@ -34,6 +45,9 @@ func Decode(data []byte) (*Document, error) {
 	}
 	schema, err := exactSchemaSelector(raw)
 	if err != nil {
+		return nil, err
+	}
+	if err := preflightSchemaFields(raw, schema); err != nil {
 		return nil, err
 	}
 	kind, err := research.KindForSchema(schema)
@@ -61,7 +75,7 @@ func Decode(data []byte) (*Document, error) {
 			return nil, &Error{Code: "record.unknown_field", Message: fmt.Sprintf("unknown field(s): %v", fields), Err: ErrUnknownField}
 		}
 	}
-	if err := research.Validate(record); err != nil {
+	if err := validate(record); err != nil {
 		return nil, err
 	}
 	if err := research.ValidateCommitSafeText(string(body)); err != nil {
@@ -73,12 +87,34 @@ func Decode(data []byte) (*Document, error) {
 		return nil, &Error{Code: code, Message: fmt.Sprintf("Markdown body is not commit-safe: %v", err), Err: err}
 	}
 	document := &Document{Record: record, Body: string(body)}
-	revision, err := Revision(document)
+	revision, err := revisionWithEncoder(document, func(document *Document) ([]byte, error) {
+		return encodeWithValidator(document, validate)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("compute normalized revision: %w", err)
 	}
 	document.Revision = revision
 	return document, nil
+}
+
+// preflightSchemaFields keeps legacy decoders closed even though the in-memory
+// model also carries fields introduced by a later schema version.
+func preflightSchemaFields(raw map[string]any, schema research.Schema) error {
+	var forbidden []string
+	switch schema {
+	case research.SchemaPlan:
+		forbidden = []string{"idea", "primary_cluster", "classification", "dependencies", "resources", "utility"}
+	case research.SchemaExperiment:
+		forbidden = []string{"parents", "candidate_inputs"}
+	case research.SchemaAttempt:
+		forbidden = []string{"pool", "queue", "queue_revision", "lane", "dispatch_id", "base_commit", "head_commit", "change_set"}
+	}
+	for _, field := range forbidden {
+		if _, found := raw[field]; found {
+			return schemaPreflightError("record.unknown_field", field, fmt.Sprintf("field is not part of %s", schema), ErrUnknownField)
+		}
+	}
+	return nil
 }
 
 func openContainerPath(name string) bool {
@@ -304,6 +340,18 @@ func newRecord(kind research.Kind) research.Record {
 	switch kind {
 	case research.KindProject:
 		return &research.Project{}
+	case research.KindPolicy:
+		return &research.Policy{}
+	case research.KindIdea:
+		return &research.Idea{}
+	case research.KindResourcePool:
+		return &research.ResourcePool{}
+	case research.KindQueue:
+		return &research.Queue{}
+	case research.KindQueueAdvice:
+		return &research.QueueAdvice{}
+	case research.KindBattle:
+		return &research.Battle{}
 	case research.KindPlan:
 		return &research.Plan{}
 	case research.KindExperiment:
@@ -312,8 +360,20 @@ func newRecord(kind research.Kind) research.Record {
 		return &research.Run{}
 	case research.KindAttempt:
 		return &research.Attempt{}
+	case research.KindEvaluationSpec:
+		return &research.EvaluationSpec{}
+	case research.KindEvaluation:
+		return &research.Evaluation{}
 	case research.KindFinding:
 		return &research.Finding{}
+	case research.KindCandidate:
+		return &research.Candidate{}
+	case research.KindRelease:
+		return &research.Release{}
+	case research.KindPromotionSpec:
+		return &research.PromotionSpec{}
+	case research.KindPromotion:
+		return &research.Promotion{}
 	case research.KindDecision:
 		return &research.Decision{}
 	default:

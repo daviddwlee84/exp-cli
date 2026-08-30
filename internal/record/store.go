@@ -30,12 +30,17 @@ var (
 // ConflictError carries both optimistic revisions without exposing file content.
 type ConflictError struct {
 	ID       research.ID
+	Path     string
 	Expected string
 	Actual   string
 }
 
 func (e *ConflictError) Error() string {
-	return fmt.Sprintf("%s expected revision %q, current revision %q: %v", e.ID, e.Expected, e.Actual, ErrConflict)
+	target := e.ID.String()
+	if target == "" {
+		target = e.Path
+	}
+	return fmt.Sprintf("%s expected revision %q, current revision %q: %v", target, e.Expected, e.Actual, ErrConflict)
 }
 func (e *ConflictError) Unwrap() error { return ErrConflict }
 
@@ -74,6 +79,7 @@ type Store struct {
 	clock            func() time.Time
 	generate         research.UUIDGenerator
 	atomicHook       AtomicHook
+	transactionHook  TransactionHook
 	collisionLimit   int
 	coordinationRoot *os.Root
 	canonicalRoot    *os.Root
@@ -128,14 +134,14 @@ func (store *Store) Inventory(ctx context.Context) (*Inventory, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := store.rejectTransactionArtifactsReadOnly(); err != nil {
-		return nil, err
-	}
 	root, err := store.openCanonicalRoot()
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
+	if err := store.inspectTransactionArtifactsReadOnly(ctx, root); err != nil {
+		return nil, err
+	}
 	inventory, err := LoadInventoryRoot(ctx, root, store.Root)
 	if err != nil {
 		return nil, err
@@ -144,7 +150,7 @@ func (store *Store) Inventory(ctx context.Context) (*Inventory, error) {
 	if err := store.verifyCanonicalRoot(root); err != nil {
 		return nil, err
 	}
-	if err := store.rejectTransactionArtifactsReadOnly(); err != nil {
+	if err := store.inspectTransactionArtifactsReadOnly(ctx, root); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -165,28 +171,26 @@ func (store *Store) WithInventorySnapshot(ctx context.Context, operation func(*I
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return lockx.WithTrustedRoot(ctx, store.GitCommonDir, coordinationRelative, func(coordination *os.Root) error {
-		if err := rejectTransactionArtifacts(coordination); err != nil {
+	return store.withLockedRoots(ctx, func() error {
+		if err := CleanupAtomicTempsRoot(store.canonicalRoot); err != nil {
+			return fmt.Errorf("clean abandoned atomic temporaries: %w", err)
+		}
+		if err := store.recoverPreparedTransactionsLocked(ctx); err != nil {
 			return err
 		}
-		root, err := store.openCanonicalRoot()
-		if err != nil {
-			return err
-		}
-		defer root.Close()
-		inventory, err := LoadInventoryRoot(ctx, root, store.Root)
+		inventory, err := LoadInventoryRoot(ctx, store.canonicalRoot, store.Root)
 		if err != nil {
 			return err
 		}
 		inventory.boundVerify = func() error {
-			return errors.Join(store.verifyCanonicalRoot(root), pathx.VerifyRootPath(store.CoordinationDir(), coordination))
+			return store.verifyMutationRoots()
 		}
 		defer func() {
 			inventory.boundRoot = nil
 			inventory.boundVerify = nil
 		}()
 		operationErr := operation(inventory)
-		verificationErr := errors.Join(inventory.VerifySnapshot(ctx), store.verifyCanonicalRoot(root), rejectTransactionArtifacts(coordination))
+		verificationErr := errors.Join(inventory.VerifySnapshot(ctx), store.verifyMutationRoots(), inspectTransactionJournalsReadOnly(ctx, store.coordinationRoot, store.canonicalRoot))
 		if verificationErr != nil {
 			verificationErr = fmt.Errorf("canonical inventory changed during snapshot operation: %w", verificationErr)
 		}
@@ -259,18 +263,11 @@ func (store *Store) Update(ctx context.Context, replacement *Document, expectedR
 		candidate := replacement.Clone()
 		candidate.Path = current.Path
 		candidateDocuments := replaceDocument(inventory.Documents, id, candidate)
-		candidateInventory := InventoryFromDocuments(store.Root, candidateDocuments)
+		candidateInventory := candidateInventoryForBase(store.Root, candidateDocuments, inventory)
 		if !candidateInventory.Valid() {
 			return &InventoryError{Diagnostics: append([]Diagnostic(nil), candidateInventory.Diagnostics...)}
 		}
-		content, err := Encode(candidate)
-		if err != nil {
-			return err
-		}
-		if err := ValidateRecordSize(content); err != nil {
-			return err
-		}
-		normalized, err := Decode(content)
+		content, normalized, err := encodeCandidateForBase(candidate, inventory)
 		if err != nil {
 			return err
 		}
@@ -280,7 +277,7 @@ func (store *Store) Update(ctx context.Context, replacement *Document, expectedR
 		if err != nil {
 			return err
 		}
-		reloaded, err := Decode(currentBytes)
+		reloaded, err := decodeCanonicalDocument(currentBytes)
 		if err != nil {
 			return fmt.Errorf("re-read current record: %w", err)
 		}
@@ -312,18 +309,11 @@ func (store *Store) Update(ctx context.Context, replacement *Document, expectedR
 
 func (store *Store) createLocked(inventory *Inventory, candidate *Document) (*Document, error) {
 	candidateDocuments := append(cloneDocuments(inventory.Documents), candidate)
-	candidateInventory := InventoryFromDocuments(store.Root, candidateDocuments)
+	candidateInventory := candidateInventoryForBase(store.Root, candidateDocuments, inventory)
 	if !candidateInventory.Valid() {
 		return nil, &InventoryError{Diagnostics: append([]Diagnostic(nil), candidateInventory.Diagnostics...)}
 	}
-	content, err := Encode(candidate)
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidateRecordSize(content); err != nil {
-		return nil, err
-	}
-	normalized, err := Decode(content)
+	content, normalized, err := encodeCandidateForBase(candidate, inventory)
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +342,26 @@ func (store *Store) createLocked(inventory *Inventory, candidate *Document) (*Do
 }
 
 func (store *Store) withMutationLock(ctx context.Context, operation func() error) error {
+	return store.withLockedRoots(ctx, func() error {
+		if err := CleanupAtomicTempsRoot(store.canonicalRoot); err != nil {
+			return fmt.Errorf("clean abandoned atomic temporaries: %w", err)
+		}
+		if err := store.recoverPreparedTransactionsLocked(ctx); err != nil {
+			return err
+		}
+		if err := store.seedCanonicalIDReservations(ctx, store.coordinationRoot); err != nil {
+			return err
+		}
+		if err := store.verifyMutationRoots(); err != nil {
+			return err
+		}
+		return operation()
+	})
+}
+
+// withLockedRoots is the single integration seam for ordinary writes,
+// compound transactions, and recovery. Callers must hold store.mu.
+func (store *Store) withLockedRoots(ctx context.Context, operation func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -360,9 +370,6 @@ func (store *Store) withMutationLock(ctx context.Context, operation func() error
 	}
 	return lockx.WithTrustedRoot(ctx, store.GitCommonDir, coordinationRelative, func(coordination *os.Root) error {
 		if err := ensureCoordinationState(coordination); err != nil {
-			return err
-		}
-		if err := rejectTransactionArtifacts(coordination); err != nil {
 			return err
 		}
 		canonicalRoot, err := store.openCanonicalRoot()
@@ -377,12 +384,6 @@ func (store *Store) withMutationLock(ctx context.Context, operation func() error
 			store.canonicalRoot = nil
 			store.missingWorktrees = nil
 		}()
-		if err := CleanupAtomicTempsRoot(canonicalRoot); err != nil {
-			return fmt.Errorf("clean abandoned atomic temporaries: %w", err)
-		}
-		if err := store.seedCanonicalIDReservations(ctx, coordination); err != nil {
-			return err
-		}
 		if err := store.verifyMutationRoots(); err != nil {
 			return err
 		}
@@ -448,6 +449,22 @@ func validateImmutableUpdate(current, replacement *Document) error {
 	if replacementCommon.UpdatedAt.Before(currentCommon.UpdatedAt) {
 		return fmt.Errorf("updated_at cannot move backwards")
 	}
+	immutable := false
+	switch current.Kind() {
+	case research.KindQueueAdvice, research.KindBattle, research.KindEvaluation,
+		research.KindCandidate, research.KindPromotionSpec, research.KindPromotion,
+		research.KindFinding, research.KindDecision, research.KindEvaluationSpec,
+		research.KindRun:
+		immutable = true
+	case research.KindRelease:
+		immutable = true
+	case research.KindPlan:
+		state := current.Record.(*research.Plan).State
+		immutable = state == research.PlanCompleted || state == research.PlanDropped
+	}
+	if immutable && (!reflect.DeepEqual(current.Record, replacement.Record) || current.Body != replacement.Body) {
+		return fmt.Errorf("%s records are immutable once published in this state", current.Kind())
+	}
 	if currentExperiment, ok := current.Record.(*research.Experiment); ok {
 		replacementExperiment, replacementOK := replacement.Record.(*research.Experiment)
 		if !replacementOK {
@@ -457,10 +474,196 @@ func validateImmutableUpdate(current, replacement *Document) error {
 			return err
 		}
 	}
+	if currentPlan, ok := current.Record.(*research.Plan); ok {
+		replacementPlan, replacementOK := replacement.Record.(*research.Plan)
+		if !replacementOK {
+			return errors.New("Plan replacement has the wrong record type")
+		}
+		if err := validatePlanUpdate(currentPlan, replacementPlan); err != nil {
+			return err
+		}
+	}
+	if currentIdea, ok := current.Record.(*research.Idea); ok {
+		replacementIdea, replacementOK := replacement.Record.(*research.Idea)
+		if !replacementOK {
+			return errors.New("Idea replacement has the wrong record type")
+		}
+		if err := validateIdeaUpdate(currentIdea, replacementIdea); err != nil {
+			return err
+		}
+	}
+	if currentAttempt, ok := current.Record.(*research.Attempt); ok {
+		replacementAttempt, replacementOK := replacement.Record.(*research.Attempt)
+		if !replacementOK {
+			return errors.New("Attempt replacement has the wrong record type")
+		}
+		if terminalAttemptState(currentAttempt.State) && current.Body != replacement.Body {
+			return errors.New("terminal Attempt body is immutable")
+		}
+		if err := validateAttemptUpdate(currentAttempt, replacementAttempt); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+func validateIdeaUpdate(current, replacement *research.Idea) error {
+	if !current.ResultingPlan.IsZero() && current.ResultingPlan != replacement.ResultingPlan {
+		return errors.New("Idea resulting_plan is immutable once set")
+	}
+	if !current.MergedInto.IsZero() && current.MergedInto != replacement.MergedInto {
+		return errors.New("Idea merged_into is immutable once set")
+	}
+	if current.State == research.IdeaDismissed || current.State == research.IdeaMerged {
+		if !reflect.DeepEqual(current, replacement) {
+			return errors.New("dismissed and merged Ideas are immutable")
+		}
+		return nil
+	}
+	allowed := current.State == replacement.State
+	switch current.State {
+	case research.IdeaProposed:
+		allowed = allowed || replacement.State == research.IdeaDeveloping || replacement.State == research.IdeaQualified || replacement.State == research.IdeaDismissed || replacement.State == research.IdeaMerged
+	case research.IdeaDeveloping:
+		allowed = allowed || replacement.State == research.IdeaProposed || replacement.State == research.IdeaQualified || replacement.State == research.IdeaDismissed || replacement.State == research.IdeaMerged
+	case research.IdeaQualified:
+		allowed = allowed || replacement.State == research.IdeaQueued || replacement.State == research.IdeaDismissed
+	case research.IdeaQueued:
+		allowed = allowed || replacement.State == research.IdeaQualified || replacement.State == research.IdeaDismissed
+	}
+	if !allowed {
+		return fmt.Errorf("Idea state cannot transition from %s to %s", current.State, replacement.State)
+	}
+	if current.State == research.IdeaQualified || current.State == research.IdeaQueued {
+		left, right := *current, *replacement
+		left.State, right.State = "", ""
+		left.UpdatedAt, right.UpdatedAt = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(left, right) {
+			return errors.New("qualified Idea proposal and lineage fields are immutable")
+		}
+	}
+	return nil
+}
+
+func validatePlanUpdate(current, replacement *research.Plan) error {
+	if current.ResultingExperiment.IsZero() == false && current.ResultingExperiment != replacement.ResultingExperiment {
+		return errors.New("Plan resulting_experiment is immutable once set")
+	}
+	allowed := current.State == replacement.State ||
+		current.State == research.PlanQueued && (replacement.State == research.PlanStarted || replacement.State == research.PlanDropped) ||
+		current.State == research.PlanStarted && (replacement.State == research.PlanCompleted || replacement.State == research.PlanDropped)
+	if !allowed {
+		return fmt.Errorf("Plan state cannot transition from %s to %s", current.State, replacement.State)
+	}
+	if current.State == research.PlanStarted {
+		left, right := *current, *replacement
+		left.State, right.State = "", ""
+		left.UpdatedAt, right.UpdatedAt = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(left, right) {
+			return errors.New("started Plan preregistration fields are immutable")
+		}
+	}
+	if current.State == research.PlanQueued && replacement.State != research.PlanQueued {
+		left, right := *current, *replacement
+		left.State, right.State = "", ""
+		left.ResultingExperiment, right.ResultingExperiment = research.ID{}, research.ID{}
+		left.UpdatedAt, right.UpdatedAt = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(left, right) {
+			return errors.New("starting or dropping a Plan cannot rewrite its preregistration fields")
+		}
+	}
+	return nil
+}
+
+func validateAttemptUpdate(current, replacement *research.Attempt) error {
+	terminalRefinement := current.Terminal != nil && current.Terminal.Source == "pueue" && replacement.Terminal != nil && replacement.Terminal.Source == "direct" && terminalAttemptState(current.State) && terminalAttemptState(replacement.State)
+	immutableEqual := current.Title == replacement.Title && reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) && reflect.DeepEqual(current.Tags, replacement.Tags) &&
+		current.Run == replacement.Run && current.Runner == replacement.Runner && current.Scheduler == replacement.Scheduler && current.CWD == replacement.CWD &&
+		reflect.DeepEqual(current.Argv, replacement.Argv) && reflect.DeepEqual(current.Provenance, replacement.Provenance) && current.Pool == replacement.Pool &&
+		current.Queue == replacement.Queue && current.QueueRevision == replacement.QueueRevision && current.Lane == replacement.Lane && current.DispatchID == replacement.DispatchID &&
+		current.BaseCommit == replacement.BaseCommit && current.HeadCommit == replacement.HeadCommit && reflect.DeepEqual(current.ChangeSet, replacement.ChangeSet)
+	if !immutableEqual {
+		return errors.New("Attempt registration, execution, and Git identity fields are immutable")
+	}
+	if terminalAttemptState(current.State) && !terminalRefinement && current.StateReason != replacement.StateReason {
+		return errors.New("terminal Attempt state_reason is immutable")
+	}
+	if len(replacement.ExternalRefs) < len(current.ExternalRefs) {
+		return errors.New("Attempt external_refs are append-only")
+	}
+	for index := range current.ExternalRefs {
+		if !reflect.DeepEqual(current.ExternalRefs[index], replacement.ExternalRefs[index]) {
+			return fmt.Errorf("Attempt external_ref %d is immutable", index)
+		}
+	}
+	for namespace, table := range current.Extensions {
+		replacementTable, found := replacement.Extensions[namespace]
+		if !found {
+			return fmt.Errorf("Attempt extension namespace %s is append-only", namespace)
+		}
+		for key, value := range table {
+			if !reflect.DeepEqual(value, replacementTable[key]) {
+				return fmt.Errorf("Attempt extension %s.%s is immutable once recorded", namespace, key)
+			}
+		}
+	}
+	if !allowedAttemptTransition(current.State, replacement.State) && !terminalRefinement {
+		return fmt.Errorf("Attempt state cannot transition from %s to %s", current.State, replacement.State)
+	}
+	if current.Terminal != nil && !reflect.DeepEqual(current.Terminal, replacement.Terminal) {
+		if !terminalRefinement {
+			return errors.New("Attempt terminal observation is immutable once recorded")
+		}
+	}
+	return nil
+}
+
+func allowedAttemptTransition(current, replacement research.AttemptState) bool {
+	if current == replacement {
+		return true
+	}
+	if terminalAttemptState(current) {
+		return false
+	}
+	switch current {
+	case research.AttemptPlanned:
+		return replacement == research.AttemptQueued || replacement == research.AttemptBlocked || replacement == research.AttemptStarting || replacement == research.AttemptRunning || replacement == research.AttemptUnknown || terminalAttemptState(replacement)
+	case research.AttemptQueued:
+		return replacement == research.AttemptBlocked || replacement == research.AttemptStarting || replacement == research.AttemptRunning || replacement == research.AttemptUnknown || terminalAttemptState(replacement)
+	case research.AttemptBlocked:
+		return replacement == research.AttemptPlanned || replacement == research.AttemptQueued || replacement == research.AttemptUnknown || replacement == research.AttemptCancelled
+	case research.AttemptStarting:
+		return replacement == research.AttemptRunning || replacement == research.AttemptUnknown || terminalAttemptState(replacement)
+	case research.AttemptRunning, research.AttemptUnknown:
+		return replacement == research.AttemptQueued || replacement == research.AttemptBlocked || replacement == research.AttemptStarting || replacement == research.AttemptRunning || replacement == research.AttemptUnknown || terminalAttemptState(replacement)
+	default:
+		return false
+	}
+}
+
+func terminalAttemptState(state research.AttemptState) bool {
+	switch state {
+	case research.AttemptSucceeded, research.AttemptFailed, research.AttemptCancelled, research.AttemptTimedOut, research.AttemptPreempted, research.AttemptOutOfMemory:
+		return true
+	default:
+		return false
+	}
+}
+
 func validateExperimentUpdate(current, replacement *research.Experiment) error {
+	if current.Title != replacement.Title || !reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) || !reflect.DeepEqual(current.Tags, replacement.Tags) ||
+		!reflect.DeepEqual(current.Parents, replacement.Parents) || !reflect.DeepEqual(current.CandidateInputs, replacement.CandidateInputs) {
+		return errors.New("Experiment registration and lineage fields are immutable")
+	}
+	if current.Lifecycle == research.LifecycleClosed {
+		if !reflect.DeepEqual(current, replacement) {
+			return errors.New("closed Experiment records are immutable")
+		}
+		return nil
+	}
+	if current.Lifecycle == research.LifecycleActive && replacement.Lifecycle == research.LifecyclePlanned {
+		return errors.New("Experiment lifecycle cannot move from active back to planned")
+	}
 	if len(replacement.Amendments) < len(current.Amendments) {
 		return errors.New("Experiment amendments are append-only")
 	}
@@ -505,7 +708,7 @@ func observedRevision(root, relative string) string {
 	if err != nil {
 		return "changed"
 	}
-	document, err := Decode(content)
+	document, err := decodeCanonicalDocument(content)
 	if err != nil || document.Revision == "" {
 		return "changed"
 	}

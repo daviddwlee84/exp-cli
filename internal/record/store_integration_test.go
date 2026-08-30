@@ -67,7 +67,7 @@ func TestPlanCreateCollisionListReadAndRevisionUpdate(t *testing.T) {
 	if plans[0].Record.(*research.Plan).Priority != research.PriorityP1 {
 		t.Fatalf("Plans are not priority-sorted: %#v", plans)
 	}
-	code, err := research.DisplayCode(first.Record.(*research.Plan).ID, []research.Candidate{{ID: first.Record.(*research.Plan).ID}, {ID: second.Record.(*research.Plan).ID}})
+	code, err := research.DisplayCode(first.Record.(*research.Plan).ID, []research.ReferenceCandidate{{ID: first.Record.(*research.Plan).ID}, {ID: second.Record.(*research.Plan).ID}})
 	if err != nil {
 		t.Fatal(err)
 	}

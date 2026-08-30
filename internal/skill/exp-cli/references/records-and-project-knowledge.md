@@ -6,23 +6,37 @@ Use one owner for each fact and derive reverse links rather than duplicating the
 
 | Concept | Store here when | Do not use it for |
 |---|---|---|
+| Policy | autonomy, taxonomy, queue allocation, tie, and human Promotion rules are project-wide | a one-off agent instruction or hidden daemon setting |
+| Idea | a human/agent direction, branch, or merge needs durable qualification state | a priced queue entry or generic TODO |
 | Plan | proposed research has priority, effort, measurable expected payoff, assumptions, and a state | a generic task or an unpriced idea |
+| ResourcePool | a named bottleneck has finite concurrent capacity and cost | a provider-native Pueue task/group snapshot |
+| Queue | a Plan's exact revision has semantic order within a Pool/lane | live scheduler priority or agent-only recommendation |
+| QueueAdvice/Battle | listwise and order-swapped ranking judgment needs an immutable audit | canonical Queue order by itself |
 | Experiment | a question has a registered hypothesis, baseline, comparability specification, success criteria, and decision rule | process status or ad hoc notebook notes |
 | Run | an intended evidence unit or batch belongs to an Experiment | a process retry or every tracker-owned sweep trial |
 | Attempt | one redacted execution/submission of a Run has operational state and provenance | a scientific verdict |
+| EvaluationSpec/Evaluation | a comparable protocol and immutable measured outcome are required | raw telemetry or mutable provider dashboards |
 | Finding | a durable, scoped belief is supported by explicit evidence | an unsupported hunch, action item, or raw metric dump |
+| Candidate | a supported evaluated result is pinned to exact Git code/ChangeSet | any process that happened to succeed |
+| Release | named downstream slots compose validated Candidates for one target | assuming independent gains are additive |
+| Promotion | a sealed holdout and named human decision changes one target's incumbent | autonomous experiment dispatch |
 | Decision | an interpretation selects an action based on Findings | the preregistered decision rule itself |
 | External reference | provider-owned identity must be linked without copying its authority | credentials, raw environments, artifact bytes, or a claim of freshness |
 | Resume context | a local derived summary joins records and dated observations | canonical state |
 
-The current walking skeleton creates and lists Plans and validates/renders local records. Other record types describe the durable contract and future lifecycle; do not invent unavailable commands for them.
+Use the domain command when one exists. Reverse relations, Queue frontiers,
+Finding belief status, and Champions are derived from canonical owners; never
+write the inverse edge into a second record or treat a generated view as input.
 
 ## Project-knowledge routing
 
 The project's knowledge harness remains authoritative for its own stores:
 
 - **TODO:** a concrete action someone can complete. An experiment may produce a TODO, but the action is not itself a Finding.
-- **Backlog:** an idea, question, or investigation that is not yet priced and registered. Promote it to a Plan only after expected payoff and effort are explicit.
+- **Backlog:** a rough question or investigation not yet worth a canonical
+  Idea. Once origin, classification, cluster, and durable lineage matter,
+  capture an Idea; qualify it to a Plan only after payoff and resource cost are
+  explicit.
 - **Pitfall:** a recurring operational symptom, cause, diagnostic, or remedy worth finding during future troubleshooting. Link relevant Attempts or Findings, but do not duplicate their canonical facts.
 - **Invariant:** a durable constraint that future designs and implementations must obey, such as a leakage prohibition or privacy boundary. An invariant is not merely a result from one narrow dataset.
 

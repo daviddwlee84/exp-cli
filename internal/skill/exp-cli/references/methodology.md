@@ -13,6 +13,12 @@ An experiment is justified by a decision it could improve, not by novelty alone.
 
 Use an interval or omit a numeric estimate when precision would be false, but retain a stable metric and unit. Compare payoff and effort across Plans. “Interesting” without a decision, measurable benefit, or bounded learning value is a reason to clarify or defer.
 
+For Queue admission, separate direct expected gain from information gain,
+unblock value, downside, and constrained ResourcePool-hours. Classify genuine
+exploration as `explore`; do not disguise it as exploitation merely to obtain a
+higher rank. The default 80/20 allocation protects some discovery capacity
+without allowing low-value exploration to consume every bottleneck.
+
 ## Register the design before evidence
 
 A reviewable design states, before outcome inspection:
@@ -69,3 +75,27 @@ State why a path should not be retried and what would have to change before reco
 - an unpriced research direction belongs in backlog until it earns a Plan.
 
 Do not upgrade an anecdote into a Finding or bury a scientific result in an operational troubleshooting note.
+
+## Follow branches and test combinations
+
+A useful result can create several follow-up Ideas. Preserve parent edges and
+price each branch independently; do not rewrite the original Plan to make a new
+question look preregistered. A negative or invalid branch can still improve the
+Queue by reducing probability, limiting scope, or identifying a prerequisite.
+
+Candidate improvements measured in isolation are not automatically additive.
+When a downstream Release uses more than one Candidate, register a combination
+Experiment with those Candidates as inputs and evaluate the combined behavior
+under one comparable protocol. Pin that passing Evaluation separately as the
+Release's combination evidence. Interaction failures are first-class evidence,
+not reasons to cherry-pick the independent scores.
+
+## Separate scientific and promotion evaluation
+
+Scientific Evaluation establishes whether a result supports reuse as a
+Candidate. Promotion Evaluation answers whether a complete Release should
+replace an incumbent for one production target. Seal the promotion protocol and
+finite holdout budget before creating the fresh holdout Evaluation; every
+promotion metric needs a threshold and one Evaluation cannot be reused.
+Production approval
+remains a named human action even when experimental dispatch is automated.

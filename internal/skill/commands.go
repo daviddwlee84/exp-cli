@@ -105,7 +105,9 @@ func GenerateCommandReference(commands []CommandMetadata) (string, error) {
 		}
 		output.WriteString("\n")
 	}
-	return output.String(), nil
+	// Keep exactly one terminal LF. A trailing blank line is visually inert but
+	// creates persistent byte drift when editors normalize generated files.
+	return strings.TrimSuffix(output.String(), "\n"), nil
 }
 
 // CheckCommandReference compares arbitrary reference bytes with deterministic

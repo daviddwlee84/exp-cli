@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daviddwlee84/exp-cli/internal/cli"
 	"github.com/daviddwlee84/exp-cli/internal/skill"
 )
 
@@ -122,7 +123,10 @@ func TestEmbeddedSkillFrontmatterAndReferences(t *testing.T) {
 }
 
 func TestCommandReferenceGenerationAndEmbeddedCheck(t *testing.T) {
-	metadata := walkingSkeletonMetadata()
+	metadata, err := cli.CommandMetadata(cli.NewRootCommand(cli.NewApp(t.Context(), nil, nil, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	slices.Reverse(metadata)
 	for index := range metadata {
 		slices.Reverse(metadata[index].Flags)
@@ -138,6 +142,9 @@ func TestCommandReferenceGenerationAndEmbeddedCheck(t *testing.T) {
 	}
 	if first != second {
 		t.Fatal("command reference depends on metadata order")
+	}
+	if !strings.HasSuffix(first, "\n") || strings.HasSuffix(first, "\n\n") {
+		t.Fatal("command reference must end in exactly one LF")
 	}
 	check, err := skill.CheckEmbeddedCommandReference(metadata)
 	if err != nil {
@@ -217,30 +224,5 @@ func TestCommandReferenceRejectsRenderedMetadataInjection(t *testing.T) {
 
 	if _, err := skill.GenerateCommandReference([]skill.CommandMetadata{base}); err != nil {
 		t.Fatalf("legitimate pipe notation in fenced command use was rejected: %v", err)
-	}
-}
-
-func walkingSkeletonMetadata() []skill.CommandMetadata {
-	jsonFlag := skill.FlagMetadata{Name: "json", Usage: "emit the versioned machine-readable envelope"}
-	return []skill.CommandMetadata{
-		{Path: "exp", Use: "exp", Summary: "Use the Git-native research control plane."},
-		{Path: "exp init", Use: "exp init", Summary: "Initialize an idempotent v1 experiments root."},
-		{Path: "exp doctor", Use: "exp doctor [--json] [--live]", Summary: "Inspect local core and optional-tool capabilities.", Flags: []skill.FlagMetadata{
-			{Name: "live", Usage: "permit only the explicitly documented live probes"}, jsonFlag,
-		}},
-		{Path: "exp plan", Use: "exp plan", Summary: "Work with priced research Plans."},
-		{Path: "exp plan add", Use: "exp plan add [flags | --input -] [--json]", Summary: "Create one validated Plan from human flags or versioned JSON input.", Flags: []skill.FlagMetadata{
-			jsonFlag, {Name: "input", Usage: "read the versioned Plan request from standard input (must be -)"},
-		}},
-		{Path: "exp plan list", Use: "exp plan list [--json]", Summary: "List canonical Plans without contacting providers.", Flags: []skill.FlagMetadata{jsonFlag}},
-		{Path: "exp validate", Use: "exp validate [--json]", Summary: "Validate canonical local records without provider calls.", Flags: []skill.FlagMetadata{jsonFlag}},
-		{Path: "exp render", Use: "exp render [--check]", Summary: "Render deterministic projections or check them without writing.", Flags: []skill.FlagMetadata{
-			{Name: "check", Usage: "report projection drift without writing"},
-		}},
-		{Path: "exp context", Use: "exp context [--json]", Summary: "Show a local, resumable research summary without provider refresh.", Flags: []skill.FlagMetadata{jsonFlag}},
-		{Path: "exp skill", Use: "exp skill print|install|check", Summary: "Inspect or manage the version-matched embedded guidance skill."},
-		{Path: "exp skill print", Use: "exp skill print", Summary: "Print this build's embedded SKILL.md."},
-		{Path: "exp skill install", Use: "exp skill install", Summary: "Atomically install the embedded skill and safe consumer links."},
-		{Path: "exp skill check", Use: "exp skill check", Summary: "Check installed files, compatibility, manifest hash, and consumer links without mutation."},
 	}
 }

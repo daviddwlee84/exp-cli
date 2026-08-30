@@ -64,7 +64,7 @@ func TestParseIDRequiresCanonicalTypedV7OrMigrationV5(t *testing.T) {
 func TestDisplayAndPrefixResolutionLengthenOnCollision(t *testing.T) {
 	first := mustID(t, "plan_01a01e66-f8e0-7202-8000-000000000202")
 	second := mustID(t, "plan_01a01e66-a8e0-7202-8000-000000000303")
-	candidates := []Candidate{{ID: first}, {ID: second}}
+	candidates := []ReferenceCandidate{{ID: first}, {ID: second}}
 	code, err := DisplayCode(first, candidates)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestDisplayAndPrefixResolutionLengthenOnCollision(t *testing.T) {
 func TestLegacyAliasesAreExactAndTypeAware(t *testing.T) {
 	experiment := mustID(t, "exp_74738ff5-5367-5958-9aee-98fffdcd1876")
 	finding := mustID(t, "fnd_d3f8be2b-b3cc-566b-85a0-1f72cd5f4062")
-	candidates := []Candidate{{ID: experiment, Aliases: []string{"#016"}}, {ID: finding, Aliases: []string{"F-039"}}}
+	candidates := []ReferenceCandidate{{ID: experiment, Aliases: []string{"#016"}}, {ID: finding, Aliases: []string{"F-039"}}}
 	resolved, err := Resolve("#016", KindExperiment, candidates)
 	if err != nil || resolved != experiment {
 		t.Fatalf("experiment alias = %s, %v", resolved, err)

@@ -89,7 +89,7 @@ func newPlanCommand(app *App, rootOptions *rootOptions) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newPlanAddCommand(app, rootOptions), newPlanListCommand(app, rootOptions))
+	command.AddCommand(newPlanAddCommand(app, rootOptions), newPlanListCommand(app, rootOptions), newPlanRefreshCommand(app, rootOptions))
 	return command
 }
 

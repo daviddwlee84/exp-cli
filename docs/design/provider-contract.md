@@ -2,15 +2,20 @@
 
 ## Boundary
 
-Providers expose capabilities of installed upstream tools; they do not become authorities for research records. The walking skeleton ships the compiled registry and executable-presence discovery, not provider operations or version probes. There is no dynamic Go plugin ABI and no universal “experiment provider” interface.
+Providers expose capabilities of installed upstream tools; they do not become
+authorities for research records. The current implementation includes audited
+Pueue scheduler operations, a private direct worker envelope, and read-only
+MLflow run verification. Default `doctor` remains executable-presence discovery
+only. There is no dynamic Go plugin ABI and no universal “experiment provider”
+interface.
 
 An adapter declares one descriptor and implements only the roles it supports:
 
 | Role | Responsibility | Initial direction |
 |---|---|---|
-| Runner | Prepare an entrypoint as an argument-array workload | Direct process first; Marimo/Jupyter/DVC/MLflow Project later |
-| Scheduler | Submit, observe, and cancel one Attempt; own native dependencies | Direct process first; Pueue, Slurm, DVC Queue later |
-| Tracker | Resolve/list provider-owned telemetry and sweep state | MLflow read-only first; W&B later |
+| Runner | Prepare an entrypoint as an argument-array workload | Private direct worker implemented; notebooks later |
+| Scheduler | Submit, observe, and cancel one Attempt; own native dependencies | Pueue implemented; Slurm/DVC later |
+| Tracker | Resolve/list provider-owned telemetry and sweep state | MLflow selected-field verification implemented |
 | ArtifactStore | Stat/list immutable artifact references | DVC/MLflow/object references; never implicit download |
 | Registry | Get/list/resolve aliases for model resources | Read-only only after a concrete API is verified |
 
@@ -54,7 +59,14 @@ supported | unsupported | unknown
 
 Missing optional binaries, unreachable daemons, unavailable accounting, and unknown versions degrade that provider; they do not fail local record commands. Unknown is never promoted to supported by optimistic parsing.
 
-For this milestone, default `exp doctor` performs only local executable discovery with `LookPath`. It never executes third-party `--version` because nominally read-only flags may still create configuration, telemetry, or log state; discovered versions and capabilities therefore remain `unknown`. A future explicit provider-adapter probe requires an audited side-effect contract. Daemon, network, site, credential, or remote probes require an explicitly implemented live or operation-specific refresh, and `--live` currently performs no additional contact. Probing never installs a package, starts a daemon, migrates a provider database, or opens authentication.
+Default `exp doctor` performs only local executable discovery with `LookPath`.
+It never executes third-party `--version` because nominally read-only flags may
+still create configuration, telemetry, or log state; discovered versions and
+capabilities therefore remain `unknown`. `--live` currently performs no
+additional contact. Provider contact occurs only through an operation-specific
+command such as `provider pueue status`, `provider mlflow verify`, `daemon tick`,
+or `daemon run`. Probing and operations never install a package, start a daemon,
+migrate a provider database, or open authentication.
 
 ## Operation plans and effects
 
@@ -103,7 +115,12 @@ Examples:
 | queue reset or garbage collection | `destructive`, `remote_write` |
 | follow/wait | read effect plus `blocking` |
 
-`--plan` and `--dry-run` render currently known plans and effects only. They perform no invocation, remote or daemon contact, authentication, package resolution, service startup, file creation, cache write, or user-code execution. If an effect or capability cannot be known without contact, it remains `unknown` and the plan says which explicit probe would refine it.
+Where a future command exposes `--plan` or `--dry-run`, those modes must render
+currently known plans and effects only. They perform no invocation, remote or
+daemon contact, authentication, package resolution, service startup, file
+creation, cache write, or user-code execution. Current Pueue cancellation and
+Promotion use explicit confirmation flags instead of pretending to be dry-run
+interfaces.
 
 ## Invocation contract
 
@@ -111,7 +128,14 @@ Every subprocess goes through one injected, signal-aware `execx.Invoker`. Adapte
 
 The invoker accepts an executable and an argument slice, never a concatenated shell command. It also receives an explicit canonical cwd, an environment specification, context cancellation, timeout, stream/capture mode, and byte limits. It preserves argument boundaries exactly. Errors and diagnostics contain only structurally redacted display arguments.
 
-Provider protocol output is bounded, parsed, redacted, and then returned. User workload output may stream to the caller but is not persisted by default. Process-group cancellation is Unix-specific: cancellation and command timeouts terminate the spawned Unix process group so ordinary descendants do not outlive the invocation. Windows uses Go's direct-child cancellation only; descendant-tree termination would require Job Object integration and is not claimed. Runtime CI currently exercises Linux and macOS; Windows and AIX jobs are cross-build checks, not runtime-test claims.
+Provider protocol output is bounded, parsed, redacted, and then returned. User
+workload output may stream to the caller but is not persisted by default.
+Process-group ownership is Unix-specific: cancellation, timeout, and normal
+parent exit terminate the spawned Unix process group so ordinary descendants
+do not outlive the invocation. Windows uses Go's direct-child cancellation
+only; descendant-tree termination would require Job Object integration and is
+not claimed. Runtime CI currently exercises Linux and macOS; Windows and AIX
+jobs are cross-build checks, not runtime-test claims.
 
 If an upstream scheduler accepts only a shell payload, the adapter must use one audited escaping implementation or invoke a private argument-preserving `exp` execution envelope. It must not interpolate titles, labels, native state, metric values, or external text into shell syntax.
 
@@ -178,9 +202,15 @@ Machine mode never prompts and emits no warnings or progress on stdout.
 
 ## Refresh semantics
 
-Local canonical reads are the default. `plan list`, `validate`, `render`, and `context` make zero provider invocations unless the command explicitly defines and receives a refresh option. Cached observations may be displayed as stale but are never silently refreshed.
+Local canonical reads are the default. `plan list`, `validate`, `render`,
+`context`, `daemon status`, and `daemon frontier` make zero provider
+invocations. Contact is explicit through the `provider` commands or daemon
+`tick`/`run`; cached observations are never silently refreshed.
 
-Refresh names exact provider contexts or capabilities, for example `--refresh=pueue:local,mlflow:lab`. It contacts only those selections. Partial success preserves valid observations and returns per-provider diagnostics with `partial: true`. Refresh never changes an Experiment verdict, evidence inclusion, or Attempt state without an explicit import/reconciliation mutation and expected-revision check.
+If a future combined refresh interface is added, it must name exact provider
+contexts/capabilities, preserve partial success with per-provider diagnostics,
+and never change an Experiment verdict or evidence inclusion. Attempt state may
+advance only through explicit reconciliation and canonical revision checks.
 
 ## Environment and credential handling
 
@@ -202,7 +232,20 @@ Unsafe input is rejected when safe identity cannot be preserved; silently retain
 
 ### Pueue
 
-Pueue 4.x `status --json` task objects may contain captured `envs`. Remove the entire `envs` member recursively before parsing returns or raw state crosses the adapter boundary. Do not merely mask keys known today. Submissions use an environment allowlist because the daemon persists task environments. Read support precedes submit/cancel support.
+Pueue 4.x `status --json` task objects may contain captured `envs`. Remove the
+entire `envs` member recursively before parsing returns or raw state crosses the
+adapter boundary. Do not merely mask keys known today. Submissions use an
+explicit non-secret, non-credential-sensitive environment allowlist because the daemon persists task
+environments. Runtime `secret_env` is therefore rejected for Pueue; a workload
+must obtain credentials through a broker or provider profile after it starts.
+
+The implemented adapter provides sanitized status and exact-task cancel with
+`--confirm` only when one canonical Attempt assigns scheduling to Pueue, its
+reference uses the local runtime context, and the live task ID, group, and label
+all match the configured route. Submission is limited to the audited private
+`exp worker run` envelope. Arbitrary titles, provider text, or user shell
+fragments cannot become the submitted command. Pool bindings select explicit
+Pueue groups; stable labels support outbox recovery after submit ambiguity.
 
 ### Slurm
 
@@ -212,6 +255,43 @@ Never generate `--export=ALL`. Use an explicit allowlist or site-approved profil
 
 Parse native JSON and stdout CSV before considering an explicit SDK/REST capability. Never enter an isolated Python environment implicitly. Structurally redact userinfo, query parameters, tokens, and doctor output from tracking and artifact URIs. Determine proxy versus direct artifact access before requesting storage credentials. Tracker-owned trials and telemetry remain in MLflow; canonical records keep only selected evidence and sanitized references.
 
+The implemented integration is read-only: a workload creates and logs its own
+run, then `exp provider mlflow verify --run-id ...` requests only named metrics
+and expected tags. It does not create a run, log a metric, upload an artifact,
+or mutate registry state. A verified run may be linked from an Evaluation by
+sanitized identity only when the asserted `exp.attempt_id` tag identifies a
+successful canonical Attempt whose Run belongs to that Experiment, Candidate's
+Experiment, or the Release's combination/single-slot Experiment lineage. When
+an Evaluation later creates a Candidate, that owner must equal the Candidate's
+included successful backing Attempt. Verification is not itself a scientific
+verdict.
+
 ### DVC, notebooks, and later systems
 
 DVC capabilities are probed one operation at a time after a real binary/version is available. Marimo and Jupyter are Runners/entrypoints, not durable schedulers; inspection must not trigger sandbox/package resolution or notebook execution. W&B, Kaggle, Ray, Kubernetes, and cloud control planes require separate verified contracts and are not inferred from installed libraries or prose references.
+
+## Daemon and operational state
+
+`.exp/runtime.json` is the strict execution binding between canonical IDs and
+provider-native configuration. It contains an `exp.runtime/v1` schema, Pool to
+Pueue group/label bindings, and Plan to executable/argv/cwd/timeout/Git identity
+bindings. Allowed environment arrays contain non-secret names only; Pueue
+runtime secret arrays must be empty because task environments are persisted.
+Label prefixes in one Pueue group are pairwise prefix-free and reserve enough
+space for the complete scoped dispatch ID. The actual selected runtime config
+path is excluded from every executable ChangeSet.
+
+The daemon's SQLite database at
+`<git-common-dir>/exp/runtime/v1/control.sqlite` owns leases, fencing tokens,
+jobs, submission outbox, provider observations, fairness counters, pause state,
+and a hash-chained event log with bounded payloads. It has no authority over hypotheses, conclusions,
+Findings, Evaluations, Releases, or Promotions.
+
+One tick snapshots Pueue before admission, reconciles known Attempts, recovers
+only this canonical worktree's outbox entries by scoped stable label, accounts for recovered and unknown nonterminal
+tasks in declared pool units, then fills remaining canonical capacity.
+Only runtimes needed by queued Queue entries or active prepared Attempts undergo
+Git verification; obsolete entries for terminal Plans do not block other work.
+The private worker freezes the bounded result and publishes a durable terminal
+marker before marking the job finished. Scheduler and marker observations can advance an Attempt's operational
+state only through an explicit canonical transaction.
