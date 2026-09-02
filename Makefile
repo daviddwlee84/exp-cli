@@ -12,7 +12,7 @@ export BINARY
 export PREFIX
 export VERSION
 
-.PHONY: all build install skill-sync skill-check fmt fmt-check vet test test-race test-build-portability clean
+.PHONY: all build install skill-sync skill-check fmt fmt-check vet test test-race test-build-portability docs-serve docs-test docs-build clean
 
 all: skill-check fmt-check vet test-race build
 
@@ -65,6 +65,16 @@ test-race:
 
 test-build-portability:
 	./scripts/test-build-portability.sh
+
+docs-serve:
+	uv run --extra docs mkdocs serve
+
+docs-test:
+	uv run --extra docs python -m unittest scripts/test_generate_llms.py
+
+docs-build: docs-test
+	uv run --extra docs mkdocs build --strict
+	uv run --extra docs python scripts/generate_llms.py --config mkdocs.yml --site-dir site
 
 clean:
 	rm -f "$${BINARY}"

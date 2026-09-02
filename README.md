@@ -4,6 +4,9 @@
 experiments deserve scarce compute, running selected work safely, and
 preserving the path from idea to production decision.
 
+Documentation: [English](https://daviddwlee84.github.io/exp-cli/) ·
+[繁體中文](https://daviddwlee84.github.io/exp-cli/zh-TW/)
+
 Canonical research meaning lives in ordinary Markdown/TOML records under
 `experiments/`. Pueue owns local task execution, MLflow owns workload telemetry,
 Git owns code history, and a private SQLite database owns only leases, jobs,
@@ -419,6 +422,16 @@ mise exec -- make all
 
 CI runs formatting, vet, race-enabled tests, versioned builds, and portability
 checks.
+
+The bilingual documentation uses `uv` and MkDocs:
+
+```sh
+make docs-serve
+make docs-build
+```
+
+`docs-build` performs a strict site build and generates English and Traditional
+Chinese `llms.txt` outputs under `site/`.
 
 ## License
 

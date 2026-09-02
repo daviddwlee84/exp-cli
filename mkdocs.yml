@@ -1,0 +1,155 @@
+site_name: exp
+site_description: Git-native autonomous research control plane for prioritizing, running, and preserving ML experiments.
+site_url: https://daviddwlee84.github.io/exp-cli/
+repo_url: https://github.com/daviddwlee84/exp-cli
+repo_name: daviddwlee84/exp-cli
+edit_uri: edit/main/docs/
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  language: en
+plugins:
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+        - locale: zh-TW
+          name: 繁體中文 (zh-TW)
+          nav_translations:
+            Home: 首頁
+            Why exp: 為什麼需要 exp
+            Research Principles: 研究心法
+            Getting Started: 快速開始
+            Workflows: 工作流程
+            Overview: 總覽
+            Core Research Workflow: 核心研究流程
+            Agents and Workspaces: Agent 與工作區
+            Runtime Dispatch: 執行與派送
+            Evidence to Promotion: 從證據到上線
+            Harness-v0 Migration: Harness-v0 遷移
+            Tools: 工具
+            MLflow: MLflow
+            Pueue: Pueue
+            Git and Worktrees: Git 與 Worktree
+            Agent CLI Profiles: Agent CLI 設定
+            Planned Integrations: 規劃中的整合
+            Notes: 筆記
+            Tool Explorations: 工具探索
+            Reference: 參考資料
+            Configuration and Paths: 設定與路徑
+            Command Map: 指令地圖
+            Records and Authority: Records 與權責
+            Design: 設計文件
+            Architecture: 架構
+            Autonomous Research Control Plane: 自主研究控制平面
+            Harness-v0 Compatibility and Migration: Harness-v0 相容與遷移
+            Provider Contract: Provider 契約
+            Record Format: Record 格式
+            Roadmap: 路線圖
+            Search Adapter Contract: Search Adapter 契約
+            Storage and Transactions: 儲存與交易
+  - search:
+      lang:
+        - en
+        - zh
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+        - docs/_snippets
+      check_paths: true
+  - pymdownx.tabbed:
+      alternate_style: true
+nav:
+  - Home: index.md
+  - Why exp: why-exp.md
+  - Research Principles: research-principles.md
+  - Getting Started: getting-started.md
+  - Workflows:
+      - Overview: workflows/index.md
+      - Core Research Workflow: workflows/core-workflow.md
+      - Agents and Workspaces: workflows/agents-and-workspaces.md
+      - Runtime Dispatch: workflows/runtime-dispatch.md
+      - Evidence to Promotion: workflows/evidence-to-promotion.md
+      - Harness-v0 Migration: workflows/migration.md
+  - Tools:
+      - Overview: tools/index.md
+      - MLflow: tools/mlflow.md
+      - Pueue: tools/pueue.md
+      - Git and Worktrees: tools/git-worktrees.md
+      - Agent CLI Profiles: tools/agent-cli-profiles.md
+      - Planned Integrations: tools/planned-integrations.md
+  - Notes:
+      - Overview: notes/index.md
+      - Tool Explorations: notes/tool-explorations.md
+  - Reference:
+      - Configuration and Paths: reference/configuration.md
+      - Command Map: reference/command-map.md
+      - Records and Authority: reference/records-and-authority.md
+  - Design:
+      - Architecture: design/architecture.md
+      - Autonomous Research Control Plane: design/autonomous-research-control-plane.md
+      - Harness-v0 Compatibility and Migration: design/harness-v0-migration.md
+      - Provider Contract: design/provider-contract.md
+      - Record Format: design/record-format.md
+      - Roadmap: design/roadmap.md
+      - Search Adapter Contract: design/search-adapter-contract.md
+      - Storage and Transactions: design/transactions.md
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/daviddwlee84/exp-cli
+# `_snippets/` are included via pymdownx.snippets but never published as pages.
+exclude_docs: |
+  /_snippets/
+  **/_snippets/**
+validation:
+  links:
+    not_found: warn
+    anchors: warn
