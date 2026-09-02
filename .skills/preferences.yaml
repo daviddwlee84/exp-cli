@@ -7,7 +7,7 @@ mkdocs_site_bootstrap:
   decided_at: "2026-09-02"
   stack: mkdocs-material
   auto_deploy: true
-  pages_deployed: false
+  pages_deployed: true
   existing_docs_decision: wrapped
   site_url: https://daviddwlee84.github.io/exp-cli/
   repo_slug: daviddwlee84/exp-cli
@@ -16,3 +16,4 @@ mkdocs_site_bootstrap:
     - zh-TW
   keep_english_terms: true
   i18n_structure: suffix
+  pages_enabled_at: "2026-09-02"
