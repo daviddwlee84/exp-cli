@@ -17,7 +17,10 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/worker"
 )
 
-var ErrNoWork = errors.New("no ready canonical work")
+var (
+	ErrNoWork            = errors.New("no ready canonical work")
+	ErrSubmissionBlocked = errors.New("scheduler submission is blocked by unavailable runtime authority")
+)
 
 type Pool struct {
 	Name          string
@@ -37,14 +40,15 @@ type Selection struct {
 }
 
 type Prepared struct {
-	Job        operation.JobInput
-	Priority   int
-	Worker     string
-	Args       []string
-	CWD        string
-	Label      string
-	Units      int
-	AllowedEnv []string
+	Job              operation.JobInput
+	Priority         int
+	Worker           string
+	Args             []string
+	CWD              string
+	Label            string
+	Units            int
+	AllowedEnv       []string
+	QuotedWorkerArgs bool
 }
 
 type Canonical interface {
@@ -68,13 +72,14 @@ type SchedulerSnapshot struct {
 }
 
 type Dispatch struct {
-	Group      string
-	Label      string
-	Priority   int
-	WorkingDir string
-	Worker     string
-	WorkerArgs []string
-	AllowedEnv []string
+	Group            string
+	Label            string
+	Priority         int
+	WorkingDir       string
+	Worker           string
+	WorkerArgs       []string
+	AllowedEnv       []string
+	QuotedWorkerArgs bool
 }
 
 type Scheduler interface {
@@ -117,6 +122,11 @@ type terminalReconciliationOperational interface {
 
 type acknowledgedCanonical interface {
 	ReconcileAcknowledged(context.Context, SchedulerSnapshot) ([]string, error)
+}
+
+type submissionCanonical interface {
+	RevalidateSubmission(context.Context, Selection, operation.Job) error
+	SubmissionBlocked(context.Context, Selection, operation.Job) error
 }
 
 type activeAllocationOperational interface {
@@ -197,7 +207,10 @@ func (controller Controller) Tick(ctx context.Context) (TickResult, error) {
 					if _, found, loadErr := worker.LoadTerminal(ctx, controller.MarkerRoot, job.ID); loadErr != nil {
 						return TickResult{}, loadErr
 					} else if found {
-						if _, replayErr := (worker.Runner{Store: recoveryStore, MarkerRoot: controller.MarkerRoot, Clock: clock}).Run(ctx, job); replayErr != nil {
+						if _, replayErr := (worker.Runner{
+							Store: recoveryStore, MarkerRoot: controller.MarkerRoot, Clock: clock,
+							ProjectID: controller.ProjectID, CanonicalScope: controller.Scope,
+						}).Run(ctx, job); replayErr != nil {
 							return TickResult{}, fmt.Errorf("replay durable worker terminal for %s: %w", job.ID, replayErr)
 						}
 					} else if job.PueueTaskID != nil {
@@ -397,6 +410,17 @@ func (controller Controller) Tick(ctx context.Context) (TickResult, error) {
 				return result, fmt.Errorf("new scheduler outbox %s is unexpectedly %s", item.ID, item.State)
 			}
 			dispatch := dispatchFrom(prepared, pool, job.FencingToken)
+			if err := controller.revalidateSubmission(ctx, selection, job); err != nil {
+				if errors.Is(err, ErrSubmissionBlocked) {
+					if blockErr := controller.blockSubmission(ctx, item, selection, job, clock()); blockErr != nil {
+						return result, blockErr
+					}
+					result.Recovered = append(result.Recovered, job.ID)
+					break
+				}
+				_ = controller.Operational.SetOutboxState(ctx, item.ID, operation.OutboxFailed, clock().Add(time.Minute), err.Error())
+				return result, err
+			}
 			taskID, err := controller.submitAuthorized(ctx, &lease, ttl, dispatch)
 			if err != nil {
 				if errors.Is(err, operation.ErrPaused) {
@@ -483,6 +507,18 @@ func (controller Controller) recoverOutbox(ctx context.Context, snapshot Schedul
 			if job.CanonicalScope != controller.Scope || intent.Prepared.Job.CanonicalScope != controller.Scope {
 				return recovered, additions, fmt.Errorf("outbox %s belongs to a different canonical scope", item.ID)
 			}
+			if job.State == operation.JobUnknown {
+				if canonical, ok := controller.Canonical.(submissionCanonical); ok {
+					if err := canonical.SubmissionBlocked(ctx, intent.Selection, job); err != nil {
+						return recovered, additions, err
+					}
+				}
+				if err := controller.Operational.SetOutboxState(ctx, item.ID, operation.OutboxSucceeded, time.Time{}, "submission blocked before scheduler start"); err != nil {
+					return recovered, additions, err
+				}
+				recovered = append(recovered, job.ID)
+				continue
+			}
 			task, found, routeErr := taskByRoute(snapshot, intent.Dispatch.Group, intent.Dispatch.Label)
 			if routeErr != nil {
 				return recovered, additions, routeErr
@@ -526,6 +562,17 @@ func (controller Controller) recoverOutbox(ctx context.Context, snapshot Schedul
 				_ = controller.Operational.SetOutboxState(ctx, item.ID, operation.OutboxFailed, now.Add(time.Minute), "insufficient pool capacity")
 				continue
 			}
+			if err := controller.revalidateSubmission(ctx, intent.Selection, job); err != nil {
+				if errors.Is(err, ErrSubmissionBlocked) {
+					if blockErr := controller.blockSubmission(ctx, item, intent.Selection, job, now); blockErr != nil {
+						return recovered, additions, blockErr
+					}
+					recovered = append(recovered, job.ID)
+					continue
+				}
+				_ = controller.Operational.SetOutboxState(ctx, item.ID, operation.OutboxFailed, now.Add(time.Minute), err.Error())
+				continue
+			}
 			taskID, submitErr := controller.submitAuthorized(ctx, lease, ttl, intent.Dispatch)
 			if submitErr != nil {
 				if errors.Is(submitErr, operation.ErrPaused) || errors.Is(submitErr, operation.ErrFenced) {
@@ -556,6 +603,35 @@ func (controller Controller) recoverOutbox(ctx context.Context, snapshot Schedul
 		}
 	}
 	return recovered, additions, nil
+}
+
+func (controller Controller) revalidateSubmission(ctx context.Context, selection Selection, job operation.Job) error {
+	canonical, ok := controller.Canonical.(submissionCanonical)
+	if !ok {
+		return nil
+	}
+	return canonical.RevalidateSubmission(ctx, selection, job)
+}
+
+func (controller Controller) blockSubmission(ctx context.Context, item operation.OutboxItem, selection Selection, job operation.Job, _ time.Time) error {
+	recovery, ok := controller.Operational.(workerRecoveryOperational)
+	if !ok {
+		return errors.New("operational store cannot terminalize a blocked scheduler submission")
+	}
+	payload := json.RawMessage(`{"schema_version":"exp.worker-blocked/v2","reason":"runtime_source_unavailable"}`)
+	blocked, err := recovery.FinishJob(ctx, job.ID, job.FencingToken, operation.JobUnknown, payload, "runtime Source unavailable before scheduler start")
+	if err != nil {
+		return fmt.Errorf("mark unstarted job %s unknown: %w", job.ID, err)
+	}
+	if canonical, ok := controller.Canonical.(submissionCanonical); ok {
+		if err := canonical.SubmissionBlocked(ctx, selection, blocked); err != nil {
+			return fmt.Errorf("mark canonical Attempt blocked: %w", err)
+		}
+	}
+	if err := controller.Operational.SetOutboxState(ctx, item.ID, operation.OutboxSucceeded, time.Time{}, "submission blocked before scheduler start"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (controller Controller) recordDispatch(ctx context.Context, jobID, pool, lane string, weight float64) error {
@@ -671,7 +747,11 @@ func taskByRoute(snapshot SchedulerSnapshot, group, label string) (SchedulerTask
 func dispatchFrom(prepared Prepared, pool Pool, fencingToken int64) Dispatch {
 	arguments := append([]string(nil), prepared.Args...)
 	arguments = append(arguments, "--fencing-token", strconv.FormatInt(fencingToken, 10))
-	return Dispatch{Group: pool.NativeGroup, Label: prepared.Label, Priority: prepared.Priority, WorkingDir: prepared.CWD, Worker: prepared.Worker, WorkerArgs: arguments, AllowedEnv: append([]string(nil), prepared.AllowedEnv...)}
+	return Dispatch{
+		Group: pool.NativeGroup, Label: prepared.Label, Priority: prepared.Priority,
+		WorkingDir: prepared.CWD, Worker: prepared.Worker, WorkerArgs: arguments,
+		AllowedEnv: append([]string(nil), prepared.AllowedEnv...), QuotedWorkerArgs: prepared.QuotedWorkerArgs,
+	}
 }
 
 func (controller Controller) id(prefix string) string {

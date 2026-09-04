@@ -98,9 +98,6 @@ func Initialize(ctx context.Context, request InitRequest, options ...InitOption)
 		if err := ensureCoordinationDirectories(coordination); err != nil {
 			return err
 		}
-		if err := record.CheckTransactionArtifacts(coordination); err != nil {
-			return err
-		}
 		projects, current, worktrees, err := linkedCanonicalProjects(ctx, repository, service.git)
 		if err != nil {
 			return err
@@ -113,6 +110,13 @@ func Initialize(ctx context.Context, request InitRequest, options ...InitOption)
 			return err
 		}
 		root := filepath.Join(repository.Root, "experiments")
+		if canonical == nil {
+			if err := record.CheckTransactionArtifacts(coordination); err != nil {
+				return err
+			}
+		} else if err := record.InspectProjectTransactionArtifacts(ctx, coordination, filepath.Join(canonical.worktree, "experiments"), repository.GitCommonDir); err != nil {
+			return err
+		}
 		receipt, receiptErr := readProjectReceipt(coordination)
 
 		if current == nil {
@@ -208,7 +212,7 @@ func Initialize(ctx context.Context, request InitRequest, options ...InitOption)
 		}
 
 		if current != nil {
-			canonicalRoot, err := ensureCanonicalRootDirectories(root, service.directorySyncHook)
+			canonicalRoot, err := ensureCanonicalRootDirectories(root, service.directorySyncHook, false)
 			if err != nil {
 				return err
 			}
@@ -228,7 +232,7 @@ func Initialize(ctx context.Context, request InitRequest, options ...InitOption)
 			return nil
 		}
 
-		canonicalRoot, err := ensureCanonicalRootDirectories(root, service.directorySyncHook)
+		canonicalRoot, err := ensureCanonicalRootDirectories(root, service.directorySyncHook, true)
 		if err != nil {
 			return err
 		}
@@ -344,7 +348,7 @@ func ensureCoordinationDirectories(coordination *os.Root) error {
 		}
 		opened, openErr := directory.Open(".")
 		if openErr == nil {
-			openErr = opened.Chmod(0o700)
+			openErr = pathx.ProtectPrivateOpenFile(opened, 0o700)
 			openErr = errors.Join(openErr, opened.Close())
 		}
 		closeErr := directory.Close()
@@ -355,7 +359,7 @@ func ensureCoordinationDirectories(coordination *os.Root) error {
 	return nil
 }
 
-func ensureCanonicalRootDirectories(rootPath string, syncHook func(string) error) (*os.Root, error) {
+func ensureCanonicalRootDirectories(rootPath string, syncHook func(string) error, includeSources bool) (*os.Root, error) {
 	repositoryPath := filepath.Dir(rootPath)
 	if filepath.Base(rootPath) != "experiments" {
 		return nil, fmt.Errorf("canonical root must be the default experiments directory")
@@ -390,6 +394,9 @@ func ensureCanonicalRootDirectories(rootPath string, syncHook func(string) error
 		return nil, errors.Join(chmodErr, closeErr)
 	}
 	for _, name := range record.CanonicalFlatDirs() {
+		if name == record.SourcesDir && !includeSources {
+			continue
+		}
 		directory, directoryCreated, err := pathx.EnsureRootAtNoSymlinks(experiments, name, 0o755)
 		if err != nil {
 			return nil, fmt.Errorf("create canonical directory %s: %w", name, err)

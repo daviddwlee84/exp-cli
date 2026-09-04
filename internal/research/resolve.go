@@ -20,7 +20,7 @@ type ReferenceCandidate struct {
 	Aliases []string
 }
 
-var displayPattern = regexp.MustCompile(`(?i)^([IOQVBPERASNFCLTMD])-([0-9a-f]{8,32})$`)
+var displayPattern = regexp.MustCompile(`(?i)^([UIOQVBPYERASNFCLTMD])-([0-9a-f]{8,32})$`)
 
 // DisplayCode allocates the shortest same-kind code with at least eight UUID hex digits.
 func DisplayCode(target ID, candidates []ReferenceCandidate) (string, error) {

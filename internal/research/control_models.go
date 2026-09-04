@@ -140,6 +140,7 @@ type Idea struct {
 	Parents        []ID           `toml:"parents,omitempty"`
 	ResultingPlan  ID             `toml:"resulting_plan,omitempty"`
 	MergedInto     ID             `toml:"merged_into,omitempty"`
+	OriginTry      ID             `toml:"origin_try,omitempty"`
 	Extensions     Extensions     `toml:"extensions,omitempty"`
 }
 
@@ -323,6 +324,7 @@ type Evaluation struct {
 	Common
 	Spec         ID                `toml:"spec"`
 	Subject      ID                `toml:"subject"`
+	Attempt      ID                `toml:"attempt,omitempty"`
 	Outcome      EvaluationOutcome `toml:"outcome"`
 	EvaluatedAt  time.Time         `toml:"evaluated_at"`
 	Metrics      []MetricValue     `toml:"metrics"`
@@ -337,16 +339,27 @@ func (e *Evaluation) GetID() (ID, bool)         { return e.ID, !e.ID.IsZero() }
 func (e *Evaluation) GetCommon() *Common        { return &e.Common }
 func (e *Evaluation) GetExtensions() Extensions { return e.Extensions }
 
-// Candidate is a validated result that can fill a typed Release slot.
+// CandidateSource is the portable source identity copied verbatim from a clean
+// formal Attempt. ChangeSet may be empty for an observational Run.
+type CandidateSource struct {
+	Source     ID       `toml:"source"`
+	HeadCommit string   `toml:"head_commit"`
+	ChangeSet  []string `toml:"change_set"`
+}
+
+// Candidate is a validated result that can fill a typed Release slot. GitCommit
+// and ChangeSet are the exact v1 representation; Attempt and Sources are v2.
 type Candidate struct {
 	Common
-	Experiment   ID            `toml:"experiment"`
-	Evaluation   ID            `toml:"evaluation"`
-	Parents      []ID          `toml:"parents,omitempty"`
-	GitCommit    string        `toml:"git_commit"`
-	ChangeSet    []string      `toml:"change_set"`
-	ExternalRefs []ExternalRef `toml:"external_refs,omitempty"`
-	Extensions   Extensions    `toml:"extensions,omitempty"`
+	Experiment   ID                `toml:"experiment"`
+	Evaluation   ID                `toml:"evaluation"`
+	Parents      []ID              `toml:"parents,omitempty"`
+	GitCommit    string            `toml:"git_commit,omitempty"`
+	ChangeSet    []string          `toml:"change_set,omitempty"`
+	Attempt      ID                `toml:"attempt,omitempty"`
+	Sources      []CandidateSource `toml:"sources,omitempty"`
+	ExternalRefs []ExternalRef     `toml:"external_refs,omitempty"`
+	Extensions   Extensions        `toml:"extensions,omitempty"`
 }
 
 func (c *Candidate) GetSchema() Schema         { return c.Schema }

@@ -13,6 +13,7 @@ import (
 const (
 	ProjectFile        = "PROJECT.md"
 	PolicyFile         = "POLICY.md"
+	SourcesDir         = "sources"
 	IdeasDir           = "ideas"
 	ResourcePoolsDir   = "resource-pools"
 	QueuesDir          = "queues"
@@ -34,6 +35,7 @@ var generatedProjectionNames = map[string]struct{}{
 }
 
 var (
+	sourceNamePattern        = regexp.MustCompile(`^(src_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
 	ideaNamePattern          = regexp.MustCompile(`^(idea_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
 	poolNamePattern          = regexp.MustCompile(`^(pool_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
 	queueNamePattern         = regexp.MustCompile(`^(queue_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
@@ -51,6 +53,7 @@ var (
 	runNamePattern           = regexp.MustCompile(`^(run_[0-9a-f-]{36})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$`)
 	attemptNamePattern       = regexp.MustCompile(`^(att_[0-9a-f-]{36})\.md$`)
 	experimentDirPattern     = regexp.MustCompile(`^e-([0-9a-f]{8,32})-([a-z0-9]+(?:-[a-z0-9]+)*)$`)
+	tryDirPattern            = regexp.MustCompile(`^t-([0-9a-f]{8,32})-([a-z0-9]+(?:-[a-z0-9]+)*)$`)
 )
 
 type flatLayout struct {
@@ -59,6 +62,7 @@ type flatLayout struct {
 }
 
 var flatLayouts = map[string]flatLayout{
+	SourcesDir:         {kind: research.KindSource, pattern: sourceNamePattern},
 	IdeasDir:           {kind: research.KindIdea, pattern: ideaNamePattern},
 	ResourcePoolsDir:   {kind: research.KindResourcePool, pattern: poolNamePattern},
 	QueuesDir:          {kind: research.KindQueue, pattern: queueNamePattern},
@@ -93,6 +97,8 @@ type Location struct {
 	Slug             string
 	ExperimentDir    string
 	ExperimentPrefix string
+	TryDir           string
+	TryPrefix        string
 }
 
 // ClassifyPath recognizes every canonical path. recognized is true for an
@@ -116,6 +122,12 @@ func ClassifyPath(relative string) (location Location, recognized bool, err erro
 		if layout, found := flatLayouts[parts[0]]; found {
 			match := layout.pattern.FindStringSubmatch(parts[1])
 			if match == nil {
+				// Source records were added without changing the v1 Project schema.
+				// Preserve compatibility with previously unrelated sources/ trees by
+				// reserving only exact canonical Source filenames.
+				if parts[0] == SourcesDir {
+					return Location{}, false, nil
+				}
 				return Location{}, true, layoutError(relative, "filename does not match the canonical %s layout", layout.kind)
 			}
 			id, parseErr := research.ParseIDForKind(match[1], layout.kind)
@@ -128,27 +140,43 @@ func ClassifyPath(relative string) (location Location, recognized bool, err erro
 	if len(parts) > 0 {
 		_, reserved := flatLayouts[parts[0]]
 		if reserved {
+			if parts[0] == SourcesDir {
+				return Location{}, false, nil
+			}
 			return Location{}, true, layoutError(relative, "nested path is not allowed in the reserved %s tree", parts[0])
 		}
 	}
-	if len(parts) == 0 || !strings.HasPrefix(parts[0], "e-") {
+	if len(parts) == 0 {
 		return Location{}, false, nil
 	}
-	directory := experimentDirPattern.FindStringSubmatch(parts[0])
-	if directory == nil {
-		return Location{}, true, layoutError(relative, "experiment directory does not match e-<short-prefix>-<slug>")
+	experimentDirectory := experimentDirPattern.FindStringSubmatch(parts[0])
+	tryDirectory := tryDirPattern.FindStringSubmatch(parts[0])
+	if experimentDirectory == nil && tryDirectory == nil {
+		if strings.HasPrefix(parts[0], "e-") {
+			return Location{}, true, layoutError(relative, "experiment directory does not match e-<short-prefix>-<slug>")
+		}
+		// Try is a newly introduced namespace. Reserve only its exact directory
+		// grammar so legacy unrelated top-level t-* paths remain unrelated.
+		return Location{}, false, nil
 	}
-	base := Location{
-		Relative:         relative,
-		Slug:             directory[2],
-		ExperimentDir:    parts[0],
-		ExperimentPrefix: directory[1],
+	base := Location{Relative: relative}
+	if experimentDirectory != nil {
+		base.Slug = experimentDirectory[2]
+		base.ExperimentDir = parts[0]
+		base.ExperimentPrefix = experimentDirectory[1]
+	} else {
+		base.Slug = tryDirectory[2]
+		base.TryDir = parts[0]
+		base.TryPrefix = tryDirectory[1]
 	}
 	switch {
-	case len(parts) == 2 && parts[1] == "REPORT.md":
+	case experimentDirectory != nil && len(parts) == 2 && parts[1] == "REPORT.md":
 		base.Kind = research.KindExperiment
 		return base, true, nil
-	case len(parts) == 3 && parts[1] == "runs":
+	case tryDirectory != nil && len(parts) == 2 && parts[1] == "TRY.md":
+		base.Kind = research.KindTry
+		return base, true, nil
+	case experimentDirectory != nil && len(parts) == 3 && parts[1] == "runs":
 		match := runNamePattern.FindStringSubmatch(parts[2])
 		if match == nil {
 			return Location{}, true, layoutError(relative, "run filename does not match the canonical layout")
@@ -171,6 +199,9 @@ func ClassifyPath(relative string) (location Location, recognized bool, err erro
 		base.Kind, base.ID = research.KindAttempt, id
 		return base, true, nil
 	default:
+		if tryDirectory != nil {
+			return Location{}, true, layoutError(relative, "path is not a canonical Try or Attempt record")
+		}
 		return Location{}, true, layoutError(relative, "path is not a canonical Experiment, Run, or Attempt record")
 	}
 }
@@ -197,6 +228,12 @@ func ValidateDocumentPath(location Location, document *Document) error {
 	if location.Kind == research.KindExperiment {
 		if !strings.HasPrefix(id.UUIDHex(), location.ExperimentPrefix) {
 			return layoutError(location.Relative, "experiment directory prefix %s does not match ID %s", location.ExperimentPrefix, id)
+		}
+		return nil
+	}
+	if location.Kind == research.KindTry {
+		if !strings.HasPrefix(id.UUIDHex(), location.TryPrefix) {
+			return layoutError(location.Relative, "Try directory prefix %s does not match ID %s", location.TryPrefix, id)
 		}
 		return nil
 	}
@@ -260,6 +297,8 @@ func PathForNew(value research.Record, inventory *Inventory) (string, error) {
 	}
 	common := value.GetCommon()
 	switch record := value.(type) {
+	case *research.Source:
+		return path.Join(SourcesDir, id.String()+"-"+Slug(common.Title, "source")+".md"), nil
 	case *research.Idea:
 		return path.Join(IdeasDir, id.String()+"-"+Slug(common.Title, "idea")+".md"), nil
 	case *research.ResourcePool:
@@ -288,6 +327,11 @@ func PathForNew(value research.Record, inventory *Inventory) (string, error) {
 		return path.Join(PromotionsDir, id.String()+"-"+Slug(common.Title, "promotion")+".md"), nil
 	case *research.Decision:
 		return path.Join(DecisionsDir, id.String()+"-"+Slug(common.Title, "decision")+".md"), nil
+	case *research.Try:
+		// Try paths are immutable merge identities, not display abbreviations. The
+		// full UUID payload prevents two linked branches from allocating the same
+		// directory before either branch can observe the other Try.
+		return path.Join("t-"+id.UUIDHex()+"-"+Slug(common.Title, "try"), "TRY.md"), nil
 	case *research.Experiment:
 		var candidates []research.ReferenceCandidate
 		if inventory != nil {
@@ -318,6 +362,23 @@ func PathForNew(value research.Record, inventory *Inventory) (string, error) {
 	case *research.Attempt:
 		if inventory == nil {
 			return "", layoutError("", "Attempt path allocation requires an inventory")
+		}
+		if !record.Try.IsZero() {
+			if !record.Run.IsZero() {
+				return "", layoutError("", "Attempt cannot have both Run and Try owners")
+			}
+			owner, err := inventory.ByID(record.Try)
+			if err != nil {
+				return "", err
+			}
+			location, found := inventory.Location(owner)
+			if !found || location.TryDir == "" {
+				return "", layoutError(owner.Path, "owning Try has no canonical directory")
+			}
+			return path.Join(location.TryDir, "attempts", id.String()+".md"), nil
+		}
+		if record.Run.IsZero() {
+			return "", layoutError("", "Attempt requires one Run or Try owner")
 		}
 		run, err := inventory.ByID(record.Run)
 		if err != nil {

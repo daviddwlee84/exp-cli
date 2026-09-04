@@ -1,5 +1,20 @@
 # Experiment methodology
 
+## Choose exploration, formal evidence, or promotion
+
+Use a direct Try for a short bounded question whose purpose is deciding whether
+to formalize a direction. Clean is the default; explicit dirty capture remains
+exploratory and must be rerun through a clean formal Attempt before Candidate
+creation. Use a priced Plan/Queue/Experiment when constrained resources,
+preregistered comparison, or reusable evidence is required. Use the promotion
+path only after Candidate/Release validation; it requires a sealed fresh holdout
+and named human decision.
+
+Resolve the canonical Project and every Source/subdir before execution. A local
+clone association and config preference never establish evidence identity.
+Formal runtime v2 captures clean exact SourceSnapshots; process, scheduler,
+output-hash, and MLflow success remain operational observations.
+
 ## Start with expected payoff
 
 An experiment is justified by a decision it could improve, not by novelty alone. Before creating a Plan, ask:
@@ -99,3 +114,8 @@ finite holdout budget before creating the fresh holdout Evaluation; every
 promotion metric needs a threshold and one Evaluation cannot be reused.
 Production approval
 remains a named human action even when experimental dispatch is automated.
+
+Large datasets, model/checkpoint bytes, artifact files, traces, and unbounded
+logs remain in MLflow, DVC, or object storage. Evaluation and Candidate carry
+only bounded selected values, digests, exact Source/commit identity, and
+sanitized refs needed for the decision.

@@ -4,10 +4,11 @@
 
 Providers expose capabilities of installed upstream tools; they do not become
 authorities for research records. The current implementation includes audited
-Pueue scheduler operations, a private direct worker envelope, and read-only
-MLflow run verification. Default `doctor` remains executable-presence discovery
-only. There is no dynamic Go plugin ABI and no universal “experiment provider”
-interface.
+Pueue scheduler operations, v1/v2 private worker envelopes, named-profile
+read-only MLflow observation, and a separate workspace-provider registry whose
+native Git baseline owns byte verification. Default `doctor` remains
+executable-presence discovery only. There is no dynamic Go plugin ABI and no
+universal “experiment provider” interface.
 
 An adapter declares one descriptor and implements only the roles it supports:
 
@@ -20,6 +21,14 @@ An adapter declares one descriptor and implements only the roles it supports:
 | Registry | Get/list/resolve aliases for model resources | Read-only only after a concrete API is verified |
 
 A provider may implement several roles, but every operation belongs to one role and one capability. Every Attempt has exactly one Scheduler owner. Nested schedulers are rejected unless an explicit reviewed operation plan assigns concurrency and cancellation ownership.
+
+Workspace preparation is a separate capability boundary, not a new research
+record role. `native_git` implements prepare/verify/inspect/cleanup/retire and
+remains authoritative even after optional provider selection. `dev_cli` is
+listed but every lifecycle capability currently fails closed: its public output
+has no schema-versioned exact-path machine receipt. Trusted fallback can report
+native Git as the actual provider; provider-local IDs never identify a canonical
+Source or managed worktree.
 
 Consumer Google Colab browser sessions have no durable general control plane and are not supported. A future adapter requires a specifically named, documented enterprise service such as an applicable Vertex/Colab Enterprise API; the consumer UI will not be scraped.
 
@@ -59,14 +68,15 @@ supported | unsupported | unknown
 
 Missing optional binaries, unreachable daemons, unavailable accounting, and unknown versions degrade that provider; they do not fail local record commands. Unknown is never promoted to supported by optimistic parsing.
 
-Default `exp doctor` performs only local executable discovery with `LookPath`.
-It never executes third-party `--version` because nominally read-only flags may
-still create configuration, telemetry, or log state; discovered versions and
-capabilities therefore remain `unknown`. `--live` currently performs no
-additional contact. Provider contact occurs only through an operation-specific
-command such as `provider pueue status`, `provider mlflow verify`, `daemon tick`,
-or `daemon run`. Probing and operations never install a package, start a daemon,
-migrate a provider database, or open authentication.
+Default `exp doctor` performs only local executable discovery with `LookPath`
+and leaves version/capability support unverified. Explicit `doctor --live` runs
+bounded `--version` probes, a read-only local Pueue status probe when applicable,
+and workspace-backend readiness. A version alone leaves capabilities unknown;
+`dev_cli` lifecycle support remains statically unsupported. Provider operations
+also occur through explicit commands such as `provider pueue status`,
+`provider mlflow verify`, `daemon tick`, or `daemon run`. Probes and operations
+never install a package, start a daemon, migrate a provider database, write
+configuration, or open authentication.
 
 ## Operation plans and effects
 
@@ -237,7 +247,9 @@ entire `envs` member recursively before parsing returns or raw state crosses the
 adapter boundary. Do not merely mask keys known today. Submissions use an
 explicit non-secret, non-credential-sensitive environment allowlist because the daemon persists task
 environments. Runtime `secret_env` is therefore rejected for Pueue; a workload
-must obtain credentials through a broker or provider profile after it starts.
+must obtain credentials through its own broker after it starts. Formal runtime
+v2 also rejects MLflow profiles with environment bindings, so a named profile
+cannot be used as a credential-transfer workaround.
 
 The implemented adapter provides sanitized status and exact-task cancel with
 `--confirm` only when one canonical Attempt assigns scheduling to Pueue, its
@@ -257,14 +269,22 @@ Parse native JSON and stdout CSV before considering an explicit SDK/REST capabil
 
 The implemented integration is read-only: a workload creates and logs its own
 run, then `exp provider mlflow verify --run-id ...` requests only named metrics
-and expected tags. It does not create a run, log a metric, upload an artifact,
-or mutate registry state. A verified run may be linked from an Evaluation by
-sanitized identity only when the asserted `exp.attempt_id` tag identifies a
-successful canonical Attempt whose Run belongs to that Experiment, Candidate's
-Experiment, or the Release's combination/single-slot Experiment lineage. When
-an Evaluation later creates a Candidate, that owner must equal the Candidate's
-included successful backing Attempt. Verification is not itself a scientific
-verdict.
+and expected tags. Layered named profiles carry a binary name, context, timeout,
+environment names/policy, and default metrics—never resolved values. The adapter
+does not create a run, log a metric, upload/download an artifact, or mutate
+registry state.
+
+A verified run may be linked from an Evaluation by sanitized identity only when
+the asserted `exp.attempt_id` tag identifies a successful canonical Attempt
+whose Run belongs to that Experiment, Candidate's Experiment, or the Release's
+combination/single-slot Experiment lineage. Explicit `--attempt` creates
+Evaluation v2 only for a successful formal Attempt v3 of an Experiment subject;
+MLflow metadata alone deliberately leaves Evaluation v1. Candidate v2 requires
+that typed Evaluation and any MLflow owner to match the same clean backing
+Attempt. Optional worker observation can be unavailable/unverified without
+changing workload process success; only verified ownership is imported.
+Artifact URIs remain navigation hints and artifact bytes remain MLflow authority.
+Verification is not itself a scientific verdict.
 
 ### DVC, notebooks, and later systems
 
@@ -273,13 +293,20 @@ DVC capabilities are probed one operation at a time after a real binary/version 
 ## Daemon and operational state
 
 `.exp/runtime.json` is the strict execution binding between canonical IDs and
-provider-native configuration. It contains an `exp.runtime/v1` schema, Pool to
-Pueue group/label bindings, and Plan to executable/argv/cwd/timeout/Git identity
-bindings. Allowed environment arrays contain non-secret names only; Pueue
-runtime secret arrays must be empty because task environments are persisted.
-Label prefixes in one Pueue group are pairwise prefix-free and reserve enough
-space for the complete scoped dispatch ID. The actual selected runtime config
-path is excluded from every executable ChangeSet.
+provider-native configuration. The closed `exp.runtime/v1` decoder retains its
+embedded-repository Pool/Plan and top-level Git identity contract. The separate
+`exp.runtime/v2` decoder binds one execution Source and optional read-only
+Sources to `main`, `registered_worktree`, or `managed_worktree` checkouts, exact
+clean SourceSnapshots, and worker-job v2. Runtime v2 requires an exact raw-file
+`runtime.dispatch` trust receipt and explicit canonical worker authority; v1
+fields are never reinterpreted as v2.
+
+Allowed environment arrays contain non-secret names only; Pueue runtime secret
+arrays must be empty because task environments are persisted. Formal v2 also
+rejects environment-bound MLflow profiles. Label prefixes in one Pueue group are
+pairwise prefix-free and reserve enough space for the complete scoped dispatch
+ID. The actual selected runtime config path is excluded from every executable
+ChangeSet.
 
 The daemon's SQLite database at
 `<git-common-dir>/exp/runtime/v1/control.sqlite` owns leases, fencing tokens,

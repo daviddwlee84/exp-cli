@@ -177,7 +177,7 @@ func runQueueCreate(command *cobra.Command, app *App, root *rootOptions, options
 	queue := &research.Queue{Common: research.Common{Schema: research.SchemaQueue, ID: id, Title: options.title, CreatedAt: now, UpdatedAt: now}, Revision: 1, Partitions: partitions}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "queue.create", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{Record: queue, Body: body}}}})
 	if err != nil {
-		return commandFailure(app, options.json, "queue create", struct{}{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "queue create", result, err)
 	}
 	published := transactionDocument(result, research.KindQueue)
 	data := struct {

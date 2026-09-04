@@ -9,7 +9,6 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/controlplane"
 	"github.com/daviddwlee84/exp-cli/internal/execx"
 	"github.com/daviddwlee84/exp-cli/internal/mlflow"
-	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/pueue"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
@@ -21,6 +20,7 @@ type providerOpsOptions struct {
 	runID     string
 	metrics   []string
 	tags      []string
+	mlflowCtx string
 	allowEnv  []string
 	secretEnv []string
 	confirm   bool
@@ -65,6 +65,7 @@ func newMLflowProviderCommand(app *App, root *rootOptions) *cobra.Command {
 	flags.StringVar(&options.runID, "run-id", "", "set the explicit workload-owned MLflow run ID")
 	flags.StringSliceVar(&options.metrics, "metric", nil, "request a metric by exact name")
 	flags.StringSliceVar(&options.tags, "tag", nil, "verify NAME=VALUE without returning other tags")
+	flags.StringVar(&options.mlflowCtx, "mlflow-context", "", "override the non-secret MLflow context in compatibility mode")
 	flags.StringSliceVar(&options.allowEnv, "allow-env", nil, "inherit an additional non-secret environment variable")
 	flags.StringSliceVar(&options.secretEnv, "secret-env", nil, "bind a required secret from the same parent environment name")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
@@ -74,11 +75,7 @@ func newMLflowProviderCommand(app *App, root *rootOptions) *cobra.Command {
 }
 
 func runPueueStatus(command *cobra.Command, app *App, root *rootOptions, options *providerOpsOptions) error {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, "provider pueue status", pueue.Snapshot{}, false, nil, err)
-	}
-	if _, err = app.DiscoverProject(command.Context(), start); err != nil {
+	if _, err := resolveProjectInfo(command, app, root); err != nil {
 		return commandFailure(app, options.json, "provider pueue status", pueue.Snapshot{}, false, nil, err)
 	}
 	snapshot, err := (pueue.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup}).Status(command.Context())
@@ -106,15 +103,7 @@ func runPueueCancel(command *cobra.Command, app *App, root *rootOptions, options
 	if err != nil || taskID < 0 {
 		return commandFailure(app, options.json, "provider pueue cancel", struct{}{}, false, nil, errors.New("task ID must be a non-negative integer"))
 	}
-	start, err := app.startDir(root.startDir)
-	var info *project.Info
-	if err == nil {
-		info, err = app.DiscoverProject(command.Context(), start)
-	}
-	if err != nil {
-		return commandFailure(app, options.json, "provider pueue cancel", struct{}{}, false, nil, err)
-	}
-	store, err := app.NewTransactionalStore(info)
+	info, store, err := openTransactionalStore(command, app, root)
 	if err != nil {
 		return commandFailure(app, options.json, "provider pueue cancel", struct{}{}, false, nil, err)
 	}
@@ -205,11 +194,18 @@ func verifyPueueCancelIdentity(snapshot pueue.Snapshot, taskID int64, reference 
 }
 
 func runMLflowVerify(command *cobra.Command, app *App, root *rootOptions, options *providerOpsOptions) error {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
+	resolved, err := resolveWorkspaceContext(command, app, root)
+	if err != nil || resolved == nil || resolved.Project == nil {
+		if err == nil {
+			err = errors.New("workspace resolver returned no canonical Project")
+		}
 		return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, err)
 	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	profile, err := mlflow.ResolveInvocation(resolved.Config, mlflow.InvocationOptions{
+		Profile: root.mlflowProfile, Context: options.mlflowCtx,
+		ContextSet: command.Flags().Changed("mlflow-context"),
+		AllowEnv:   append([]string{}, options.allowEnv...), SecretEnv: append([]string{}, options.secretEnv...),
+	})
 	if err != nil {
 		return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, err)
 	}
@@ -219,21 +215,28 @@ func runMLflowVerify(command *cobra.Command, app *App, root *rootOptions, option
 		if !found || name == "" {
 			return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, fmt.Errorf("tag %q must be NAME=VALUE", item))
 		}
+		if _, duplicate := expectedTags[name]; duplicate {
+			return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, fmt.Errorf("tag %q is supplied more than once", name))
+		}
 		expectedTags[name] = value
 	}
-	allowed := append(execx.MinimalAllowlist(), options.allowEnv...)
-	bindings := make([]execx.Binding, 0, len(options.secretEnv))
-	for _, name := range options.secretEnv {
-		bindings = append(bindings, execx.BindSecretFromEnv(name, name))
-	}
-	environment, err := execx.NewEnvironment(allowed, bindings...)
+	environment, err := profile.EnvironmentPolicy()
 	if err != nil {
 		return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, err)
 	}
-	run, err := (mlflow.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup}).Describe(command.Context(), mlflow.DescribeRequest{
-		RunID: options.runID, MetricNames: options.metrics, ExpectedTags: expectedTags,
-		Environment: environment, CWD: info.Repository.Root,
+	metrics := append([]string{}, options.metrics...)
+	if len(metrics) == 0 {
+		metrics = append(metrics, profile.DefaultMetrics...)
+	}
+	timeout, err := profile.TimeoutDuration()
+	if err != nil {
+		return commandFailure(app, options.json, "provider mlflow verify", mlflow.Run{}, false, nil, err)
+	}
+	run, err := (mlflow.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup, Binary: profile.Binary, Timeout: timeout}).Describe(command.Context(), mlflow.DescribeRequest{
+		RunID: options.runID, MetricNames: metrics, ExpectedTags: expectedTags,
+		Environment: environment, CWD: resolved.Project.Repository.Root,
 	})
+	run.Profile, run.Context = profile.Name, profile.Context
 	if err != nil {
 		return commandFailure(app, options.json, "provider mlflow verify", run, false, nil, err)
 	}
@@ -241,7 +244,7 @@ func runMLflowVerify(command *cobra.Command, app *App, root *rootOptions, option
 	for _, message := range run.Diagnostics {
 		diagnostics = append(diagnostics, Diagnostic{Severity: SeverityWarning, Code: "mlflow.verification", Message: message})
 	}
-	human := fmt.Sprintf("MLflow run %s status=%s verified=%t metrics=%d tags=%d\n", run.RunID, run.Status, run.Verified, len(run.Metrics), len(run.Tags))
+	human := fmt.Sprintf("MLflow profile=%s context=%s run=%s status=%s verified=%t metrics=%d tags=%d\n", profile.Name, profile.Context, run.RunID, run.Status, run.Verified, len(run.Metrics), len(run.Tags))
 	if !run.Verified {
 		return commandFailure(app, options.json, "provider mlflow verify", run, false, diagnostics, errors.New("MLflow verification assertions failed"))
 	}

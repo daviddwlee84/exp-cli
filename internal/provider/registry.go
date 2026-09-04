@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,8 @@ type BinaryLookup func(string) (string, error)
 // probe. The registry itself never chooses argv or invokes a process.
 type LocalVersionResult struct {
 	Version      string                 `json:"version,omitempty"`
+	Readiness    ReadinessState         `json:"readiness,omitempty"`
+	Reason       string                 `json:"reason,omitempty"`
 	Capabilities map[Capability]Support `json:"capabilities,omitempty"`
 	Diagnostics  []Diagnostic           `json:"diagnostics,omitempty"`
 }
@@ -195,6 +198,8 @@ func (r *Registry) discoverDescriptor(
 		Provider:     descriptor.Name,
 		Context:      contextName,
 		ObservedAt:   observedAt,
+		Readiness:    ReadinessUnknown,
+		Reason:       "not-observed",
 		Capabilities: make([]CapabilityResult, len(descriptor.Capabilities)),
 		Diagnostics:  []Diagnostic{},
 	}
@@ -203,6 +208,17 @@ func (r *Registry) discoverDescriptor(
 	}
 
 	if len(descriptor.CandidateBinaries) == 0 {
+		result.Readiness = ReadinessBuiltIn
+		result.Reason = "compiled-in"
+		unsupported := true
+		for index := range result.Capabilities {
+			result.Capabilities[index].Support = builtInCapabilitySupport(runtime.GOOS, descriptor.Name, result.Capabilities[index].Capability)
+			unsupported = unsupported && result.Capabilities[index].Support == SupportUnsupported
+		}
+		if unsupported {
+			result.Readiness = ReadinessUnsupported
+			result.Reason = "platform-unsupported"
+		}
 		if hasBinaryOverride {
 			result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
 				SeverityWarning,
@@ -215,7 +231,7 @@ func (r *Registry) discoverDescriptor(
 		result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
 			SeverityInfo,
 			"binary_not_required",
-			"provider is built in; operation support is not probed in this milestone",
+			"provider is built in and requires no local executable probe",
 			"",
 			policy,
 		))
@@ -228,6 +244,8 @@ func (r *Registry) discoverDescriptor(
 			resolved = binaryOverride
 		}
 		if resolved == "" {
+			result.Readiness = ReadinessUnknown
+			result.Reason = "invalid-binary-override"
 			result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
 				SeverityWarning,
 				"invalid_binary_override",
@@ -257,6 +275,8 @@ func (r *Registry) discoverDescriptor(
 			break
 		}
 		if resolved == "" {
+			result.Readiness = ReadinessMissing
+			result.Reason = "binary-not-found"
 			result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
 				SeverityWarning,
 				"optional_binary_missing",
@@ -269,6 +289,8 @@ func (r *Registry) discoverDescriptor(
 	}
 	resolvedDisplay, sanitizeErr := sanitizeTextStrict(resolved, policy)
 	if sanitizeErr != nil {
+		result.Readiness = ReadinessUnknown
+		result.Reason = "binary-path-invalid"
 		result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
 			SeverityWarning,
 			"binary_path_omitted",
@@ -279,6 +301,8 @@ func (r *Registry) discoverDescriptor(
 		return normalizedProbeResult(result)
 	}
 	result.ResolvedBinaryPath = resolvedDisplay
+	result.Readiness = ReadinessInstalledNotProbed
+	result.Reason = "probe-not-requested"
 
 	if versionProbe == nil {
 		result.Diagnostics = append(result.Diagnostics, mustDiagnostic(
@@ -291,8 +315,11 @@ func (r *Registry) discoverDescriptor(
 		return normalizedProbeResult(result)
 	}
 
+	result.Probed = true
 	versionResult, err := versionProbe(ctx, descriptor.normalized(), resolved)
 	if err != nil {
+		result.Readiness = ReadinessUnknown
+		result.Reason = "probe-failed"
 		native, sanitizeErr := sanitizeSingleLine(err.Error(), policy)
 		if sanitizeErr != nil {
 			native = "version probe error was omitted by redaction policy"
@@ -305,6 +332,24 @@ func (r *Registry) discoverDescriptor(
 			policy,
 		))
 		return normalizedProbeResult(result)
+	}
+
+	result.Readiness = versionResult.Readiness
+	if result.Readiness == "" {
+		result.Readiness = ReadinessReady
+	}
+	if !result.Readiness.Valid() || result.Readiness == ReadinessBuiltIn || result.Readiness == ReadinessMissing || result.Readiness == ReadinessInstalledNotProbed {
+		result.Readiness = ReadinessUnknown
+		result.Reason = "invalid-probe-state"
+	} else {
+		result.Reason = versionResult.Reason
+		if result.Reason == "" {
+			result.Reason = "live-probe"
+		}
+	}
+	if !validReadinessReason(result.Reason) {
+		result.Readiness = ReadinessUnknown
+		result.Reason = "invalid-probe-reason"
 	}
 
 	if versionResult.Version != "" {
@@ -394,6 +439,19 @@ func normalizedProbeResult(result ProbeResult) ProbeResult {
 	return result
 }
 
+func validReadinessReason(value string) bool {
+	if value == "" || len(value) > 128 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func mustDiagnostic(severity DiagnosticSeverity, code, message, native string, policy RedactionPolicy) Diagnostic {
 	diagnostic, err := NewDiagnostic(severity, code, message, native, policy)
 	if err == nil {
@@ -423,6 +481,13 @@ func compiledRoles(name ProviderName) []Role {
 		roles = append(roles, role)
 	}
 	return roles
+}
+
+func builtInCapabilitySupport(goos string, provider ProviderName, _ Capability) Support {
+	if goos == "aix" && provider == ProviderDirect {
+		return SupportUnsupported
+	}
+	return SupportSupported
 }
 
 func compiledDescriptors() []Descriptor {

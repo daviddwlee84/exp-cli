@@ -24,6 +24,42 @@ import (
 
 type State string
 
+var (
+	ErrUnavailable        = errors.New("Pueue provider is unavailable")
+	ErrBinaryMissing      = errors.New("Pueue binary is missing")
+	ErrServiceUnavailable = errors.New("Pueue daemon is unavailable")
+)
+
+// RequirementError is a typed, path-free remediation for commands that require
+// Pueue. It never includes subprocess output or local configuration values.
+type RequirementError struct {
+	Operation   string
+	Reason      string
+	Remediation string
+	Err         error
+}
+
+func (failure *RequirementError) Error() string {
+	if failure == nil {
+		return ErrUnavailable.Error()
+	}
+	message := "Pueue is required"
+	if failure.Operation != "" {
+		message += " for " + failure.Operation
+	}
+	if failure.Remediation != "" {
+		message += "; " + failure.Remediation
+	}
+	return message
+}
+
+func (failure *RequirementError) Unwrap() error {
+	if failure == nil {
+		return ErrUnavailable
+	}
+	return errors.Join(ErrUnavailable, failure.Err)
+}
+
 const (
 	StateQueued           State = "queued"
 	StateBlocked          State = "blocked"
@@ -61,13 +97,14 @@ type Snapshot struct {
 }
 
 type SubmitRequest struct {
-	Group       string
-	Label       string
-	Priority    int
-	WorkingDir  string
-	Worker      string
-	WorkerArgs  []string
-	Environment execx.Environment
+	Group            string
+	Label            string
+	Priority         int
+	WorkingDir       string
+	Worker           string
+	WorkerArgs       []string
+	QuotedWorkerArgs bool
+	Environment      execx.Environment
 }
 
 type Adapter struct {
@@ -79,7 +116,7 @@ type Adapter struct {
 func (adapter Adapter) Status(ctx context.Context) (Snapshot, error) {
 	result, err := adapter.invoke(ctx, []string{"status", "--json"}, "", execx.Environment{})
 	if err != nil {
-		return Snapshot{}, err
+		return Snapshot{}, pueueRequirement("scheduler status", err)
 	}
 	return ParseStatus([]byte(result.Stdout))
 }
@@ -88,7 +125,13 @@ func (adapter Adapter) Submit(ctx context.Context, request SubmitRequest) (int64
 	if err := validateSubmit(request); err != nil {
 		return 0, err
 	}
-	command, err := WorkerCommand(request.Worker, request.WorkerArgs)
+	var command string
+	var err error
+	if request.QuotedWorkerArgs {
+		command, err = WorkerCommandV2(request.Worker, request.WorkerArgs)
+	} else {
+		command, err = WorkerCommand(request.Worker, request.WorkerArgs)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -96,7 +139,7 @@ func (adapter Adapter) Submit(ctx context.Context, request SubmitRequest) (int64
 		"--priority", strconv.Itoa(request.Priority), "--working-directory", request.WorkingDir, command}
 	result, err := adapter.invoke(ctx, arguments, request.WorkingDir, request.Environment)
 	if err != nil {
-		return 0, err
+		return 0, pueueRequirement("daemon dispatch", err)
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(result.Stdout), 10, 64)
 	if err != nil || id < 0 {
@@ -110,7 +153,26 @@ func (adapter Adapter) Cancel(ctx context.Context, taskID int64, environment exe
 		return errors.New("Pueue task id cannot be negative")
 	}
 	_, err := adapter.invoke(ctx, []string{"kill", strconv.FormatInt(taskID, 10)}, "", environment)
-	return err
+	if err != nil {
+		return pueueRequirement("task cancellation", err)
+	}
+	return nil
+}
+
+func pueueRequirement(operation string, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var requirement *RequirementError
+	if errors.As(err, &requirement) {
+		copy := *requirement
+		copy.Operation = operation
+		return &copy
+	}
+	return &RequirementError{
+		Operation: operation, Reason: "service-unavailable",
+		Remediation: "start the Pueue daemon and retry", Err: errors.Join(ErrServiceUnavailable, err),
+	}
 }
 
 func (adapter Adapter) invoke(ctx context.Context, arguments []string, cwd string, environment execx.Environment) (execx.Result, error) {
@@ -119,8 +181,11 @@ func (adapter Adapter) invoke(ctx context.Context, arguments []string, cwd strin
 		lookup = exec.LookPath
 	}
 	binary, err := lookup("pueue")
-	if err != nil {
-		return execx.Result{ExitCode: -1}, fmt.Errorf("resolve pueue: %w", err)
+	if err != nil || binary == "" {
+		return execx.Result{ExitCode: -1}, &RequirementError{
+			Operation: "scheduler access", Reason: "binary-missing",
+			Remediation: "install Pueue 4.x, start its daemon, and retry", Err: errors.Join(ErrBinaryMissing, err),
+		}
 	}
 	binary, err = filepath.Abs(binary)
 	if err != nil {
@@ -183,7 +248,38 @@ func WorkerCommand(worker string, arguments []string) (string, error) {
 	return strings.Join(parts, " "), nil
 }
 
+// WorkerCommandV2 safely quotes complete argv values, including canonical paths
+// with spaces or apostrophes. V1 retains its historical safe-token restriction.
+func WorkerCommandV2(worker string, arguments []string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", errors.New("Pueue worker submission is unsupported on Windows because its shell envelope is POSIX-specific")
+	}
+	if !filepath.IsAbs(worker) || filepath.Clean(worker) != worker || !safeQuotedArgument(worker) {
+		return "", errors.New("worker executable must be a clean absolute path")
+	}
+	parts := []string{quotePOSIX(worker)}
+	for _, argument := range arguments {
+		if !safeQuotedArgument(argument) {
+			return "", errors.New("worker argument contains invalid text")
+		}
+		parts = append(parts, quotePOSIX(argument))
+	}
+	return strings.Join(parts, " "), nil
+}
+
 func quotePOSIX(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
+
+func safeQuotedArgument(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.Is(unicode.Zl, character) || unicode.Is(unicode.Zp, character) {
+			return false
+		}
+	}
+	return true
+}
 
 func safeToken(value string) bool {
 	if value == "" || len(value) > 512 || !utf8.ValidString(value) {

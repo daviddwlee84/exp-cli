@@ -84,7 +84,7 @@ func runPoolAdd(command *cobra.Command, app *App, root *rootOptions, options *po
 	}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "pool.add", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{Record: pool, Body: body}}}})
 	if err != nil {
-		return commandFailure(app, options.json, "pool add", struct{}{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "pool add", result, err)
 	}
 	published := transactionDocument(result, research.KindResourcePool)
 	data := struct {

@@ -142,8 +142,11 @@ func Apply(ctx context.Context, request ApplyRequest) (ApplyResult, error) {
 
 		if journal.State == "committed" {
 			ok, err := verifyAppliedRoot(ctx, sourcePath, request.Plan)
-			if err != nil || !ok {
-				return fmt.Errorf("committed migration destination is not exact: %w", err)
+			if err != nil {
+				return fmt.Errorf("verify committed migration destination: %w", err)
+			}
+			if !ok {
+				return errors.New("committed migration destination is not exact")
 			}
 			if err := removeVerifiedBackup(ctx, backupPath, request.Plan); err != nil {
 				return err
@@ -193,8 +196,11 @@ func Apply(ctx context.Context, request ApplyRequest) (ApplyResult, error) {
 				return err
 			}
 			ok, err := verifyAppliedRoot(ctx, sourcePath, request.Plan)
-			if err != nil || !ok {
+			if err != nil {
 				return fmt.Errorf("verify published migration root: %w", err)
+			}
+			if !ok {
+				return errors.New("published migration root is not exact")
 			}
 		}
 		journal.State = "committed"
@@ -280,8 +286,11 @@ func buildStage(ctx context.Context, sourcePath, stagePath string, plan *Plan) (
 		return inventory.Error()
 	}
 	ok, err := verifyAppliedRoot(ctx, stagePath, plan)
-	if err != nil || !ok {
-		return fmt.Errorf("staged migration root is not exact: %w", err)
+	if err != nil {
+		return fmt.Errorf("verify staged migration root: %w", err)
+	}
+	if !ok {
+		return errors.New("staged migration root is not exact")
 	}
 	keep = true
 	return nil

@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -21,7 +23,10 @@ import (
 )
 
 const (
-	transactionSchema         = "exp.transaction/v1"
+	transactionSchemaV1       = "exp.transaction/v1"
+	transactionSchemaV2       = "exp.transaction/v2"
+	transactionDirectoryV1    = "transactions"
+	transactionDirectoryV2    = "transactions-v2"
 	transactionJournalFile    = "journal.toml"
 	transactionStagedDir      = "staged"
 	transactionPhasePrepared  = "prepared"
@@ -37,6 +42,7 @@ type transactionJournal struct {
 	Schema        string                    `toml:"schema"`
 	TransactionID string                    `toml:"transaction_id"`
 	ProjectID     research.UUID             `toml:"project_id"`
+	WorktreeID    string                    `toml:"worktree_id,omitempty"`
 	Operation     string                    `toml:"operation"`
 	CreatedAt     time.Time                 `toml:"created_at"`
 	Phase         string                    `toml:"phase"`
@@ -63,6 +69,106 @@ func validExactHash(value string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
 	return err == nil
+}
+
+// transactionWorktreeID identifies one Git worktree without persisting its
+// absolute path. Linked worktree Git directories are stable entries beneath the
+// common Git directory, while the primary worktree is represented by ".".
+func transactionWorktreeID(canonicalRoot, gitCommonDir string) (string, error) {
+	if canonicalRoot == "" || gitCommonDir == "" || !filepath.IsAbs(canonicalRoot) || !filepath.IsAbs(gitCommonDir) {
+		return "", errors.New("transaction worktree identity requires absolute canonical and Git-common roots")
+	}
+	repositoryRoot := filepath.Dir(canonicalRoot)
+	markerPath := filepath.Join(repositoryRoot, ".git")
+	markerInfo, err := os.Lstat(markerPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect transaction worktree Git marker: %w", err)
+	}
+	var gitDir string
+	switch {
+	case markerInfo.Mode()&os.ModeSymlink != 0:
+		return "", errors.New("transaction worktree Git marker is a symlink")
+	case markerInfo.IsDir():
+		gitDir, err = filepath.EvalSymlinks(markerPath)
+	case markerInfo.Mode().IsRegular():
+		file, openErr := os.Open(markerPath)
+		if openErr != nil {
+			return "", fmt.Errorf("open transaction worktree Git marker: %w", openErr)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, 4097))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return "", fmt.Errorf("read transaction worktree Git marker: %w", errors.Join(readErr, closeErr))
+		}
+		if len(content) > 4096 {
+			return "", errors.New("transaction worktree Git marker exceeds 4096 bytes")
+		}
+		line := strings.TrimSuffix(strings.TrimSuffix(string(content), "\n"), "\r")
+		if strings.ContainsAny(line, "\r\n\x00") || !strings.HasPrefix(line, "gitdir: ") {
+			return "", errors.New("transaction worktree Git marker is malformed")
+		}
+		gitDir = strings.TrimPrefix(line, "gitdir: ")
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(repositoryRoot, gitDir)
+		}
+		gitDir, err = filepath.EvalSymlinks(filepath.Clean(gitDir))
+	default:
+		return "", errors.New("transaction worktree Git marker is not a directory or regular file")
+	}
+	if err != nil {
+		return "", fmt.Errorf("canonicalize transaction worktree Git directory: %w", err)
+	}
+	common, err := filepath.EvalSymlinks(gitCommonDir)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize transaction Git-common directory: %w", err)
+	}
+	relative, err := filepath.Rel(common, gitDir)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("transaction worktree Git directory is outside the common Git directory: %w", errors.Join(pathx.ErrOutsideRoot, err))
+	}
+	filesystemIdentity, err := pathx.DirectoryFilesystemIdentity(gitDir)
+	if err != nil {
+		return "", fmt.Errorf("identify transaction worktree Git directory: %w", err)
+	}
+	identity := sha256.Sum256([]byte("exp.transaction.worktree/v1\x00" + filepath.ToSlash(relative) + "\x00" + filesystemIdentity))
+	return "sha256:" + hex.EncodeToString(identity[:]), nil
+}
+
+func allowLegacyPreparedJournal(gitCommonDir string) (bool, error) {
+	worktreesPath := filepath.Join(gitCommonDir, "worktrees")
+	info, err := os.Lstat(worktreesPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect linked-worktree metadata: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, errors.New("linked-worktree metadata is not a real directory")
+	}
+	entries, err := os.ReadDir(worktreesPath)
+	if err != nil {
+		return false, fmt.Errorf("read linked-worktree metadata: %w", err)
+	}
+	return len(entries) == 0, nil
+}
+
+func (store *Store) transactionScope() (string, bool, error) {
+	if store == nil {
+		return "", false, errors.New("transaction scope requires a Store")
+	}
+	if store.worktreeIDErr != nil || !validExactHash(store.worktreeID) {
+		return "", false, fmt.Errorf("resolve transaction worktree identity: %w", errors.Join(store.worktreeIDErr, ErrUnsupportedTransaction))
+	}
+	current, err := transactionWorktreeID(store.Root, store.GitCommonDir)
+	if err != nil || current != store.worktreeID {
+		return "", false, fmt.Errorf("transaction worktree identity changed: %w", errors.Join(ErrUnsupportedTransaction, err))
+	}
+	allowLegacy, err := allowLegacyPreparedJournal(store.GitCommonDir)
+	if err != nil {
+		return "", false, err
+	}
+	return current, allowLegacy, nil
 }
 
 func encodeTransactionJournal(journal transactionJournal) ([]byte, error) {
@@ -94,7 +200,7 @@ func decodeTransactionJournal(data []byte) (transactionJournal, error) {
 }
 
 func (store *Store) createTransactionRoots(now time.Time) (string, *os.Root, *os.Root, error) {
-	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, "transactions")
+	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, transactionDirectoryV2)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("open transactions directory: %w", err)
 	}
@@ -109,7 +215,7 @@ func (store *Store) createTransactionRoots(now time.Time) (string, *os.Root, *os
 			return "", nil, nil, fmt.Errorf("generate transaction UUIDv7: %w", parseErr)
 		}
 		transactionID := parsed.String()
-		if err := store.runTransactionHook(StageTransactionDirectoryCreate, transactionID, path.Join("transactions", transactionID)); err != nil {
+		if err := store.runTransactionHook(StageTransactionDirectoryCreate, transactionID, path.Join(transactionDirectoryV2, transactionID)); err != nil {
 			return "", nil, nil, err
 		}
 		if err := transactions.Mkdir(transactionID, 0o700); errors.Is(err, fs.ErrExist) {
@@ -194,7 +300,7 @@ func (store *Store) persistPreparedTransaction(transactionRoot, stagedRoot *os.R
 	if err := pathx.SyncRoot(transactionRoot); err != nil {
 		return true, fmt.Errorf("sync transaction directory: %w", err)
 	}
-	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, "transactions")
+	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, transactionDirectoryV2)
 	if err != nil {
 		return true, err
 	}
@@ -207,20 +313,31 @@ func (store *Store) persistPreparedTransaction(transactionRoot, stagedRoot *os.R
 }
 
 func (store *Store) recoverPreparedTransactionsLocked(ctx context.Context) error {
-	if err := cleanupTransactionAtomicTemps(store.coordinationRoot); err != nil {
-		return fmt.Errorf("clean abandoned transaction temporaries: %w", err)
-	}
-	if err := cleanupUnjournaledTransactions(store.coordinationRoot); err != nil {
-		return fmt.Errorf("clean unjournaled transaction preparation: %w", err)
+	for _, directory := range []string{transactionDirectoryV1, transactionDirectoryV2} {
+		if err := cleanupTransactionAtomicTemps(store.coordinationRoot, directory); err != nil {
+			return fmt.Errorf("clean abandoned transaction temporaries: %w", err)
+		}
+		if err := cleanupUnjournaledTransactions(store.coordinationRoot, directory); err != nil {
+			return fmt.Errorf("clean unjournaled transaction preparation: %w", err)
+		}
 	}
 	projectID, err := canonicalProjectID(ctx, store.canonicalRoot)
 	if err != nil {
 		return err
 	}
-	transactions, err := loadTransactionJournals(ctx, store.coordinationRoot, projectID)
+	worktreeID, allowLegacy, err := store.transactionScope()
 	if err != nil {
 		return err
 	}
+	legacyTransactions, err := loadTransactionJournals(ctx, store.coordinationRoot, transactionDirectoryV1, transactionSchemaV1, projectID, worktreeID, allowLegacy)
+	if err != nil {
+		return err
+	}
+	currentTransactions, err := loadTransactionJournals(ctx, store.coordinationRoot, transactionDirectoryV2, transactionSchemaV2, projectID, worktreeID, allowLegacy)
+	if err != nil {
+		return err
+	}
+	transactions := append(append([]*preparedTransaction{}, legacyTransactions...), currentTransactions...)
 	// All journals and staged files are validated before any one transaction is
 	// allowed to change canonical state. A committed journal is historical: a
 	// later transaction may legitimately have changed the same destination.
@@ -253,11 +370,14 @@ func (store *Store) recoverPreparedTransactionsLocked(ctx context.Context) error
 			return err
 		}
 	}
-	return pruneCommittedTransactions(store.coordinationRoot, transactions, committedJournalRetention)
+	return errors.Join(
+		pruneCommittedTransactions(store.coordinationRoot, transactionDirectoryV1, legacyTransactions, committedJournalRetention),
+		pruneCommittedTransactions(store.coordinationRoot, transactionDirectoryV2, currentTransactions, committedJournalRetention),
+	)
 }
 
-func cleanupUnjournaledTransactions(coordination *os.Root) error {
-	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, "transactions")
+func cleanupUnjournaledTransactions(coordination *os.Root, directory string) error {
+	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, directory)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -353,8 +473,8 @@ func cleanupUnjournaledTransactions(coordination *os.Root) error {
 	return nil
 }
 
-func cleanupTransactionAtomicTemps(coordination *os.Root) error {
-	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, "transactions")
+func cleanupTransactionAtomicTemps(coordination *os.Root, directory string) error {
+	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, directory)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -544,7 +664,10 @@ func (store *Store) removeCanonicalTransactionEntry(ctx context.Context, transac
 }
 
 func (store *Store) markTransactionCommitted(prepared *preparedTransaction) error {
-	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, "transactions")
+	if prepared == nil || prepared.directory == "" {
+		return fmt.Errorf("prepared transaction namespace is missing: %w", ErrInvalidTransaction)
+	}
+	transactions, err := pathx.OpenRootAtNoSymlinks(store.coordinationRoot, prepared.directory)
 	if err != nil {
 		return err
 	}
@@ -635,8 +758,8 @@ func canonicalProjectID(ctx context.Context, root *os.Root) (research.UUID, erro
 	return project.ProjectID, nil
 }
 
-func loadTransactionJournals(ctx context.Context, coordination *os.Root, projectID research.UUID) ([]*preparedTransaction, error) {
-	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, "transactions")
+func loadTransactionJournals(ctx context.Context, coordination *os.Root, directory, schema string, projectID research.UUID, worktreeID string, allowLegacyPrepared bool) ([]*preparedTransaction, error) {
+	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, directory)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -671,13 +794,15 @@ func loadTransactionJournals(ctx context.Context, coordination *os.Root, project
 		if err != nil {
 			return nil, err
 		}
-		transaction, loadErr := loadOneTransaction(ctx, transactionRoot, entry.Name(), projectID)
+		transaction, loadErr := loadOneTransaction(ctx, transactionRoot, directory, schema, entry.Name(), projectID, worktreeID, allowLegacyPrepared)
 		verifyErr := pathx.VerifyRootAt(transactions, entry.Name(), transactionRoot)
 		closeErr := transactionRoot.Close()
 		if loadErr != nil || verifyErr != nil || closeErr != nil {
 			return nil, fmt.Errorf("load transaction %s: %w", entry.Name(), errors.Join(loadErr, verifyErr, closeErr))
 		}
-		loaded = append(loaded, transaction)
+		if transaction != nil {
+			loaded = append(loaded, transaction)
+		}
 	}
 	sort.Slice(loaded, func(left, right int) bool {
 		return loaded[left].journal.TransactionID < loaded[right].journal.TransactionID
@@ -685,7 +810,7 @@ func loadTransactionJournals(ctx context.Context, coordination *os.Root, project
 	return loaded, nil
 }
 
-func pruneCommittedTransactions(coordination *os.Root, loaded []*preparedTransaction, keep int) error {
+func pruneCommittedTransactions(coordination *os.Root, directory string, loaded []*preparedTransaction, keep int) error {
 	if keep < 0 {
 		keep = 0
 	}
@@ -699,7 +824,7 @@ func pruneCommittedTransactions(coordination *os.Root, loaded []*preparedTransac
 		return nil
 	}
 	sort.Slice(committed, func(i, j int) bool { return committed[i].journal.TransactionID < committed[j].journal.TransactionID })
-	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, "transactions")
+	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, directory)
 	if err != nil {
 		return err
 	}
@@ -783,7 +908,7 @@ func removeCommittedTransactionDirectory(transactions *os.Root, id string) error
 	return transactions.Remove(id)
 }
 
-func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directoryID string, projectID research.UUID) (*preparedTransaction, error) {
+func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directory, schema, directoryID string, projectID research.UUID, worktreeID string, allowLegacyPrepared bool) (*preparedTransaction, error) {
 	if err := checkDirectoryRootMode(transactionRoot, 0o700, "transaction directory"); err != nil {
 		return nil, err
 	}
@@ -798,15 +923,31 @@ func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directory
 	if err != nil {
 		return nil, fmt.Errorf("read transaction journal: %w", errors.Join(ErrUnsupportedTransaction, err))
 	}
-	if err := checkPrivateMode(journalInfo, 0o600, "transaction journal"); err != nil {
+	journalPrivate, err := pathx.CheckPrivateFile(transactionRoot, transactionJournalFile, 0o600, "transaction journal")
+	if err != nil || !os.SameFile(journalInfo, journalPrivate) {
 		return nil, errors.Join(ErrUnsupportedTransaction, err)
 	}
 	journal, err := decodeTransactionJournal(journalBytes)
 	if err != nil {
 		return nil, errors.Join(ErrUnsupportedTransaction, err)
 	}
-	if err := validateTransactionJournal(journal, directoryID, projectID); err != nil {
+	if err := validateTransactionJournal(journal, schema, directoryID, projectID); err != nil {
 		return nil, err
+	}
+	if schema == transactionSchemaV1 {
+		if journal.WorktreeID != "" {
+			return nil, fmt.Errorf("exp.transaction/v1 forbids worktree_id: %w", ErrUnsupportedTransaction)
+		}
+		if journal.Phase == transactionPhasePrepared && !allowLegacyPrepared {
+			return nil, fmt.Errorf("legacy prepared transaction %s has no worktree identity while linked worktrees exist: %w", journal.TransactionID, ErrUnsupportedTransaction)
+		}
+	} else {
+		if journal.WorktreeID == "" {
+			return nil, fmt.Errorf("exp.transaction/v2 requires worktree_id: %w", ErrUnsupportedTransaction)
+		}
+		if journal.WorktreeID != worktreeID {
+			return nil, nil
+		}
 	}
 	stagedRoot, err := pathx.OpenRootAtNoSymlinks(transactionRoot, transactionStagedDir)
 	if err != nil {
@@ -821,7 +962,7 @@ func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directory
 		return nil, err
 	}
 	expectedStaged := make(map[string]struct{})
-	prepared := &preparedTransaction{journal: journal, journalBytes: append([]byte(nil), journalBytes...), entries: make([]preparedTransactionEntry, len(journal.Entries))}
+	prepared := &preparedTransaction{directory: directory, journal: journal, journalBytes: append([]byte(nil), journalBytes...), entries: make([]preparedTransactionEntry, len(journal.Entries))}
 	for index, journalEntry := range journal.Entries {
 		entry := preparedTransactionEntry{journal: journalEntry}
 		if journalEntry.Operation != TransactionDelete {
@@ -834,8 +975,9 @@ func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directory
 			if err != nil {
 				return nil, fmt.Errorf("read staged entry %d: %w", index, errors.Join(ErrUnsupportedTransaction, err))
 			}
-			if err := checkPrivateMode(info, 0o600, "staged transaction file"); err != nil {
-				return nil, errors.Join(ErrUnsupportedTransaction, err)
+			privateInfo, privateErr := pathx.CheckPrivateFile(stagedRoot, expectedName, 0o600, "staged transaction file")
+			if privateErr != nil || !os.SameFile(info, privateInfo) {
+				return nil, errors.Join(ErrUnsupportedTransaction, privateErr)
 			}
 			if exactHash(data) != journalEntry.StagedHash {
 				return nil, fmt.Errorf("staged hash mismatch for %s: journal %s observed %s: %w", journalEntry.Path, journalEntry.StagedHash, exactHash(data), ErrUnsupportedTransaction)
@@ -868,9 +1010,9 @@ func loadOneTransaction(ctx context.Context, transactionRoot *os.Root, directory
 	return prepared, nil
 }
 
-func validateTransactionJournal(journal transactionJournal, directoryID string, projectID research.UUID) error {
-	if journal.Schema != transactionSchema {
-		return fmt.Errorf("unknown transaction schema %q: %w", journal.Schema, ErrUnsupportedTransaction)
+func validateTransactionJournal(journal transactionJournal, expectedSchema, directoryID string, projectID research.UUID) error {
+	if journal.Schema != expectedSchema || expectedSchema != transactionSchemaV1 && expectedSchema != transactionSchemaV2 {
+		return fmt.Errorf("unknown transaction schema %q in %s namespace: %w", journal.Schema, expectedSchema, ErrUnsupportedTransaction)
 	}
 	parsedID, err := research.ParseUUID(journal.TransactionID)
 	if err != nil || !parsedID.IsNative() || journal.TransactionID != directoryID {
@@ -878,6 +1020,9 @@ func validateTransactionJournal(journal transactionJournal, directoryID string, 
 	}
 	if journal.ProjectID != projectID {
 		return fmt.Errorf("transaction %s belongs to project %s, current project is %s: %w", journal.TransactionID, journal.ProjectID, projectID, ErrUnsupportedTransaction)
+	}
+	if expectedSchema == transactionSchemaV1 && journal.WorktreeID != "" || expectedSchema == transactionSchemaV2 && !validExactHash(journal.WorktreeID) {
+		return fmt.Errorf("transaction %s has an invalid worktree identity for %s: %w", journal.TransactionID, expectedSchema, ErrUnsupportedTransaction)
 	}
 	if !transactionOperationPattern.MatchString(journal.Operation) || len(journal.Operation) > 64 {
 		return fmt.Errorf("invalid transaction operation %q: %w", journal.Operation, ErrUnsupportedTransaction)
@@ -924,16 +1069,20 @@ func validateTransactionJournal(journal transactionJournal, directoryID string, 
 	return nil
 }
 
-func inspectTransactionJournalsReadOnly(ctx context.Context, coordination, canonical *os.Root) error {
+func inspectTransactionJournalsReadOnly(ctx context.Context, coordination, canonical *os.Root, worktreeID string, allowLegacyPrepared bool) error {
 	projectID, err := canonicalProjectID(ctx, canonical)
 	if err != nil {
 		return err
 	}
-	transactions, err := loadTransactionJournals(ctx, coordination, projectID)
+	legacy, err := loadTransactionJournals(ctx, coordination, transactionDirectoryV1, transactionSchemaV1, projectID, worktreeID, allowLegacyPrepared)
 	if err != nil {
 		return err
 	}
-	for _, transaction := range transactions {
+	current, err := loadTransactionJournals(ctx, coordination, transactionDirectoryV2, transactionSchemaV2, projectID, worktreeID, allowLegacyPrepared)
+	if err != nil {
+		return err
+	}
+	for _, transaction := range append(legacy, current...) {
 		if transaction.journal.Phase == transactionPhasePrepared {
 			return fmt.Errorf("transaction %s is prepared: %w", transaction.journal.TransactionID, ErrTransactionRecoveryRequired)
 		}
@@ -942,24 +1091,12 @@ func inspectTransactionJournalsReadOnly(ctx context.Context, coordination, canon
 }
 
 func chmodDirectoryRoot(root *os.Root, mode fs.FileMode) error {
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	chmodErr := directory.Chmod(mode)
-	closeErr := directory.Close()
-	return errors.Join(chmodErr, closeErr)
+	return pathx.ProtectPrivateRoot(root, mode)
 }
 
 func checkDirectoryRootMode(root *os.Root, want fs.FileMode, description string) error {
-	info, err := root.Stat(".")
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", description)
-	}
-	return checkModePortable(info.Mode(), want, description)
+	_, err := pathx.CheckPrivateRoot(root, want, description)
+	return err
 }
 
 func checkModePortable(mode, want fs.FileMode, description string) error {

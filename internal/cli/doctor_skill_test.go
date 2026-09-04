@@ -13,6 +13,7 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/execx"
 	"github.com/daviddwlee84/exp-cli/internal/provider"
 	"github.com/daviddwlee84/exp-cli/internal/skill"
+	"github.com/daviddwlee84/exp-cli/internal/workspacebackend"
 )
 
 func TestDoctorUsesOnlyInjectedExecutableLookup(t *testing.T) {
@@ -36,8 +37,12 @@ func TestDoctorUsesOnlyInjectedExecutableLookup(t *testing.T) {
 	envelope := decodeEnvelope(t, invocation.stdout)
 	var data doctorData
 	decodeData(t, envelope, &data)
-	if data.LiveRequested || data.LiveProbesPerformed || len(data.Providers) != 7 {
+	if data.LiveRequested || data.LiveProbesPerformed || len(data.Providers) != 7 || len(data.WorkspaceBackends) != 2 {
 		t.Fatalf("doctor data=%#v", data)
+	}
+	if data.WorkspaceBackends[0].Provider != "dev_cli" || data.WorkspaceBackends[0].State != "missing" ||
+		data.WorkspaceBackends[1].Provider != "native_git" || data.WorkspaceBackends[1].State != "built-in" {
+		t.Fatalf("workspace backend readiness=%#v", data.WorkspaceBackends)
 	}
 	direct := findDoctorProvider(t, data.Providers, provider.ProviderDirect)
 	pueue := findDoctorProvider(t, data.Providers, provider.ProviderPueue)
@@ -56,18 +61,35 @@ func TestDoctorUsesOnlyInjectedExecutableLookup(t *testing.T) {
 	if !dvc.Missing || dvc.Found || dvc.Version != "" {
 		t.Fatalf("missing DVC status = %#v", dvc)
 	}
-	wantLookups := []string{"dvc", "jupyter", "marimo", "mlflow", "pueue", "sacct", "sbatch", "scancel", "squeue"}
+	wantLookups := []string{"dvc", "jupyter", "marimo", "mlflow", "pueue", "sacct", "sbatch", "scancel", "squeue", "dev"}
 	if !reflect.DeepEqual(lookups, wantLookups) {
 		t.Fatalf("doctor lookups = %v, want %v", lookups, wantLookups)
 	}
 
 	lookups = nil
+	var liveCalls [][]string
+	app.Invoker = execx.InvokerFunc(func(_ context.Context, spec execx.CommandSpec) (execx.Result, error) {
+		liveCalls = append(liveCalls, append([]string{}, spec.Argv...))
+		switch strings.Join(spec.Argv, " ") {
+		case "--version":
+			return execx.Result{Stdout: "pueue 4.0.4\n", ExitCode: 0}, nil
+		case "status --json":
+			return execx.Result{Stdout: `{"tasks":{},"groups":{}}`, ExitCode: 0}, nil
+		default:
+			t.Fatalf("unexpected live doctor argv: %v", spec.Argv)
+			return execx.Result{}, nil
+		}
+	})
 	live := invokeCommand(t, app, "", "doctor", "--live", "--json")
 	requireCommandSuccess(t, live)
 	liveEnvelope := decodeEnvelope(t, live.stdout)
 	decodeData(t, liveEnvelope, &data)
-	if !data.LiveRequested || data.LiveProbesPerformed || len(liveEnvelope.Diagnostics) != 1 || liveEnvelope.Diagnostics[0].Code != "doctor.live_not_implemented" {
+	if !data.LiveRequested || !data.LiveProbesPerformed || len(liveEnvelope.Diagnostics) != 1 || liveEnvelope.Diagnostics[0].Code != "doctor.local_workspace_probe" {
 		t.Fatalf("live doctor result = envelope %#v data %#v", liveEnvelope, data)
+	}
+	livePueue := findDoctorProvider(t, data.Providers, provider.ProviderPueue)
+	if livePueue.State != provider.ReadinessReady || !livePueue.Probed || len(liveCalls) != 2 {
+		t.Fatalf("live Pueue readiness = %#v calls=%v", livePueue, liveCalls)
 	}
 	if !reflect.DeepEqual(lookups, wantLookups) {
 		t.Fatalf("--live performed unexpected discovery: lookups=%v", lookups)
@@ -76,6 +98,52 @@ func TestDoctorUsesOnlyInjectedExecutableLookup(t *testing.T) {
 	human := invokeCommand(t, app, "", "doctor")
 	if human.err != nil || !strings.Contains(human.stdout, "built-in") || !strings.Contains(human.stdout, "missing") || !strings.Contains(human.stdout, "unknown") {
 		t.Fatalf("human doctor = %q, %v", human.stdout, human.err)
+	}
+}
+
+func TestDoctorLiveProbeKeepsInconclusiveAndUnimplementedProvidersUnknown(t *testing.T) {
+	registry := provider.CompiledRegistry()
+	mlflowDescriptor, _ := registry.Get(provider.ProviderMLflow)
+	timedOut := NewApp(t.Context(), nil, nil, nil)
+	timedOut.Invoker = execx.InvokerFunc(func(context.Context, execx.CommandSpec) (execx.Result, error) {
+		return execx.Result{TimedOut: true}, &execx.Error{Kind: execx.ErrorTimeout, Reason: "test timeout"}
+	})
+	result, err := doctorLiveProbe(timedOut)(t.Context(), mlflowDescriptor, "/synthetic/mlflow")
+	if err != nil || result.Readiness != provider.ReadinessUnknown || result.Reason != "version-probe-failed" {
+		t.Fatalf("timed-out provider probe = %#v, %v", result, err)
+	}
+	for capability, support := range result.Capabilities {
+		if support != provider.SupportUnknown {
+			t.Fatalf("timeout promoted %s to %s", capability, support)
+		}
+	}
+
+	slurmDescriptor, _ := registry.Get(provider.ProviderSlurm)
+	versionOnly := NewApp(t.Context(), nil, nil, nil)
+	versionOnly.Invoker = execx.InvokerFunc(func(context.Context, execx.CommandSpec) (execx.Result, error) {
+		return execx.Result{Stdout: "slurm 25.05.1\n", ExitCode: 0}, nil
+	})
+	result, err = doctorLiveProbe(versionOnly)(t.Context(), slurmDescriptor, "/synthetic/squeue")
+	if err != nil || result.Readiness != provider.ReadinessUnknown || result.Reason != "capabilities-not-probed" {
+		t.Fatalf("single-binary Slurm probe = %#v, %v", result, err)
+	}
+	for capability, support := range result.Capabilities {
+		if support != provider.SupportUnknown {
+			t.Fatalf("single Slurm binary promoted %s to %s", capability, support)
+		}
+	}
+
+	if !doctorPartial([]doctorProviderView{{
+		Name: provider.ProviderMLflow, State: provider.ReadinessReady,
+		Capabilities: []doctorCapabilityView{{Name: provider.CapabilityTrackerResolve, Support: provider.SupportUnknown}},
+	}}, nil) {
+		t.Fatal("unknown capability support was omitted from aggregate partiality")
+	}
+	if !doctorPartial(nil, []workspacebackend.Readiness{{
+		Provider: workspacebackend.DevCLIName, State: workspacebackend.ReadinessInstalledNotProbed,
+		Capabilities: []workspacebackend.CapabilityStatus{{Capability: workspacebackend.CapabilityHandoff, Support: workspacebackend.SupportUnsupported}},
+	}}) {
+		t.Fatal("installed-not-probed workspace backend was omitted from aggregate partiality")
 	}
 }
 
@@ -106,10 +174,8 @@ func TestDefaultDoctorNeverExecutesFoundBinaryOrMutatesHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", xdgState)
 	t.Setenv("PATH", binaryDir)
 
-	for _, args := range [][]string{{"doctor", "--json"}, {"doctor", "--live", "--json"}} {
-		invocation := invokeCommand(t, NewApp(t.Context(), nil, nil, nil), "", args...)
-		requireCommandSuccess(t, invocation)
-	}
+	invocation := invokeCommand(t, NewApp(t.Context(), nil, nil, nil), "", "doctor", "--json")
+	requireCommandSuccess(t, invocation)
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("doctor executed fake binary: %v", err)
 	}
@@ -121,6 +187,53 @@ func TestDefaultDoctorNeverExecutesFoundBinaryOrMutatesHome(t *testing.T) {
 		if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("doctor changed %s: %v", directory, err)
 		}
+	}
+}
+
+func TestDoctorLiveKeepsPartialProviderFailuresIndependentAndPathFree(t *testing.T) {
+	const canary = "DOCTOR_CREDENTIAL_CANARY_193a"
+	app := NewApp(t.Context(), nil, nil, nil)
+	app.BinaryLookup = func(name string) (string, error) {
+		switch name {
+		case "pueue", "mlflow", "dev":
+			return "/synthetic/tools/" + name, nil
+		default:
+			return "", errors.New("missing")
+		}
+	}
+	app.Invoker = execx.InvokerFunc(func(_ context.Context, spec execx.CommandSpec) (execx.Result, error) {
+		switch filepath.Base(spec.Executable) {
+		case "pueue":
+			if reflect.DeepEqual(spec.Argv, []string{"--version"}) {
+				return execx.Result{Stdout: "pueue 4.1.0\n", ExitCode: 0}, nil
+			}
+			return execx.Result{}, errors.New("token=" + canary)
+		case "mlflow":
+			return execx.Result{Stdout: "mlflow, version 3.2.1\n", ExitCode: 0}, nil
+		case "dev":
+			return execx.Result{}, errors.New("password=" + canary)
+		default:
+			t.Fatalf("unexpected live executable: %s", spec.Executable)
+			return execx.Result{}, nil
+		}
+	})
+	invocation := invokeCommand(t, app, "", "doctor", "--live", "--json")
+	requireCommandSuccess(t, invocation)
+	envelope := decodeEnvelope(t, invocation.stdout)
+	var data doctorData
+	decodeData(t, envelope, &data)
+	pueueView := findDoctorProvider(t, data.Providers, provider.ProviderPueue)
+	mlflowView := findDoctorProvider(t, data.Providers, provider.ProviderMLflow)
+	if !envelope.Partial || !data.Partial || pueueView.State != provider.ReadinessMisconfigured ||
+		mlflowView.State != provider.ReadinessUnknown || mlflowView.Capabilities == nil {
+		t.Fatalf("partial live readiness = envelope %#v data %#v", envelope, data)
+	}
+	if strings.Contains(invocation.stdout, canary) || strings.Contains(invocation.stdout, "/synthetic/") ||
+		len(pueueView.Requirements) != 2 || len(mlflowView.Requirements) != 2 {
+		t.Fatalf("doctor exposed a value/path or omitted requirements: %s", invocation.stdout)
+	}
+	if len(data.WorkspaceBackends) != 2 || data.WorkspaceBackends[0].State != "unsupported" || data.WorkspaceBackends[1].State != "built-in" {
+		t.Fatalf("workspace readiness did not remain independent: %#v", data.WorkspaceBackends)
 	}
 }
 

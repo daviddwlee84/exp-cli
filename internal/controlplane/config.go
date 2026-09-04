@@ -71,13 +71,17 @@ type PlanRuntime struct {
 }
 
 type loadedRuntime struct {
-	plans      map[research.ID]validatedPlanRuntime
-	pools      map[research.ID]PoolRuntime
-	configPath string
+	plans        map[research.ID]validatedPlanRuntime
+	pools        map[research.ID]PoolRuntime
+	configPath   string
+	schema       string
+	configDigest string
 }
 
 type validatedPlanRuntime struct {
 	PlanRuntime
+	V2                *validatedPlanRuntimeV2
+	resolvedV2        *resolvedPlanRuntimeV2
 	absoluteCWD       string
 	repositoryRoot    string
 	runtimeConfigPath string
@@ -119,10 +123,13 @@ func loadRuntime(ctx context.Context, repositoryRoot, relative string) (loadedRu
 		return loadedRuntime{}, errors.New("runtime config pools and plans must be present")
 	}
 
+	configHash := sha256.Sum256(content)
 	loaded := loadedRuntime{
-		plans:      make(map[research.ID]validatedPlanRuntime, len(config.Plans)),
-		pools:      make(map[research.ID]PoolRuntime, len(config.Pools)),
-		configPath: configPath,
+		plans:        make(map[research.ID]validatedPlanRuntime, len(config.Plans)),
+		pools:        make(map[research.ID]PoolRuntime, len(config.Pools)),
+		configPath:   configPath,
+		schema:       RuntimeSchema,
+		configDigest: "sha256:" + hex.EncodeToString(configHash[:]),
 	}
 	routes := map[string]map[string]research.ID{}
 	for key, value := range config.Pools {

@@ -3,10 +3,12 @@
 ## Status of this contract
 
 The prepared multi-record journal and roll-forward recovery protocol in this
-document are implemented. They back Idea qualification, Queue mutation,
-dispatch preparation, Experiment closure, Candidate/Release/Promotion
-operations, harness migration coordination, and the public low-risk
-`exp record transaction` / `exp record recover` surface. Public raw transactions
+document are implemented. New canonical transactions use the worktree-scoped
+`exp.transaction/v2` journal; the closed v1 journal remains readable under the
+compatibility rules below. Transactions back Source/Try lifecycle changes, Idea
+qualification, Queue mutation, dispatch preparation, Experiment closure,
+Candidate/Release/Promotion operations, harness migration coordination, and the
+public low-risk `exp record transaction` / `exp record recover` surface. Public raw transactions
 are restricted to Idea and ResourcePool changes; scientific lifecycle records
 must use their domain services.
 
@@ -18,15 +20,20 @@ transaction participants.
 
 ## Shared coordination
 
-Version 1 discovers only `<git-root>/experiments`; named or multiple roots are deferred. Resolve the absolute Git common directory, not the current worktree’s `.git` indirection, and use:
+Each selected Project still owns the fixed `<experiment-git-root>/experiments`
+root. That experiment repository may be independent from its Source repositories.
+Resolve the experiment clone's absolute Git common directory—not the current
+worktree's `.git` indirection—and use:
 
 ```text
-<git-common-dir>/exp/v1/
+<experiment-git-common-dir>/exp/v1/
 ├── lock
 ├── project-receipt.json
 ├── reservations/
 │   └── <typed-id>
-├── transactions/
+├── transactions/       # legacy exp.transaction/v1
+├── transactions-v2/    # current exp.transaction/v2
+├── workspaces/
 └── attempts/
 ```
 
@@ -116,7 +123,7 @@ transition rather than asking the caller to author raw canonical documents.
 A compound operation creates:
 
 ```text
-<git-common-dir>/exp/v1/transactions/<transaction-uuid>/
+<experiment-git-common-dir>/exp/v1/transactions-v2/<transaction-uuid>/
 ├── journal.toml
 └── staged/
     ├── 0000
@@ -124,17 +131,26 @@ A compound operation creates:
     └── ...
 ```
 
-The transaction ID is UUIDv7. `journal.toml` uses schema `exp.transaction/v1`, mode `0600`, and is itself published atomically. It contains:
+The transaction ID is UUIDv7. `journal.toml` uses schema
+`exp.transaction/v2`, mode `0600`, and is itself published atomically. It
+contains:
 
 ```text
 schema
 transaction_id
 project_id
+worktree_id           sha256 path-free worktree identity
 operation
 created_at
 phase                 prepared | committed
 entries[]
 ```
+
+`worktree_id` hashes a domain separator, the worktree Git directory's relative
+location below the Git common directory (`.` for the primary worktree), and that
+directory's filesystem identity. It contains no absolute worktree path. The
+Store pins this value at construction and recomputes it before mutation and
+recovery; a changed identity fails closed.
 
 Each ordered entry contains:
 
@@ -160,7 +176,7 @@ While holding the common lock:
 5. Reserve every create ID without clobbering. A prepare failure after this point may burn an ID but cannot make it reusable; replacements and deletions retain their existing reservations.
 6. Sort entries by path byte order so publication and tests are deterministic.
 7. Write each new exact byte sequence to `staged/<index>`, fsync every staged file, and fsync `staged/`.
-8. Record exact old/new SHA-256 hashes, write `journal.toml` with `phase = "prepared"`, fsync it, atomically publish it, and fsync the transaction directory and parent `transactions/` directory.
+8. Record exact old/new SHA-256 hashes and the current worktree identity, write `journal.toml` with `phase = "prepared"`, fsync it, atomically publish it, and fsync the transaction directory and parent `transactions-v2/` directory.
 
 No canonical file changes before the prepared journal and all staged bytes are durable.
 
@@ -181,11 +197,42 @@ or published prepared journal still fails closed.
 
 After every destination matches `new_hash`/`absent`, atomically replace the journal with `phase = "committed"` and fsync its directories. Canonical publication is then complete. Projections are regenerated last from the committed inventory.
 
+If an error occurs after durable preparation, `Transact` returns both the error
+and a non-nil `TransactionResult` containing the transaction ID, state, path
+publication progress, documents, and `recovery_required`. Source, Try, Experiment
+closure, Evaluation, Candidate, Release, PromotionSpec, and Promotion services
+preserve that result in a typed error and operation-specific partial result. CLI
+JSON reports `partial:true` and the recovery identity so `exp record recover` can
+be run before deciding whether to retry; callers must not allocate a replacement
+record merely because commit marking failed.
+
 Committed journals may be removed only after directory fsync; retaining them for bounded diagnostics is also safe. Cleanup policy must not affect correctness.
+
+### Exact v1/v2 backward compatibility
+
+Recovery and read-only inspection scan both namespaces, but never reinterpret a
+journal across them:
+
+| Namespace | Required schema | Recovery rule |
+|---|---|---|
+| `transactions/` | exactly `exp.transaction/v1`, and `worktree_id` must be absent | A prepared v1 journal may roll forward only when the Git common directory has no linked-worktree metadata entries. If any linked worktree entry exists, its missing worktree authority is ambiguous and the journal blocks access until explicitly resolved. A committed v1 journal is historical and may be retained/pruned; it is not replayed. |
+| `transactions-v2/` | exactly `exp.transaction/v2`, with a valid `worktree_id` | Only a journal whose worktree identity equals the current Store is considered for prepared recovery. A valid journal for another linked worktree is ignored by this worktree. Identity mismatch is never reassigned or inferred from canonical paths. |
+
+Both schemas otherwise retain the same exact project binding, strict field set,
+entry ordering, hash forms, staging names, phases, permissions, and byte
+verification. A v2 journal in the v1 directory, v1 journal in the v2 directory,
+unknown field/schema, unsafe artifact, or malformed identity fails closed.
+There is no journal-upgrade writer: old completed journals remain old, and all
+new canonical transactions are v2.
+
+Before journal loading, both namespaces remove only recognized atomic writer
+temporaries and native-UUID preparation directories that have no published
+journal and contain no unknown artifacts. A published prepared journal is never
+classified as garbage.
 
 ## Idempotent recovery
 
-Every mutating command recovers prepared journals while holding the common lock and before reading its own candidate state.
+Every mutating command recovers eligible prepared journals for the current worktree while holding the common lock and before reading its own candidate state. Journals for another v2 worktree are isolated, not rolled forward through the current canonical root.
 
 For each entry:
 
@@ -212,23 +259,38 @@ An unknown journal schema, missing staged file while the destination remains old
 
 This prevents a generated-file conflict from blocking or corrupting scientific state. Readers never use a projection as relationship or lifecycle input.
 
-## Attempt markers
+## Attempt markers and result recovery
 
-The private worker writes one terminal marker before finishing its SQLite job:
+The private worker freezes its bounded result and writes one terminal marker
+before finishing its SQLite job:
 
 ```text
-<git-common-dir>/exp/v1/attempts/job-<sha256-prefix-of-operational-job-id>.json
+<experiment-git-common-dir>/exp/v1/attempts/
+├── job-<sha256-prefix-of-operational-job-id>.result.json
+└── job-<sha256-prefix-of-operational-job-id>.json
 ```
 
-The fixed-size hash keeps attacker-controlled job IDs out of filenames. The
-bounded, secret-safe `exp.worker-terminal/v1` JSON includes the original job ID,
-canonical Attempt ID, fencing token, operational state, process timing, exit
-code, and optional result digest/size. Publication uses a private temporary,
-file fsync, rename, and directory fsync. The same job/fencing claim returns an
-existing marker instead of executing the workload again. Absence still means
-`unknown`, even if no process is found. Reconciliation imports the observation
-through a revision-checked canonical Attempt mutation; the marker is neither
-scientific evidence nor a substitute for the Attempt record.
+The fixed-size hash keeps attacker-controlled job IDs out of filenames. Closed
+v1 jobs use `exp.worker-terminal/v1` and `exp.worker-result/v1`; Source-aware
+jobs use the separate v2 terminal/result schemas. V1 decoding rejects v2 stream
+and Source fields. V2 may additionally retain bounded redacted stdout/stderr and
+a validated optional MLflow observation. Both markers include original job ID,
+canonical Attempt ID, fencing token, terminal operational state, process timing,
+exit code, and optional result/output digests.
+
+Result bytes are frozen before marker publication. The marker is written through
+a private `.tmp`, file fsync, rename, and directory fsync. On restart, an absent
+final marker with a valid `.tmp` marker and exact matching frozen result is
+promoted and fsynced; an invalid pair fails closed. A final marker is also usable
+without SQLite, and can repair a still-running row after validating job/Attempt,
+fencing, schema, timing, result digest, and optional MLflow ownership. The same
+job/fencing claim returns the existing marker instead of executing the workload
+again.
+
+Absence still means `unknown`, even if no process is found. Reconciliation
+imports the observation through a revision-checked canonical Attempt mutation;
+the marker, captured streams, result JSON, and artifact URI are neither
+scientific evidence nor substitutes for the Attempt/Evaluation records.
 
 ## Required verification
 

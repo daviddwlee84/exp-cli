@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"path"
 	"reflect"
@@ -32,6 +33,17 @@ type PolicyError struct {
 func (e *PolicyError) Error() string { return e.Message }
 func (e *PolicyError) Unwrap() error { return e.Err }
 
+const (
+	// MaxSourceKeyBytes bounds one canonical project-local Source key.
+	MaxSourceKeyBytes = 64
+	// MaxSourceSubdirBytes bounds one canonical Git-root-relative Source path.
+	MaxSourceSubdirBytes = 4096
+	// MaxSourceLocatorBytes bounds one normalized remote locator hint.
+	MaxSourceLocatorBytes = 4096
+	// MaxSourceLocatorHints bounds append-only locator history per Source.
+	MaxSourceLocatorHints = 64
+)
+
 var (
 	tagPattern       = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 	slugPattern      = tagPattern
@@ -40,13 +52,259 @@ var (
 	digestPattern    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	gitCommitPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
-	uriCandidatePattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+`)
+	uriCandidatePattern     = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+`)
+	sourceSCPLocatorPattern = regexp.MustCompile(`^(?:([^@/:\s]+)@)?([^/:\s]+):(.+)$`)
+	sourceSSHUserPattern    = regexp.MustCompile(`^[A-Za-z0-9._~+-]+$`)
 )
 
 func validSlug(value string) bool      { return slugPattern.MatchString(value) }
 func validMetric(value string) bool    { return metricPattern.MatchString(value) }
 func validNamespace(value string) bool { return namespacePattern.MatchString(value) }
 func validDigest(value string) bool    { return digestPattern.MatchString(value) }
+
+// NormalizeSourceKey converts a user-facing Source key to its canonical ASCII
+// slug. Canonical records must already contain the returned form.
+func NormalizeSourceKey(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	var builder strings.Builder
+	separator := false
+	for _, character := range value {
+		switch {
+		case character >= 'A' && character <= 'Z':
+			if separator && builder.Len() > 0 {
+				builder.WriteByte('-')
+			}
+			builder.WriteByte(byte(character - 'A' + 'a'))
+			separator = false
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+			if separator && builder.Len() > 0 {
+				builder.WriteByte('-')
+			}
+			builder.WriteRune(character)
+			separator = false
+		default:
+			separator = builder.Len() > 0
+		}
+		if builder.Len() > MaxSourceKeyBytes {
+			return "", errors.New("Source key exceeds the canonical byte limit")
+		}
+	}
+	key := strings.Trim(builder.String(), "-")
+	if key == "" || !validSlug(key) {
+		return "", errors.New("Source key must normalize to a non-empty lower-case ASCII slug")
+	}
+	return key, nil
+}
+
+// NormalizeSourceSubdir applies the Git-root-relative POSIX contract. Empty
+// input selects the Git root. Parent traversal is rejected rather than cleaned.
+func NormalizeSourceSubdir(value string) (string, error) {
+	failure := func(code, message string) error {
+		return &PolicyError{Code: code, Message: message, Err: ErrUnsafePath}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ".", nil
+	}
+	if !utf8.ValidString(value) || hasAnyControl(value) {
+		return "", failure("path.invalid_text", "Source subdir contains invalid text")
+	}
+	if strings.Contains(value, "\\") || strings.HasPrefix(value, "/") || driveQualified(value) || strings.HasPrefix(value, "~") || strings.HasPrefix(strings.ToLower(value), "file:") {
+		return "", failure("path.not_relative", "Source subdir must be Git-root-relative POSIX syntax")
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == ".." {
+			return "", failure("path.traversal", "Source subdir contains parent traversal")
+		}
+	}
+	value = path.Clean(value)
+	if len(value) > MaxSourceSubdirBytes {
+		return "", failure("path.size", "Source subdir exceeds the canonical byte limit")
+	}
+	if err := ValidateCommittedPath(value, true); err != nil {
+		return "", err
+	}
+	if containsCredentialMaterial(value) {
+		return "", failure("privacy.secret", "credential-bearing Source subdir is forbidden")
+	}
+	if err := ValidateCommitSafeText(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// NormalizeSourceLocator returns an identity-preserving remote Git locator.
+// SSH usernames and the distinction between SCP home-relative and URI absolute
+// paths are significant repository identity. Passwords, query strings, and
+// fragments are rejected rather than silently discarded. Local path forms and
+// credential-bearing repository paths are also rejected.
+func NormalizeSourceLocator(value string) (string, error) {
+	failure := func(code, message string) error {
+		return &PolicyError{Code: code, Message: message, Err: ErrUnsafeURI}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", failure("source.locator", "Source locator is empty")
+	}
+	if !utf8.ValidString(value) || hasAnyControl(value) {
+		return "", failure("source.locator", "Source locator contains invalid text")
+	}
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") || driveQualified(value) || strings.Contains(value, "\\") || strings.HasPrefix(strings.ToLower(value), "file:") {
+		return "", failure("source.locator_local", "local paths are forbidden as Source locator hints")
+	}
+
+	if match := sourceSCPLocatorPattern.FindStringSubmatch(value); match != nil && !strings.Contains(value, "://") && portableSourceSCPHost(value, match[2]) {
+		if strings.ContainsAny(match[3], "?#") {
+			return "", failure("source.locator_components", "Source locator query strings and fragments are forbidden")
+		}
+		user, err := normalizeSourceSSHUser(match[1])
+		if err != nil {
+			return "", err
+		}
+		relative := !strings.HasPrefix(match[3], "/")
+		remotePath, err := normalizeSourceRemotePath(match[3])
+		if err != nil {
+			return "", err
+		}
+		scheme := "ssh"
+		if relative {
+			scheme = "ssh+scp"
+		}
+		parsed := &url.URL{Scheme: scheme, Host: strings.ToLower(match[2])}
+		canonicalHost, err := normalizeSourceRemoteHost(parsed)
+		if err != nil {
+			return "", err
+		}
+		normalizedURL := &url.URL{Scheme: scheme, Host: canonicalHost, Path: remotePath}
+		if user != "" {
+			normalizedURL.User = url.User(user)
+		}
+		normalized := normalizedURL.String()
+		if len(normalized) > MaxSourceLocatorBytes {
+			return "", failure("source.locator_size", "Source locator exceeds the canonical byte limit")
+		}
+		return normalized, nil
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", failure("source.locator", "Source locator must be a remote hierarchical URI or Git SCP-style locator")
+	}
+	if strings.EqualFold(parsed.Scheme, "file") {
+		return "", failure("source.locator_local", "file URIs are forbidden as Source locator hints")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", failure("source.locator_components", "Source locator query strings and fragments are forbidden")
+	}
+	var user string
+	if parsed.User != nil {
+		sshScheme := strings.EqualFold(parsed.Scheme, "ssh") || strings.EqualFold(parsed.Scheme, "ssh+scp")
+		if _, password := parsed.User.Password(); password || !sshScheme || parsed.User.Username() == "" {
+			return "", failure("uri.credentials", "credential-bearing or empty Source locator userinfo is forbidden")
+		}
+		user, err = normalizeSourceSSHUser(parsed.User.Username())
+		if err != nil {
+			return "", err
+		}
+	}
+	canonicalHost, err := normalizeSourceRemoteHost(parsed)
+	if err != nil {
+		return "", err
+	}
+	remotePath, err := normalizeSourceRemotePath(parsed.EscapedPath())
+	if err != nil {
+		return "", err
+	}
+	normalizedURL := &url.URL{
+		Scheme: strings.ToLower(parsed.Scheme),
+		Host:   canonicalHost,
+		Path:   remotePath,
+	}
+	if user != "" {
+		normalizedURL.User = url.User(user)
+	}
+	normalized := normalizedURL.String()
+	if len(normalized) > MaxSourceLocatorBytes {
+		return "", failure("source.locator_size", "Source locator exceeds the canonical byte limit")
+	}
+	return normalized, nil
+}
+
+func portableSourceSCPHost(value, host string) bool {
+	prefix, _, _ := strings.Cut(value, ":")
+	return strings.Contains(prefix, "@") || strings.Contains(host, ".") || strings.EqualFold(host, "localhost")
+}
+
+func normalizeSourceSSHUser(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 255 || !sourceSSHUserPattern.MatchString(value) {
+		return "", &PolicyError{Code: "source.locator", Message: "Source SSH locator has an invalid username", Err: ErrUnsafeURI}
+	}
+	return value, nil
+}
+
+func normalizeSourceRemoteHost(parsed *url.URL) (string, error) {
+	failure := func(message string) error {
+		return &PolicyError{Code: "source.locator", Message: message, Err: ErrUnsafeURI}
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" || hasAnyControl(hostname) || strings.ContainsAny(hostname, " /\\@") {
+		return "", failure("Source locator has an invalid remote host")
+	}
+	port := parsed.Port()
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		if port == "80" {
+			port = ""
+		}
+	case "https":
+		if port == "443" {
+			port = ""
+		}
+	case "ssh", "ssh+scp":
+		if port == "22" {
+			port = ""
+		}
+	}
+	if port != "" {
+		return net.JoinHostPort(hostname, port), nil
+	}
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]", nil
+	}
+	return hostname, nil
+}
+
+func normalizeSourceRemotePath(value string) (string, error) {
+	failure := func(code, message string) error {
+		return &PolicyError{Code: code, Message: message, Err: ErrUnsafeURI}
+	}
+	decoded, err := url.PathUnescape(value)
+	if err != nil {
+		return "", failure("source.locator", "Source locator path has invalid escaping")
+	}
+	if decoded == "" || !utf8.ValidString(decoded) || hasAnyControl(decoded) || strings.Contains(decoded, "\\") {
+		return "", failure("source.locator", "Source locator requires a valid remote repository path")
+	}
+	for _, component := range strings.Split(decoded, "/") {
+		if component == ".." {
+			return "", failure("source.locator", "Source locator path contains parent traversal")
+		}
+	}
+	cleaned := path.Clean("/" + strings.TrimLeft(decoded, "/"))
+	if cleaned == "/" {
+		return "", failure("source.locator", "Source locator requires a remote repository path")
+	}
+	if containsCredentialMaterial(cleaned) {
+		return "", failure("uri.credentials", "credential-bearing Source locator paths are forbidden")
+	}
+	if err := ValidateCommitSafeText(cleaned); err != nil {
+		return "", err
+	}
+	return cleaned, nil
+}
 
 // ValidateCommittedPath validates the platform-independent lexical contract.
 // Physical containment and symlink checks are performed by pathx at I/O time.

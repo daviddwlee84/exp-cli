@@ -11,6 +11,10 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/record"
 )
 
+type canonicalInventoryStore interface {
+	Inventory(context.Context) (*record.Inventory, error)
+}
+
 type inventorySnapshotStore interface {
 	WithInventorySnapshot(context.Context, func(*record.Inventory) error) error
 }
@@ -18,15 +22,15 @@ type inventorySnapshotStore interface {
 // renderFreshProjections holds the same Git-common lock used by canonical
 // writers and, for the production Store, keeps one opened canonical root across
 // inventory loading, comparison, publication, and snapshot verification.
-func renderFreshProjections(ctx context.Context, app *App, info *project.Info, store RecordStore) (*record.Inventory, projection.Result, error) {
+func renderFreshProjections(ctx context.Context, app *App, info *project.Info, store canonicalInventoryStore) (*record.Inventory, projection.Result, error) {
 	return withFreshProjectionSnapshot(ctx, app, info, store, app.RenderProjections)
 }
 
-func checkFreshProjections(ctx context.Context, app *App, info *project.Info, store RecordStore) (*record.Inventory, projection.Result, error) {
+func checkFreshProjections(ctx context.Context, app *App, info *project.Info, store canonicalInventoryStore) (*record.Inventory, projection.Result, error) {
 	return withFreshProjectionSnapshot(ctx, app, info, store, app.CheckProjections)
 }
 
-func withFreshProjectionSnapshot(ctx context.Context, app *App, info *project.Info, store RecordStore, operation func(context.Context, *record.Inventory) (projection.Result, error)) (*record.Inventory, projection.Result, error) {
+func withFreshProjectionSnapshot(ctx context.Context, app *App, info *project.Info, store canonicalInventoryStore, operation func(context.Context, *record.Inventory) (projection.Result, error)) (*record.Inventory, projection.Result, error) {
 	if info == nil {
 		return nil, emptyProjectionResult(), fmt.Errorf("project information is required for projection refresh")
 	}

@@ -144,7 +144,7 @@ func runSkillCheck(command *cobra.Command, app *App, options *skillCheckOptions)
 		if options.json {
 			return commandFailure(app, true, "skill check", result, false, []Diagnostic{diagnostic}, errSkillDrift)
 		}
-		if writeErr := app.WriteHuman(safeHumanOutput(fmt.Sprintf("Skill drift at %s: missing=%d drifted=%d directory_modes_current=%t drifted_directories=%d links_current=%t\n",
+		if writeErr := app.WriteStyledHuman(safeHumanOutput(fmt.Sprintf("Skill drift at %s: missing=%d drifted=%d directory_modes_current=%t drifted_directories=%d links_current=%t\n",
 			result.Dir, len(result.MissingFiles), len(result.DriftedFiles), result.DirectoryModesCurrent, len(result.DriftedDirectories), result.LinksCurrent))); writeErr != nil {
 			return writeErr
 		}

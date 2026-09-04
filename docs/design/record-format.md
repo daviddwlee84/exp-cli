@@ -37,33 +37,42 @@ A canonical record file is limited to 8 MiB (8,388,608 bytes), including front m
 ```text
 exp.project/v1
 exp.policy/v1
+exp.source/v1
 exp.idea/v1
+exp.idea/v2
 exp.resource-pool/v1
 exp.queue/v1
 exp.queue-advice/v1
 exp.battle/v1
 exp.plan/v1
 exp.plan/v2
+exp.try/v1
 exp.experiment/v1
 exp.experiment/v2
 exp.run/v1
 exp.attempt/v1
 exp.attempt/v2
+exp.attempt/v3
 exp.evaluation-spec/v1
 exp.evaluation/v1
+exp.evaluation/v2
 exp.finding/v1
 exp.candidate/v1
+exp.candidate/v2
 exp.release/v1
 exp.promotion-spec/v1
 exp.promotion/v1
 exp.decision/v1
 ```
 
-Plan, Experiment, and Attempt v1 decoders remain exact and closed. Their v2
-decoders add priced queue inputs, research lineage/combination inputs, and
-dispatch/ChangeSet identity respectively; a v1 record containing a v2-only
-field is rejected. The autonomous control-plane records and their ownership
-rules are specified in
+Versioning is closed, not an additive decoding shortcut. Idea v1 forbids
+`origin_try`; Attempt v1 forbids dispatch, Try, retry, and SourceSnapshot fields;
+Attempt v2 permits the legacy dispatch/Git fields but forbids Try/retry and
+SourceSnapshots; Evaluation v1 forbids `attempt`; Candidate v1 forbids
+`attempt`/`sources`; Candidate v2 forbids legacy `git_commit`/`change_set`.
+A record is never upgraded merely because a zero-valued newer field could be
+ignored. Plan and Experiment retain the same exact v1/v2 separation. The
+autonomous control-plane records and ownership rules are specified in
 [autonomous-research-control-plane.md](autonomous-research-control-plane.md).
 
 A known schema rejects unknown fields at every known table level. The sole open container is `extensions`. An extension is keyed by a lower-case reverse-DNS namespace and is preserved recursively without interpretation:
@@ -80,12 +89,14 @@ Top-level vendor keys such as `x_owner` are not extensions and are rejected. Cor
 New records use a lower-case typed RFC 9562 UUIDv7:
 
 ```text
-plan_<uuidv7>
+src_<uuidv7>
 idea_<uuidv7>
 pool_<uuidv7>
 queue_<uuidv7>
 advice_<uuidv7>
 battle_<uuidv7>
+plan_<uuidv7>
+try_<uuidv7>
 exp_<uuidv7>
 run_<uuidv7>
 att_<uuidv7>
@@ -113,10 +124,10 @@ aliases where available; a migrated Project uses the recomputed UUIDv5 as
 IDs. See [harness-v0-migration.md](harness-v0-migration.md).
 
 The display form is `<letter>-<prefix>`, using the first eight upper-case
-hexadecimal UUID digits without hyphens. Letters are `I` Idea, `O` Pool, `Q`
-Queue, `V` Advice, `B` Battle, `P` Plan, `E` Experiment, `R` Run, `A` Attempt,
-`S` EvaluationSpec, `N` Evaluation, `F` Finding, `C` Candidate, `L` Release,
-`T` PromotionSpec, `M` Promotion, and `D` Decision. If the candidate is not
+hexadecimal UUID digits without hyphens. Letters are `U` Source, `I` Idea, `O`
+Pool, `Q` Queue, `V` Advice, `B` Battle, `P` Plan, `Y` Try, `E` Experiment, `R`
+Run, `A` Attempt, `S` EvaluationSpec, `N` Evaluation, `F` Finding, `C`
+Candidate, `L` Release, `T` PromotionSpec, `M` Promotion, and `D` Decision. If the candidate is not
 unique among records of the same kind, extend it one hexadecimal digit at a
 time. Display codes and unique typed-ID prefixes are accepted only when
 unambiguous; they are never persisted as relationship keys and may lengthen as
@@ -143,9 +154,42 @@ Timestamps are UTC and serialize with `Z`. Arrays that model sets are unique and
 
 ## Project
 
-`<git-root>/experiments/PROJECT.md` marks the only root v1 discovers.
+`<experiment-git-root>/experiments/PROJECT.md` marks the only root Project v1
+discovers. The experiment Git repository may be independent from every code
+Source repository; the marker location inside that repository remains fixed.
 
-Required fields are `schema`, `project_id`, `name`, `created_at`, and `experiments_root`. `experiments_root` is `.` because `PROJECT.md` is inside the root. Optional fields are `extensions` only. V1 does not search for other markers; they are out-of-scope files, not active roots or discovery errors. Named or multiple roots are deferred.
+Required fields are `schema`, `project_id`, `name`, `created_at`, and
+`experiments_root`. `experiments_root` is `.` because `PROJECT.md` is inside the
+root. Optional fields are `extensions` only. Dedicated initialization does not
+introduce a Project v2 or store Source checkout paths in Project. Existing
+embedded Projects keep the same bytes and discovery behavior.
+
+## Source
+
+`exp.source/v1` is an ordinary typed record in
+`sources/src_<full-uuid>-<slug>.md`. It contains:
+
+| Field | Requirement |
+|---|---|
+| `key` | Project-unique normalized lower-case ASCII slug, at most 64 bytes |
+| `kind` | Exactly `git` |
+| `subdir` | Immutable normalized Git-root-relative POSIX directory; `.` selects the root |
+| `locator_hints` | Required array, even when empty; at most 64 unique normalized remote Git locators |
+| `state` | `active` or `retired` |
+| `retired_at` | Required only for `retired`, within the record lifetime |
+
+Locator hints preserve identity-relevant SSH usernames and SCP/URI path form,
+but reject passwords, query/fragment data, local paths, and credential-bearing
+components. They help corroborate a clone; they are neither a clone path nor the
+Source's sole identity. Host checkout paths and Git-common filesystem identities
+live only in the local association store. Retired Sources remain canonical
+history and may be resolved only for explicit historical cleanup, not new work.
+
+Source records were added without changing Project v1. For compatibility, only
+filenames matching the exact canonical Source grammar reserve entries under
+`sources/`; pre-existing nonmatching content remains unrelated. Such a legacy
+file or tree is not rewritten, although a conflicting non-directory `sources`
+path must be resolved by a human before a new Source record can be published.
 
 ## Policy, Idea, ResourcePool, and Queue
 
@@ -158,7 +202,10 @@ and 0.8/0.2 shares.
 An Idea owns its proposal state, summary, proposer, primary cluster,
 classification, parent Idea edges, resulting Plan edge, and optional merge
 target. Valid states are `proposed`, `developing`, `qualified`, `queued`,
-`dismissed`, and `merged`.
+`dismissed`, and `merged`. `exp.idea/v2` adds optional `origin_try`; when set,
+the referenced Try must be `adopted`, its `adopted_idea` must point back to this
+Idea, and only one Idea may claim a Try. Idea v1 remains byte-shape compatible
+and rejects `origin_try`.
 
 A ResourcePool owns whether a bottleneck is enabled, its integer concurrent
 capacity, unit, bottleneck slug, and optional hourly cost. It does not store a
@@ -210,6 +257,34 @@ control-plane context used for queueing:
 The belief digest covers the referenced Finding revision and all incoming
 `weakens`/`overturns` edges including source revisions. A stale dependency or
 queued Plan revision blocks dispatch.
+
+## Try
+
+`exp.try/v1` records a short evidence-gathering lifecycle distinct from a formal
+Experiment. Required fields are `state`, non-empty bounded `goal`, and a sorted,
+non-empty `sources` set of canonical Source IDs. Its full UUID is used in the
+immutable directory path `t-<full-uuid-hex>-<slug>/TRY.md`; owned Attempt files
+live under that directory's `attempts/`.
+
+| State | Required | Forbidden |
+|---|---|---|
+| `open` | `created_at == updated_at` | conclusion, abandonment, adopted Idea |
+| `concluded` | human `conclusion` at `updated_at` | abandonment, adopted Idea |
+| `abandoned` | human `abandonment` at `updated_at` | conclusion, adopted Idea |
+| `adopted` | prior conclusion and `adopted_idea` | abandonment |
+
+A conclusion stores a bounded human summary, optional sorted `sha256:` result
+digests, and optional sanitized ExternalRefs. Every selected digest must have
+been produced by a terminal Attempt owned by this Try. Closure is rejected while
+any owned Attempt is nonterminal. Abandonment stores an explicit bounded human
+reason. Adoption atomically creates Idea v2 with `origin_try` and sets the
+reciprocal `adopted_idea`; the proposed-by identity may not use an agent/bot/model
+prefix. The declared Source set does not change, and each owned Attempt's
+SourceSnapshots must be a subset of it.
+
+A Try never directly backs Candidate or Promotion. Its conclusion can motivate
+an Idea; promotion-bearing evidence must be reproduced by a formal Run-owned
+Attempt under the clean gate.
 
 ## Experiment
 
@@ -269,36 +344,84 @@ Additional fields:
 
 A Run has no process state, Attempt list, evidence disposition, or scientific verdict. One Run may have several Attempts; tracker-owned sweep trials may remain solely behind an ExternalRef.
 
-## Attempt
+## Attempt v1, v2, and v3
 
-Additional fields:
+Fields shared by all versions are `state`, optional commit-safe `state_reason`,
+provider slugs `runner` and `scheduler`, safe relative `cwd`, non-empty argv
+array, optional ExternalRefs/provenance, and an optional terminal observation.
+Argv is never shell text. Known terminal states are `succeeded`, `failed`,
+`cancelled`, `timed_out`, `preempted`, and `out_of_memory`; they require a
+terminal table. Nonterminal states (`planned`, `queued`, `blocked`, `starting`,
+`running`, and `unknown`) forbid one. `unknown` never authorizes automatic retry.
 
-| Field | Requirement |
-|---|---|
-| `run` | Required canonical Run ID; the Attempt owns this edge |
-| `state` | Required operational state |
-| `state_reason` | Optional sanitized provider/native reason |
-| `runner` | Required provider name |
-| `scheduler` | Required provider name; exactly one scheduler owns the Attempt |
-| `cwd` | Required safe repository-relative POSIX path; `.` is allowed |
-| `argv` | Required non-empty argument array; no shell string |
-| `external_refs` | Optional array of ExternalRef tables |
-| `provenance` | Optional structured provenance table |
-| `terminal` | Required for known terminal states; forbidden for nonterminal states |
+A terminal table contains `source`, `observed_at`, optional `started_at`, required
+`ended_at`, and optional `exit_code` and `signal`, with ordered UTC timestamps.
+State-specific exit-code inference is forbidden. Provenance contains
+`captured_at`, full `git_commit`, `git_dirty`, optional digests, and
+`reproducibility` (`exact`, `bounded`, `partial`, or `unknown`).
 
-Operational states are those defined in [architecture.md](architecture.md). Known terminal states are `succeeded`, `failed`, `cancelled`, `timed_out`, `preempted`, and `out_of_memory`. `unknown` may have no terminal record and never authorizes automatic retry.
+The exact version split is:
 
-A terminal table contains `source`, `observed_at`, optional `started_at`, required `ended_at`, and optional `exit_code` and `signal`. Timestamps must be ordered. State-specific exit-code inference is forbidden; provider evidence must explicitly establish classifications such as `out_of_memory`.
+| Schema | Owner and Git identity | Dispatch fields |
+|---|---|---|
+| `exp.attempt/v1` | Required `run`; no Try, retry, execution Source, SourceSnapshots, or top-level Git identity | Forbidden |
+| `exp.attempt/v2` | Required `run`; full top-level `base_commit`, `head_commit`, and non-empty exact `change_set` | `pool`, `queue`, positive `queue_revision`, `lane`, and `dispatch_id` are all required |
+| `exp.attempt/v3` | Exactly one of `run` or `try`; required `execution_source` and non-empty sorted `source_snapshots`; optional Try-only `retry_of` | All present or all absent; top-level `base_commit`, `head_commit`, and `change_set` are forbidden |
 
-Recommended provenance keys are `captured_at`, full `git_commit`, `git_dirty`, optional `dirty_digest`, `config_digest`, `data_digest`, `environment_digest`, and `reproducibility` (`exact`, `bounded`, `partial`, or `unknown`). Provenance values must be safe to commit.
+Attempt v3 paths follow the typed owner: a Run-owned Attempt is under its
+Experiment's `attempts/`; a Try-owned Attempt is under its Try's `attempts/`.
+Every referenced Source exists canonically, snapshot `subdir` equals the Source's
+immutable subdir, and `execution_source` occurs exactly once in the snapshot set.
+For a Try owner, every snapshot Source must be in the Try's declared Source set.
+A Source retired before capture cannot be used for that capture.
 
-Every explicitly registered, redacted Attempt is a canonical committed record, including failed Attempts. Local start/terminal markers under the Git common directory are operational inputs and are imported into this record; they do not replace it.
+Each `[[source_snapshots]]` has:
 
-`exp.attempt/v2` additionally pins the dispatch context: ResourcePool, Queue,
-Queue semantic revision, lane, stable dispatch ID, full Git base/head commits,
-and the exact ChangeSet. These fields connect the scientific Attempt to one
-admitted Queue frontier and one reviewed code candidate; Pueue task IDs and
-live status remain external observations.
+```text
+source                 canonical Source ID
+subdir                 canonical Source subdir
+policy_version         capture policy slug (current producer: capture-v1)
+captured_at            UTC time within the Attempt lifetime
+git_object_format      sha1 | sha256
+base_commit            full object ID matching the format
+head_commit            full object ID matching the format
+change_set             required sorted Git-root-relative array, even when empty
+state                  clean | dirty
+dirty_digest           required only for dirty
+dirty_summary          required bounded summary only for dirty
+digest                 sha256 identity of every snapshot field except itself
+reproducibility        exact for clean; exact or bounded for a complete dirty capture
+```
+
+A clean snapshot forbids dirty fields. A dirty snapshot is schema-valid only for
+a Try-owned Attempt; direct capture currently emits `bounded`, stores exact
+tracked patch/untracked file/submodule identities in a private
+`exp.source-seed/v1` bundle, and rejects unsupported or unbounded state. Formal
+runtime accepts clean snapshots only. When legacy provenance is present on v3,
+its Git commit, dirty flag/digest, and reproducibility must agree with the
+execution Source snapshot.
+
+`retry_of` is available only to Try-owned Attempt v3. The predecessor must be a
+terminal Attempt of the same Try, be older, and have the same cwd, argv, and
+execution Source. An Attempt may have only one retry successor. The direct retry
+path also recaptures the complete prior Source state (ignoring only capture time
+and the derived snapshot digest); drift blocks retry rather than silently
+changing the experiment.
+
+Direct Try policy and cleanup state use the open
+`extensions."io.github.daviddwlee84.exp-cli.tryflow"` table, not new core fields.
+The producer records `schema = "exp.tryflow-direct/v1"`, actual
+`workspace_backend = "native_git"`, allowed globs, timeout, optional selected
+MLflow profile/context, optional dirty seed-bundle digest, terminal result
+digests, and eventually `cleanup_completed`/`cleanup_completed_at`. Cleanup is
+allowed only for terminal Attempts and verified manager-owned state. It can
+remove a managed worktree and private seed bundle but never the canonical
+Attempt, branch, commit, operation row, or durable terminal marker.
+
+Every registered Attempt, including a failed one, is canonical. Private jobs,
+Pueue tasks, worktrees, seed bundles, and terminal markers are operational
+inputs. A final marker may be imported through a revision-checked transaction;
+it never replaces the Attempt or becomes scientific evidence by itself.
 
 ## ExternalRef
 
@@ -337,16 +460,34 @@ finite budget hours, and optional seal time. Each metric declares name, unit,
 direction, and optional threshold. Promotion-purpose specs must be sealed and
 every promotion metric has a threshold, so `passed`/`failed` is deterministic.
 
-Evaluation is immutable and owns its EvaluationSpec and subject edges. The
-subject is an Experiment, Candidate, or Release. It records `passed`, `failed`,
-or `invalid`, evaluation time, exactly declared metric values, summary, and
-optional sanitized external references. Tracker state is not copied wholesale.
+Evaluation is immutable and owns its EvaluationSpec and subject edges. Both
+versions record `passed`, `failed`, or `invalid`, evaluation time, exactly the
+metrics declared by the spec, summary, and optional sanitized ExternalRefs.
+`exp.evaluation/v1` permits an Experiment, Candidate, or Release subject and has
+no typed Attempt field. `exp.evaluation/v2` additionally requires `attempt`,
+permits only an Experiment subject, and requires that Attempt to be a successful
+terminal formal Attempt v3 whose Run belongs to the subject; evaluation time may
+not predate its terminal observation. An MLflow metadata owner alone does not
+implicitly upgrade v1: the creator must explicitly select `--attempt`, and any
+verified MLflow owner must match it.
 
-Candidate owns its concluded Experiment, passing scientific Evaluation, parent
-Candidate edges, full Git commit, exact ChangeSet, and optional external
-references. A successful direct Attempt for an included Run must match that Git
-identity and ChangeSet. It is a reusable evaluated result, not merely a
-successful process.
+Candidate is a reusable evaluated result, not merely a successful process. Both
+versions own a concluded supported Experiment, passing scientific Evaluation,
+and parent Candidate edges:
+
+- `exp.candidate/v1` stores required full `git_commit` and non-empty exact
+  `change_set`. It remains valid only when a successful direct Attempt v2 for an
+  included Run matches those fields. The CLI retains this path for explicit
+  `--legacy`, or infers it from the pre-existing `--git-commit`/`--change` flag
+  shape.
+- `exp.candidate/v2` forbids those top-level legacy fields and requires an exact
+  `attempt` plus a sorted non-empty `sources` array. The Attempt must be a clean,
+  successful, terminal, Run-owned Attempt v3 completed before the Experiment
+  conclusion; its Run must be included. Its Evaluation must be v2 and bind the
+  same Attempt. Each Candidate Source copies exactly `source`, `head_commit`, and
+  a required sorted `change_set` (which may be empty) from one clean
+  SourceSnapshot. Verified MLflow ownership, when present, must name that same
+  Attempt.
 
 Release owns a target, version, state (`draft`, `validated`, or `retired`), and
 unique named slots mapping to Candidates (normalized by slot name). It may also
@@ -373,6 +514,24 @@ new linked records rather than rewriting evidence.
 The current Champion is derived from the valid chain for each target; a
 generated champion manifest is never canonical.
 
+### Champion manifest v1 and v3
+
+`exp champion manifest` is output, not a canonical input schema. When every
+selected Release slot uses Candidate v1, the command emits
+`exp.champion-manifest/v1` with each slot's name, Candidate, Experiment,
+Evaluation, legacy `git_commit`, and `change_set`. Existing v1 output therefore
+keeps its exact meaning.
+
+If any selected slot uses Candidate v2, the complete manifest is labeled
+`exp.champion-manifest/v3`. Each v2 slot omits the legacy Git fields and includes
+`attempt`, `execution_source`, and `sources`; each Source entry contains its
+canonical Source ID, current sanitized locator hints and immutable subdir, plus
+the Candidate-copied `head_commit` and required `change_set`. A mixed v3 manifest
+can retain the legacy fields on v1 slots. No absolute checkout path, association,
+credential, artifact byte, or trust receipt is emitted. There is no emitted v2
+shape and no manifest decoder that can confer authority; downstream consumers
+must branch on `schema_version` and verify Git/provider state themselves.
+
 ## Decision
 
 Additional fields are `statement`, `based_on`, `action`, `effective_at`, and optional `supersedes`.
@@ -387,6 +546,9 @@ A Decision owns these relations. Active/superseded presentation is derived from 
 
 | Relation | Sole owner |
 |---|---|
+| Source identifies Git repository meaning/subdir | Source |
+| Try declares available Sources | Try |
+| Try adopts Idea / Idea originates from Try | Try and Idea v2, atomically reciprocal |
 | Idea descends from Idea | Child Idea |
 | Idea qualifies to Plan | Idea |
 | Idea merges into Idea | Merged Idea |
@@ -399,13 +561,17 @@ A Decision owns these relations. Active/superseded presentation is derived from 
 | Experiment descends from Experiment | Child Experiment v2 |
 | Combination Experiment consumes Candidate | Experiment v2 |
 | Run belongs to Experiment | Run |
-| Attempt executes Run | Attempt |
-| Attempt was admitted from Queue/Pool/lane | Attempt v2 |
+| Attempt executes Run or belongs to Try | Attempt v3 (v1/v2 always Run) |
+| Attempt retries an earlier Attempt | Retry successor Attempt v3 |
+| Attempt captures Source identities / selects execution Source | Attempt v3 |
+| Attempt was admitted from Queue/Pool/lane | Attempt v2 or dispatched v3 |
 | Experiment includes/excludes Run as conclusion evidence | Experiment conclusion |
 | Evaluation follows EvaluationSpec and evaluates subject | Evaluation |
+| Evaluation is backed by formal Attempt | Evaluation v2 |
 | Finding cites Run (or a coarse migrated Experiment) | Finding |
 | Finding weakens/overturns Finding | New Finding |
 | Candidate packages Experiment/Evaluation and parent Candidates | Candidate |
+| Candidate pins formal Attempt and Source commits/paths | Candidate v2 |
 | Release fills named slot from Candidate | Release |
 | Release cites combination Experiment/Evaluation | Release |
 | PromotionSpec uses sealed EvaluationSpec | PromotionSpec |
@@ -455,6 +621,7 @@ Canonical paths are:
 ```text
 PROJECT.md
 POLICY.md
+sources/src_<full-uuid>-<slug>.md
 ideas/idea_<full-uuid>-<slug>.md
 plans/plan_<full-uuid>-<slug>.md
 resource-pools/pool_<full-uuid>-<slug>.md
@@ -469,6 +636,8 @@ releases/rel_<full-uuid>-<slug>.md
 promotion-specs/promspec_<full-uuid>-<slug>.md
 promotions/prom_<full-uuid>-<slug>.md
 decisions/dec_<full-uuid>-<slug>.md
+t-<full-try-uuid-hex>-<slug>/TRY.md
+t-<full-try-uuid-hex>-<slug>/attempts/att_<full-uuid>.md
 e-<allocated-short-prefix>-<slug>/REPORT.md
 e-<allocated-short-prefix>-<slug>/runs/run_<full-uuid>-<slug>.md
 e-<allocated-short-prefix>-<slug>/attempts/att_<full-uuid>.md
@@ -483,3 +652,27 @@ Slugs are lower-case ASCII letters/digits separated by single hyphens. A path ne
 ```
 
 Rendering contains no current time, hostname, absolute path, or cache data. Records sort by the view's explicit key and then complete canonical ID: Plans by state, priority, then ID; Experiments by lifecycle then ID; Findings and Decisions by creation time then ID. Table cells escape `|` as `\|` and embedded newlines as `<br>`. Links are relative POSIX paths. Output uses LF and one final newline. `exp render --check` compares exact bytes and never writes.
+
+## Exact record compatibility and migration
+
+There is no implicit in-place schema migration. The decoder selects exactly the
+persisted `schema`, rejects unknown core fields, validates that version's
+required fields, and the encoder deliberately uses legacy wire structs so newer
+zero values cannot leak into v1/v2 output.
+
+| Existing data | Current behavior | How to opt into new semantics |
+|---|---|---|
+| `exp.project/v1` embedded Project | Remains valid and discoverable at its existing fixed `experiments/` root; no association is required for invocation inside it | Register it for cross-repository selection, or initialize a separate dedicated Project; neither changes the old Project schema |
+| Pre-existing noncanonical `sources` content or arbitrary `t-*` path | Ignored unless it matches the exact new Source filename or Try directory grammar; initialization does not rewrite it | Resolve any filesystem collision explicitly before publishing a Source/Try |
+| Idea v1 | Read and written without `origin_try` | Only `try adopt` creates Idea v2 with reciprocal Try ownership |
+| Attempt v1 | Retains Run-only, non-dispatch shape | No automatic conversion; create new work through an appropriate current runtime |
+| Attempt v2 | Retains formal legacy dispatch and top-level Git fields | Runtime v2 or direct Try creates a new Attempt v3; history is not rewritten |
+| Evaluation v1 | Remains valid for its original subject and optional MLflow metadata | Supply explicit `--attempt` for a formal Experiment Evaluation v2 |
+| Candidate v1 | Remains valid with legacy Git commit/ChangeSet and matching Attempt v2 | Use explicit clean formal Attempt v3 to create Candidate v2; legacy CLI flags remain supported |
+| Champion manifest v1 | Emitted unchanged while all slots are Candidate v1 | Presence of any Candidate v2 selects complete manifest v3 |
+
+Harness-v0 is a different unversioned source layout and uses the explicit,
+fingerprinted plan/apply migrator; valid v1 records must not be sent through that
+semantic migration. See [Harness-v0 compatibility and migration](harness-v0-migration.md)
+and [Workflow migration](../workflows/migration.md) for runtime, worker, journal,
+and association compatibility.

@@ -1,6 +1,6 @@
 // Package experimentgit prepares isolated Git worktrees for experiment agents
-// and commits only an explicitly allowed change set. It never merges, removes,
-// or unregisters a worktree.
+// and commits only an explicitly allowed change set. It never merges or removes
+// branches; explicit cleanup removes only a verified clean-at-base worktree.
 package experimentgit
 
 import (
@@ -38,6 +38,7 @@ var (
 	ErrNoChanges         = errors.New("experiment produced no changes")
 	ErrPathNotAllowed    = errors.New("experiment changed a path outside its allowlist")
 	ErrForbiddenMetadata = errors.New("experiment worktree contains forbidden Git metadata")
+	ErrCleanupRefused    = errors.New("cleanup refuses a changed or unverified worktree")
 )
 
 var fullObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -51,19 +52,41 @@ type Request struct {
 	ExperimentID     research.ID
 	ExperimentTitle  string
 	AllowedPathGlobs []string
+
+	// Identity-aware callers provide the complete Project/Source/owner tuple.
+	// ExperimentID/ExperimentTitle remain the legacy compatibility surface.
+	ProjectID              research.UUID
+	SourceID               research.ID
+	OwnerID                research.ID
+	OwnerTitle             string
+	SourceSubdir           string
+	RegisteredGitCommonDir string
+	AllowedPaths           []string
+	BaselinePaths          []string
+	CanonicalMetadataRoot  string
+	AllowDirtySource       bool
 }
 
-// Workspace describes the isolated checkout created for an experiment.
+// Workspace describes the isolated checkout created for an experiment or Try.
 type Workspace struct {
-	RepositoryRoot string   `json:"repository_root"`
-	Worktree       string   `json:"worktree"`
-	BaseCommit     string   `json:"base_commit"`
-	Branch         string   `json:"branch"`
-	AllowedGlobs   []string `json:"allowed_globs"`
+	Backend        string        `json:"workspace_backend,omitempty"`
+	RepositoryRoot string        `json:"repository_root"`
+	Worktree       string        `json:"worktree"`
+	CWD            string        `json:"cwd"`
+	BaseCommit     string        `json:"base_commit"`
+	Branch         string        `json:"branch"`
+	ProjectID      research.UUID `json:"project_id,omitempty"`
+	SourceID       research.ID   `json:"source_id,omitempty"`
+	OwnerID        research.ID   `json:"owner_id,omitempty"`
+	SourceSubdir   string        `json:"source_subdir,omitempty"`
+	AllowedGlobs   []string      `json:"allowed_globs"`
+	AllowedPaths   []string      `json:"allowed_paths,omitempty"`
+	BaselinePaths  []string      `json:"baseline_paths,omitempty"`
 }
 
 // ChangeSet is the exact commit identity produced by Commit.
 type ChangeSet struct {
+	Backend    string   `json:"workspace_backend,omitempty"`
 	Worktree   string   `json:"worktree"`
 	BaseCommit string   `json:"base_commit"`
 	HeadCommit string   `json:"head_commit"`
@@ -82,16 +105,30 @@ type Manager struct {
 }
 
 type normalizedRequest struct {
-	repositoryRoot string
-	baseCommit     string
-	short          string
-	slug           string
-	branch         string
-	globs          []string
+	repositoryRoot   string
+	registeredCommon string
+	baseCommit       string
+	short            string
+	slug             string
+	branch           string
+	globs            []string
+	paths            []string
+	baselinePaths    []string
+	sourceSubdir     string
+	metadataRoot     string
+	projectNamespace string
+	sourceNamespace  string
+	workspaceLeaf    string
+	projectID        research.UUID
+	sourceID         research.ID
+	ownerID          research.ID
+	allowDirtySource bool
+	identityAware    bool
 }
 
 // Prepare creates a new branch and linked worktree at the explicit base
-// commit. The source checkout and the new checkout must both be clean.
+// commit. The new checkout must be clean; legacy and formal callers also require
+// a clean source checkout, while explicit dirty Try seeding may opt out.
 func (manager Manager) Prepare(ctx context.Context, request Request) (Workspace, error) {
 	if ctx == nil {
 		return Workspace{}, fmt.Errorf("context is required: %w", ErrInvalidRequest)
@@ -105,15 +142,20 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Workspace,
 	if err != nil {
 		return Workspace{}, err
 	}
+	if normalized.registeredCommon != "" && repository.GitCommonDir != normalized.registeredCommon {
+		return Workspace{}, fmt.Errorf("registered Git common directory differs from discovery: %w", ErrWorkspaceState)
+	}
 	base, err := resolveCommit(ctx, runner, repository.Root, normalized.baseCommit)
 	if err != nil {
 		return Workspace{}, err
 	}
-	if err := requireClean(ctx, runner, repository.Root); err != nil {
-		return Workspace{}, fmt.Errorf("source checkout: %w", err)
+	if !normalized.allowDirtySource {
+		if err := requireCleanSource(ctx, runner, repository.Root); err != nil {
+			return Workspace{}, fmt.Errorf("source checkout: %w", err)
+		}
 	}
 
-	worktree, err := manager.prepareWorktreePath(repository, normalized)
+	worktree, err := manager.prepareWorktreePath(ctx, runner, repository, normalized)
 	if err != nil {
 		return Workspace{}, err
 	}
@@ -122,7 +164,7 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Workspace,
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Workspace{}, fmt.Errorf("inspect experiment worktree: %w", err)
 	}
-	if _, err := runGit(ctx, runner, repository.Root, "worktree", "add", "-b", normalized.branch, worktree, base); err != nil {
+	if _, err := runGit(ctx, runner, repository.Root, "-c", "core.hooksPath="+os.DevNull, "worktree", "add", "-b", normalized.branch, worktree, base); err != nil {
 		return Workspace{}, fmt.Errorf("create experiment worktree: %w", err)
 	}
 	canonicalWorktree, err := filepath.EvalSymlinks(worktree)
@@ -135,12 +177,27 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Workspace,
 	if err := requireClean(ctx, runner, worktree); err != nil {
 		return Workspace{}, fmt.Errorf("new experiment checkout: %w", err)
 	}
+	cwd, err := pathx.ResolveUnderNoSymlinks(worktree, normalized.sourceSubdir, true)
+	if err != nil {
+		return Workspace{}, fmt.Errorf("resolve Source semantic root in new worktree: %w", errors.Join(ErrWorkspaceState, err))
+	}
+	cwdInfo, err := os.Lstat(cwd)
+	if err != nil || cwdInfo.Mode()&os.ModeSymlink != 0 || !cwdInfo.IsDir() {
+		return Workspace{}, fmt.Errorf("Source semantic root is not a real directory: %w", errors.Join(ErrWorkspaceState, err))
+	}
 	return Workspace{
 		RepositoryRoot: repository.Root,
 		Worktree:       worktree,
+		CWD:            cwd,
 		BaseCommit:     base,
 		Branch:         normalized.branch,
+		ProjectID:      normalized.projectID,
+		SourceID:       normalized.sourceID,
+		OwnerID:        normalized.ownerID,
+		SourceSubdir:   normalized.sourceSubdir,
 		AllowedGlobs:   append([]string(nil), normalized.globs...),
+		AllowedPaths:   append([]string(nil), normalized.paths...),
+		BaselinePaths:  append([]string(nil), normalized.baselinePaths...),
 	}, nil
 }
 
@@ -154,10 +211,16 @@ func (manager Manager) Commit(ctx context.Context, request Request) (ChangeSet, 
 	if err != nil {
 		return ChangeSet{}, err
 	}
+	if normalized.identityAware && normalized.ownerID.Kind() != research.KindExperiment {
+		return ChangeSet{}, fmt.Errorf("only formal Experiment owners may be committed: %w", ErrInvalidRequest)
+	}
 	runner := manager.gitRunner()
 	repository, err := discoverExact(ctx, runner, normalized.repositoryRoot)
 	if err != nil {
 		return ChangeSet{}, err
+	}
+	if normalized.registeredCommon != "" && repository.GitCommonDir != normalized.registeredCommon {
+		return ChangeSet{}, fmt.Errorf("registered Git common directory differs from discovery: %w", ErrWorkspaceState)
 	}
 	base, err := resolveCommit(ctx, runner, repository.Root, normalized.baseCommit)
 	if err != nil {
@@ -181,7 +244,7 @@ func (manager Manager) Commit(ctx context.Context, request Request) (ChangeSet, 
 	if err := requireWorkspaceBranch(ctx, runner, worktree, normalized.branch); err != nil {
 		return ChangeSet{}, err
 	}
-	if err := rejectForbiddenMetadata(worktree); err != nil {
+	if err := rejectForbiddenMetadata(worktree, normalized.metadataRoot); err != nil {
 		return ChangeSet{}, err
 	}
 	if head != base {
@@ -196,10 +259,10 @@ func (manager Manager) Commit(ctx context.Context, request Request) (ChangeSet, 
 		return ChangeSet{}, ErrNoChanges
 	}
 	for _, changed := range paths {
-		if forbiddenPath(changed) {
+		if forbiddenPath(changed, normalized.metadataRoot) {
 			return ChangeSet{}, fmt.Errorf("%s: %w", changed, ErrForbiddenMetadata)
 		}
-		if !matchesAny(normalized.globs, changed) {
+		if !allowedPath(normalized, changed) {
 			return ChangeSet{}, fmt.Errorf("%s: %w", changed, ErrPathNotAllowed)
 		}
 	}
@@ -218,7 +281,7 @@ func (manager Manager) Commit(ctx context.Context, request Request) (ChangeSet, 
 	}
 
 	message := fmt.Sprintf("Record experiment %s changes for %s", normalized.short, normalized.slug)
-	if _, err := runGit(ctx, runner, worktree, "commit", "--no-gpg-sign", "--no-verify", "-m", message); err != nil {
+	if _, err := runGit(ctx, runner, worktree, "-c", "core.hooksPath="+os.DevNull, "commit", "--no-gpg-sign", "--no-verify", "-m", message); err != nil {
 		return ChangeSet{}, fmt.Errorf("commit experiment change set: %w", err)
 	}
 	head, err = readHead(ctx, runner, worktree)
@@ -244,33 +307,90 @@ func (manager Manager) gitRunner() gitx.Runner {
 }
 
 func normalizeRequest(request Request) (normalizedRequest, error) {
-	if request.RepositoryRoot == "" || !filepath.IsAbs(request.RepositoryRoot) || filepath.Clean(request.RepositoryRoot) != request.RepositoryRoot {
+	if request.RepositoryRoot == "" || !filepath.IsAbs(request.RepositoryRoot) || filepath.Clean(request.RepositoryRoot) != request.RepositoryRoot || !utf8.ValidString(request.RepositoryRoot) || strings.ContainsRune(request.RepositoryRoot, 0) {
 		return normalizedRequest{}, fmt.Errorf("repository root must be a clean absolute path: %w", ErrInvalidRequest)
 	}
 	if !fullObjectID.MatchString(request.BaseCommit) {
 		return normalizedRequest{}, fmt.Errorf("base commit must be a full lower-case object ID: %w", ErrInvalidRequest)
 	}
-	if request.ExperimentID.IsZero() || request.ExperimentID.Kind() != research.KindExperiment {
-		return normalizedRequest{}, fmt.Errorf("experiment ID must be a typed Experiment ID: %w", ErrInvalidRequest)
+	identityAware := !request.ProjectID.IsZero() || !request.SourceID.IsZero() || !request.OwnerID.IsZero() || request.OwnerTitle != "" || request.SourceSubdir != "" || request.RegisteredGitCommonDir != "" || len(request.AllowedPaths) != 0 || len(request.BaselinePaths) != 0 || request.CanonicalMetadataRoot != "" || request.AllowDirtySource
+	if !identityAware {
+		if request.ExperimentID.IsZero() || request.ExperimentID.Kind() != research.KindExperiment {
+			return normalizedRequest{}, fmt.Errorf("experiment ID must be a typed Experiment ID: %w", ErrInvalidRequest)
+		}
+		if err := validateTitle(request.ExperimentTitle); err != nil {
+			return normalizedRequest{}, err
+		}
+		globs, err := normalizeGlobs(request.AllowedPathGlobs, true)
+		if err != nil {
+			return normalizedRequest{}, err
+		}
+		// UUIDv7 prefixes are timestamp bits and collide for burst-created studies.
+		// Use the full UUID payload so branch and worktree identity is exact.
+		short := request.ExperimentID.UUIDHex()
+		slug := slugify(request.ExperimentTitle, "experiment", 48)
+		return normalizedRequest{
+			repositoryRoot: request.RepositoryRoot, baseCommit: request.BaseCommit,
+			short: short, slug: slug, branch: "exp/" + short + "-" + slug,
+			globs: globs, sourceSubdir: ".", metadataRoot: "experiments",
+			workspaceLeaf: short + "-" + slug,
+		}, nil
 	}
-	if err := validateTitle(request.ExperimentTitle); err != nil {
+
+	if request.ProjectID.IsZero() || request.SourceID.IsZero() || request.SourceID.Kind() != research.KindSource || request.OwnerID.IsZero() {
+		return normalizedRequest{}, fmt.Errorf("identity-aware requests require Project, Source, and owner IDs: %w", ErrInvalidRequest)
+	}
+	if !request.ExperimentID.IsZero() && request.ExperimentID != request.OwnerID {
+		return normalizedRequest{}, fmt.Errorf("legacy Experiment ID conflicts with owner ID: %w", ErrInvalidRequest)
+	}
+	title := request.OwnerTitle
+	if title == "" {
+		title = request.ExperimentTitle
+	}
+	if err := validateTitle(title); err != nil {
 		return normalizedRequest{}, err
 	}
-	globs, err := normalizeGlobs(request.AllowedPathGlobs)
+	if request.RegisteredGitCommonDir == "" || !filepath.IsAbs(request.RegisteredGitCommonDir) || filepath.Clean(request.RegisteredGitCommonDir) != request.RegisteredGitCommonDir || !utf8.ValidString(request.RegisteredGitCommonDir) || strings.ContainsRune(request.RegisteredGitCommonDir, 0) {
+		return normalizedRequest{}, fmt.Errorf("registered Git common directory must be a clean absolute path: %w", ErrInvalidRequest)
+	}
+	subdir, err := research.NormalizeSourceSubdir(request.SourceSubdir)
+	if err != nil {
+		return normalizedRequest{}, fmt.Errorf("normalize Source subdir: %w", errors.Join(ErrInvalidRequest, err))
+	}
+	// An empty allowlist is an explicit read-only workspace. Changed paths are
+	// still detected by Inspect and rejected because no path can match.
+	globs, err := normalizeGlobs(request.AllowedPathGlobs, false)
 	if err != nil {
 		return normalizedRequest{}, err
 	}
-	// UUIDv7 prefixes are timestamp bits and collide for burst-created studies.
-	// Use the full UUID payload so branch and worktree identity is exact.
-	short := request.ExperimentID.UUIDHex()
-	slug := slugify(request.ExperimentTitle, "experiment", 48)
+	paths, err := normalizeExactPaths(request.AllowedPaths)
+	if err != nil {
+		return normalizedRequest{}, err
+	}
+	baselinePaths, err := normalizeExactPaths(request.BaselinePaths)
+	if err != nil {
+		return normalizedRequest{}, err
+	}
+	metadataRoot := ""
+	if request.CanonicalMetadataRoot != "" {
+		metadataRoot, err = research.NormalizeSourceSubdir(request.CanonicalMetadataRoot)
+		if err != nil || metadataRoot == "." {
+			return normalizedRequest{}, fmt.Errorf("invalid canonical metadata root: %w", errors.Join(ErrInvalidRequest, err))
+		}
+	}
+	owner := request.OwnerID.String()
+	slug := slugify(title, "workspace", 48)
+	projectNamespace := request.ProjectID.String()
+	sourceNamespace := request.SourceID.String()
+	leaf := owner + "-" + slug
 	return normalizedRequest{
-		repositoryRoot: request.RepositoryRoot,
-		baseCommit:     request.BaseCommit,
-		short:          short,
-		slug:           slug,
-		branch:         "exp/" + short + "-" + slug,
-		globs:          globs,
+		repositoryRoot: request.RepositoryRoot, registeredCommon: request.RegisteredGitCommonDir,
+		baseCommit: request.BaseCommit, short: owner, slug: slug,
+		branch: "exp/" + projectNamespace + "/" + sourceNamespace + "/" + leaf,
+		globs:  globs, paths: paths, baselinePaths: baselinePaths, sourceSubdir: subdir, metadataRoot: metadataRoot,
+		projectNamespace: projectNamespace, sourceNamespace: sourceNamespace, workspaceLeaf: leaf,
+		projectID: request.ProjectID, sourceID: request.SourceID, ownerID: request.OwnerID,
+		allowDirtySource: request.AllowDirtySource, identityAware: true,
 	}, nil
 }
 
@@ -286,9 +406,9 @@ func validateTitle(title string) error {
 	return nil
 }
 
-func normalizeGlobs(input []string) ([]string, error) {
-	if len(input) == 0 || len(input) > maxGlobs {
-		return nil, fmt.Errorf("allowed path globs must contain 1..%d entries: %w", maxGlobs, ErrInvalidRequest)
+func normalizeGlobs(input []string, required bool) ([]string, error) {
+	if len(input) > maxGlobs || required && len(input) == 0 {
+		return nil, fmt.Errorf("allowed path globs must contain %d..%d entries: %w", boolInt(required), maxGlobs, ErrInvalidRequest)
 	}
 	seen := make(map[string]struct{}, len(input))
 	output := make([]string, 0, len(input))
@@ -322,6 +442,36 @@ func normalizeGlobs(input []string) ([]string, error) {
 	return output, nil
 }
 
+func normalizeExactPaths(input []string) ([]string, error) {
+	if len(input) > maxGlobs {
+		return nil, fmt.Errorf("allowed paths exceed %d entries: %w", maxGlobs, ErrInvalidRequest)
+	}
+	seen := make(map[string]struct{}, len(input))
+	output := make([]string, 0, len(input))
+	for _, value := range input {
+		if len(value) > maxGlobBytes || strings.ContainsAny(value, "*?[") {
+			return nil, fmt.Errorf("allowed path %q is not exact: %w", value, ErrInvalidRequest)
+		}
+		if err := research.ValidateCommittedPath(value, false); err != nil {
+			return nil, fmt.Errorf("invalid allowed path %q: %w", value, errors.Join(ErrInvalidRequest, err))
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		output = append(output, value)
+	}
+	sort.Strings(output)
+	return output, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func discoverExact(ctx context.Context, runner gitx.Runner, root string) (gitx.Repository, error) {
 	canonical, err := pathx.Canonical(root)
 	if err != nil {
@@ -337,6 +487,23 @@ func discoverExact(ctx context.Context, runner gitx.Runner, root string) (gitx.R
 	return repository, nil
 }
 
+func requireOutsideRegisteredWorktrees(ctx context.Context, runner gitx.Runner, repository gitx.Repository, candidate string) error {
+	worktrees, err := gitx.Worktrees(ctx, repository.Root, runner)
+	if err != nil {
+		return fmt.Errorf("inspect registered Source worktrees: %w", err)
+	}
+	for _, worktree := range worktrees {
+		inside, containErr := pathx.Contains(worktree.Root, candidate)
+		if containErr != nil {
+			return fmt.Errorf("check managed path against registered worktree %s: %w", worktree.Root, containErr)
+		}
+		if inside {
+			return fmt.Errorf("XDG worktree path must be outside every registered Source worktree: %w", ErrInvalidRequest)
+		}
+	}
+	return nil
+}
+
 func resolveCommit(ctx context.Context, runner gitx.Runner, root, base string) (string, error) {
 	output, err := runGit(ctx, runner, root, "rev-parse", "--verify", base+"^{commit}")
 	if err != nil {
@@ -349,20 +516,24 @@ func resolveCommit(ctx context.Context, runner gitx.Runner, root, base string) (
 	return resolved, nil
 }
 
-func (manager Manager) prepareWorktreePath(repository gitx.Repository, request normalizedRequest) (string, error) {
+func (manager Manager) prepareWorktreePath(ctx context.Context, runner gitx.Runner, repository gitx.Repository, request normalizedRequest) (string, error) {
 	dataHome, err := manager.resolveDataHome()
 	if err != nil {
 		return "", err
 	}
-	project := projectNamespace(repository)
-	relativeParent := path.Join("exp", "worktrees", project)
-	proposed := filepath.Join(dataHome, filepath.FromSlash(relativeParent), request.short+"-"+request.slug)
+	relativeParent, leaf := workspaceLocation(repository, request)
+	proposed := filepath.Join(dataHome, filepath.FromSlash(relativeParent), leaf)
 	inside, err := pathx.Contains(repository.Root, proposed)
 	if err != nil {
 		return "", fmt.Errorf("check worktree containment: %w", err)
 	}
 	if inside {
 		return "", fmt.Errorf("XDG worktree path must be outside the source repository: %w", ErrInvalidRequest)
+	}
+	if request.identityAware {
+		if err := requireOutsideRegisteredWorktrees(ctx, runner, repository, proposed); err != nil {
+			return "", err
+		}
 	}
 	if err := os.MkdirAll(dataHome, 0o700); err != nil {
 		return "", fmt.Errorf("create XDG data home: %w", err)
@@ -379,7 +550,7 @@ func (manager Manager) prepareWorktreePath(repository gitx.Repository, request n
 	if err := parent.Close(); err != nil {
 		return "", fmt.Errorf("close experiment worktree parent: %w", err)
 	}
-	return filepath.Join(filepath.Clean(dataRoot.Name()), filepath.FromSlash(relativeParent), request.short+"-"+request.slug), nil
+	return filepath.Join(filepath.Clean(dataRoot.Name()), filepath.FromSlash(relativeParent), leaf), nil
 }
 
 func (manager Manager) existingWorktreePath(repository gitx.Repository, request normalizedRequest) (string, error) {
@@ -391,8 +562,8 @@ func (manager Manager) existingWorktreePath(repository gitx.Repository, request 
 	if err != nil {
 		return "", fmt.Errorf("canonicalize XDG data home: %w", err)
 	}
-	project := projectNamespace(repository)
-	worktree := filepath.Join(canonicalData, "exp", "worktrees", project, request.short+"-"+request.slug)
+	relativeParent, leaf := workspaceLocation(repository, request)
+	worktree := filepath.Join(canonicalData, filepath.FromSlash(relativeParent), leaf)
 	info, err := os.Lstat(worktree)
 	if err != nil {
 		return "", fmt.Errorf("inspect experiment worktree: %w", errors.Join(ErrWorkspaceState, err))
@@ -405,6 +576,13 @@ func (manager Manager) existingWorktreePath(repository gitx.Repository, request 
 		return "", fmt.Errorf("canonicalize experiment worktree: %w", errors.Join(ErrWorkspaceState, err))
 	}
 	return worktree, nil
+}
+
+func workspaceLocation(repository gitx.Repository, request normalizedRequest) (string, string) {
+	if request.identityAware {
+		return path.Join("exp", "worktrees", request.projectNamespace, request.sourceNamespace), request.workspaceLeaf
+	}
+	return path.Join("exp", "worktrees", projectNamespace(repository)), request.workspaceLeaf
 }
 
 func projectNamespace(repository gitx.Repository) string {
@@ -476,10 +654,10 @@ func committedChangeSet(ctx context.Context, runner gitx.Runner, worktree, base,
 		return partial, fmt.Errorf("committed experiment path set is empty or invalid: %w", errors.Join(ErrWorkspaceState, err))
 	}
 	for _, changed := range paths {
-		if forbiddenPath(changed) {
+		if forbiddenPath(changed, request.metadataRoot) {
 			return partial, fmt.Errorf("%s: %w", changed, ErrForbiddenMetadata)
 		}
-		if !matchesAny(request.globs, changed) {
+		if !allowedPath(request, changed) {
 			return partial, fmt.Errorf("%s: %w", changed, ErrPathNotAllowed)
 		}
 	}
@@ -503,6 +681,17 @@ func readHead(ctx context.Context, runner gitx.Runner, worktree string) (string,
 		return "", fmt.Errorf("experiment HEAD is not a full object ID: %w", errors.Join(ErrWorkspaceState, err))
 	}
 	return head, nil
+}
+
+func requireCleanSource(ctx context.Context, runner gitx.Runner, directory string) error {
+	output, err := runGit(ctx, runner, directory, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	if output != "" {
+		return ErrDirtyBase
+	}
+	return nil
 }
 
 func requireClean(ctx context.Context, runner gitx.Runner, directory string) error {
@@ -581,8 +770,11 @@ func validateGitPath(value string) error {
 	return nil
 }
 
-func rejectForbiddenMetadata(worktree string) error {
-	metadata := filepath.Join(worktree, "experiments", ".git")
+func rejectForbiddenMetadata(worktree, metadataRoot string) error {
+	if metadataRoot == "" {
+		return nil
+	}
+	metadata := filepath.Join(worktree, filepath.FromSlash(metadataRoot), ".git")
 	if _, err := os.Lstat(metadata); err == nil {
 		return fmt.Errorf("%s: %w", metadata, ErrForbiddenMetadata)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -591,8 +783,47 @@ func rejectForbiddenMetadata(worktree string) error {
 	return nil
 }
 
-func forbiddenPath(value string) bool {
-	return value == ".git" || strings.HasPrefix(value, ".git/") || value == "experiments" || strings.HasPrefix(value, "experiments/")
+func forbiddenPath(value, metadataRoot string) bool {
+	if value == ".git" || strings.HasPrefix(value, ".git/") {
+		return true
+	}
+	return metadataRoot != "" && (value == metadataRoot || strings.HasPrefix(value, metadataRoot+"/"))
+}
+
+func allowedPath(request normalizedRequest, repositoryPath string) bool {
+	semantic, ok := semanticPath(request.sourceSubdir, repositoryPath)
+	return ok && AllowsSemanticPath(request.paths, request.globs, semantic)
+}
+
+func baselinePath(request normalizedRequest, repositoryPath string) bool {
+	semantic, ok := semanticPath(request.sourceSubdir, repositoryPath)
+	if !ok {
+		return false
+	}
+	index := sort.SearchStrings(request.baselinePaths, semantic)
+	return index < len(request.baselinePaths) && request.baselinePaths[index] == semantic
+}
+
+// AllowsSemanticPath applies the same exact-path and recursive-glob semantics as
+// managed-worktree inspection to one Source-relative path.
+func AllowsSemanticPath(paths, globs []string, semantic string) bool {
+	index := sort.SearchStrings(paths, semantic)
+	if index < len(paths) && paths[index] == semantic {
+		return true
+	}
+	return matchesAny(globs, semantic)
+}
+
+func semanticPath(subdir, repositoryPath string) (string, bool) {
+	if subdir == "." {
+		return repositoryPath, true
+	}
+	prefix := subdir + "/"
+	if !strings.HasPrefix(repositoryPath, prefix) {
+		return "", false
+	}
+	value := strings.TrimPrefix(repositoryPath, prefix)
+	return value, value != ""
 }
 
 func matchesAny(globs []string, value string) bool {

@@ -1,168 +1,226 @@
 # MLflow
 
-`exp` treats MLflow as a read-only telemetry source. The workload creates and
-logs its own MLflow run; `exp` can verify selected fields from one explicit run
-and, under stricter lineage checks, attach a sanitized reference to an
-immutable Evaluation.
+MLflow remains authoritative for workload-created runs, metrics, parameters,
+tags, traces, artifact locations/bytes, and registry state. `exp` is a bounded
+read-only observer: it never creates or mutates a run, logs telemetry, downloads
+an artifact, changes registry state, or turns run status into a scientific
+verdict.
 
-MLflow remains authoritative for runs, metrics, tags, parameters, artifacts,
-and registry state. An Evaluation remains the canonical research statement.
+The canonical authorities are separate:
 
-## What is implemented
+- Attempt records the redacted operational execution and, only after verification,
+  a sanitized MLflow ExternalRef;
+- Evaluation records the scientific metric outcome under an EvaluationSpec;
+- Candidate/Release/Promotion enforce their own typed evidence gates;
+- an artifact URI is provider identity, not artifact-byte or deployment authority.
 
-The implemented boundary has two entry points:
+## Delivered entry points
 
-- `exp provider mlflow verify` checks exact metrics and expected tags on one
-  workload-owned run.
-- `exp evaluation create --mlflow-run-id ...` repeats verification and attaches
-  the run only when its canonical Attempt ownership and subject lineage match.
+| Entry point | Behavior when MLflow is absent or assertions fail |
+|---|---|
+| `exp provider mlflow verify` | Strict command failure; creates no canonical record. |
+| `exp evaluation create --mlflow-run-id ...` | Strict verification/lineage/metric failure before immutable Evaluation creation. |
+| Direct Try or formal worker with a selected profile and workload result `mlflow_run_id` | Optional observation becomes `unavailable` or `unverified`; successful process state remains successful. Only `verified` ownership is imported. |
 
-The integration does **not**:
+All use the installed `mlflow` binary's read-only
+`runs describe --run-id RUN_ID` command. The binary must already be resolvable
+from `PATH`; `exp` does not install MLflow, enter a Python environment, start a
+tracking server, authenticate interactively, or invoke a shell.
 
-- create, start, terminate, or delete an MLflow run;
-- log or update metrics, parameters, tags, or artifacts;
-- register, transition, alias, or delete a model;
-- install MLflow, enter an implicit Python environment, or open authentication;
-- turn run success into a scientific verdict.
+## Named profiles
 
-The `mlflow` executable must already be on `PATH`. The adapter invokes
-`mlflow runs describe --run-id RUN_ID` from the project repository and applies
-a bounded, deny-by-default environment.
+MLflow profiles are delivered through layered `exp.config/v1`. A named profile
+is replaced atomically by higher-precedence config and contains no endpoint or
+credential value—only a non-secret context, binary name, timeout, environment
+**names and policy**, and default metric names.
 
-## Verify a workload-owned run
+```toml
+schema = "exp.config/v1"
 
-Request every metric by exact name and every tag as an exact `NAME=VALUE`
-assertion:
+[defaults]
+mlflow_profile = "observer"
+
+[mlflow.profiles.observer]
+context = "research"
+binary = "mlflow"
+timeout = "30s"
+default_metrics = ["macro_f1", "validation_loss"]
+
+[mlflow.profiles.observer.env.MLFLOW_TRACKING_URI]
+from = "MLFLOW_TRACKING_URI"
+secret = false
+required = true
+
+[mlflow.profiles.observer.env.MLFLOW_TRACKING_TOKEN]
+from = "MLFLOW_TRACKING_TOKEN"
+secret = true
+required = true
+```
+
+Both map keys and `from` values are variable names. Their values are resolved
+from the parent only immediately before child start, are never put in config,
+worker output, a record, or a receipt, and are all registered for redaction.
+A required missing variable fails before that child process runs. Child names
+beginning with `EXP_` are forbidden in serialized workload profiles.
+
+Profiles are selected by explicit root flag first:
 
 ```bash
-RUN_ID='0123456789abcdef0123456789abcdef'
-ATTEMPT_ID='att_01a01e61-0000-7031-8000-000000000031'
-
-exp provider mlflow verify \
-  --run-id "$RUN_ID" \
-  --metric macro_f1 \
-  --metric validation_loss \
-  --tag "exp.attempt_id=$ATTEMPT_ID" \
+exp --mlflow-profile observer provider mlflow verify \
+  --run-id <WORKLOAD_RUN_ID> \
+  --tag 'exp.attempt_id=<ATTEMPT_ID>' \
   --json
 ```
 
-At least one `--metric` or `--tag` is required. Verification succeeds only
-when all of these conditions hold:
+Without the flag, `defaults.mlflow_profile` supplies the profile. An explicit
+name still requires exact trust when the winning profile definition came from an
+experiment/Source/subdirectory repository file. A repository-selected default
+also requires trust on both selector and profile definition. Use `exp config
+explain` and `exp config trust` rather than copying values into commands.
 
-- MLflow returns the same run ID that was requested;
-- the run status is exactly `FINISHED`;
+For backward compatibility, `--mlflow-context`, `--allow-env`, and
+`--secret-env` construct an invocation-local profile named `compatibility` with
+binary `mlflow` and a 30-second timeout. A named `--mlflow-profile` cannot be
+mixed with those flags. `--allow-env NAME` is optional non-secret inheritance;
+`--secret-env NAME` is required secret inheritance from the same parent name.
+Neither accepts a value.
+
+## Explicit run verification
+
+Supply one explicit run ID and at least one effective assertion: an exact
+`--metric`, an exact `--tag NAME=VALUE`, or a default metric from the selected
+profile.
+
+```bash
+exp --mlflow-profile observer provider mlflow verify \
+  --run-id <WORKLOAD_RUN_ID> \
+  --metric macro_f1 \
+  --tag 'exp.attempt_id=<ATTEMPT_ID>' \
+  --json
+```
+
+Verification succeeds only when:
+
+- the returned run ID exactly equals the requested ID;
+- status is exactly `FINISHED`;
 - every requested metric exists;
-- every expected tag exists and its value is an exact string match.
+- every expected tag exists and equals the supplied string.
 
-Missing metrics, missing or mismatched tags, a different run ID, and any status
-other than `FINISHED` produce diagnostics and a failed command. Verification
-does not interpret whether a metric is scientifically good or bad.
+Missing/mismatched assertions, another run ID, and any other status are sorted
+diagnostics and a command failure. `exp` does not decide whether a metric value
+is scientifically desirable.
 
-### Selected-field and redaction boundary
+### Selected-field boundary
 
 Only requested metric names and expected tag names cross the adapter boundary.
-Unrequested metrics and tags, all parameters, and other raw MLflow fields are
-discarded. The result also includes bounded run metadata: run ID, experiment
-ID, status, verification diagnostics, and a sanitized artifact URI when one can
-be retained safely.
+Unrequested metrics/tags, all parameters, and unrelated raw output are discarded.
+The bounded result may include safe run ID, experiment ID, status, diagnostics,
+and a sanitized artifact URI. Canonical URI sanitization removes userinfo and
+the complete query component, rejects `file:` and unsafe host/path/fragment
+material, and omits an unretainable URI with a diagnostic. Safe routing fragments
+may remain. No artifact read or download follows the URI.
 
-URI userinfo is removed, credential-like query data is removed or redacted,
-and unsafe or unparseable artifact URIs are omitted with a diagnostic. Use
-`--json` for the stable `exp.cli/v1` response envelope; do not scrape the human
-summary.
+The subprocess receives a deny-by-default minimal environment plus the profile's
+late-bound names. Output is bounded, parsed as one JSON value, and never treated
+as a provider capability beyond this read-only operation.
 
-### Environment and credentials
+## Optional worker attachment
 
-The MLflow subprocess inherits only a small portable baseline by default. Add
-non-secret configuration names explicitly with `--allow-env`. Bind required
-credentials from the parent environment with `--secret-env`:
-
-```bash
-export MLFLOW_TRACKING_URI='https://mlflow.example.test'
-export MLFLOW_TRACKING_TOKEN='set-outside-shell-history'
-
-exp provider mlflow verify \
-  --run-id "$RUN_ID" \
-  --metric macro_f1 \
-  --allow-env MLFLOW_TRACKING_URI \
-  --secret-env MLFLOW_TRACKING_TOKEN
-```
-
-`--allow-env NAME` is for additional non-secret variables. `--secret-env NAME`
-requires the same variable name to exist in the parent process, binds its value
-only for the MLflow subprocess, and keeps the value out of rendered command and
-environment metadata. A missing required secret fails before MLflow runs.
-
-## Attach a run to an Evaluation
-
-Attaching MLflow telemetry is part of `evaluation create`, not a separate
-mutation of an existing Evaluation:
-
-```bash
-exp evaluation create \
-  --title "Validation result" \
-  --spec "$EVALUATION_SPEC_ID" \
-  --subject "$EXPERIMENT_ID" \
-  --outcome passed \
-  --metric 'macro_f1=0.913:score' \
-  --summary "Passed the registered threshold" \
-  --mlflow-run-id "$RUN_ID" \
-  --mlflow-context local \
-  --mlflow-tag "exp.attempt_id=$ATTEMPT_ID" \
-  --allow-env MLFLOW_TRACKING_URI \
-  --secret-env MLFLOW_TRACKING_TOKEN
-```
-
-`--mlflow-context` is a non-secret name for the provider context and defaults
-to `default`. Additional `--mlflow-tag NAME=VALUE` assertions may be supplied;
-duplicate tag names are rejected during Evaluation creation.
-
-### Ownership and lineage checks
-
-Every attachment must include:
+A workload selected with a profile still owns run creation and logging. It may
+place a safe `mlflow_run_id` string in the bounded JSON written to its assigned
+`EXP_RESULT_PATH`. After process completion, the worker performs one read-only
+observation using the profile's default metrics and the required ownership tag:
 
 ```text
---mlflow-tag exp.attempt_id=<canonical-attempt-id>
+exp.attempt_id = <the exact canonical Attempt ID>
 ```
 
-The named Attempt must exist in this project, be a successful terminal
-execution, and point to a canonical Run. That Run's Experiment must belong to
-the Evaluation subject:
+The attachment state is:
 
-- an Experiment subject must be that same Experiment;
-- a Candidate subject must reference that Experiment;
-- a Release subject must include the Experiment through its combination
-  evidence or supported single-slot lineage.
+- `verified` only when the run ID/status/default metrics and exact ownership tag
+  verify;
+- `unverified` for a syntactically invalid identity or assertion mismatch;
+- `unavailable` for invalid profile environment, provider/binary absence, or
+  invocation failure.
 
-A run from another Experiment, an unknown Attempt, or a non-successful Attempt
-cannot be attached. If the Evaluation later backs a Candidate, the recorded
-MLflow owner Attempt must also equal that Candidate's successful backing
-Attempt.
+Observation failure does not turn an otherwise successful workload into failure.
+Only a valid `verified` attachment is converted to an Attempt ExternalRef. That
+reference records selected profile/context, run/status/experiment identity,
+selected metric values, `mlflow.owner_attempt`, observation time, and a sanitized
+artifact URI. It contains no profile values or artifact bytes. Replaying a
+durable worker marker imports the same reference only when it is byte-equivalent;
+a conflicting run identity fails closed.
 
-### Exact metric match
+### Direct Try versus formal Pueue runtime
 
-For an attachment, `exp` requests every metric named by the Evaluation's
-`--metric NAME=VALUE:UNIT` arguments. Each supplied numeric value must equal
-the value returned by MLflow exactly; there is no rounding or tolerance. Units
-and thresholds are validated against the EvaluationSpec, while MLflow supplies
-only the numeric telemetry value.
+Direct Try runs locally and may use a profile with environment bindings. The
+selected profile name/context are pinned in the Attempt's direct policy, and
+retry requires the same effective config digest and profile identity.
 
-Only after run verification, ownership, lineage, and exact metric checks pass
-does `exp` create the immutable Evaluation. Its external reference records a
-sanitized MLflow identity, observation time, verified status, experiment ID,
-owner Attempt, and owner subject. Verification by itself never creates an
-Evaluation, Finding, Candidate, Release, or Promotion.
+Formal runtime v2 may select a value-free profile (context, binary, timeout,
+default metrics), but rejects **any** profile environment binding because Pueue
+persists task environments. A formal workload requiring credentials must obtain
+them after start through its own reviewed broker. Runtime v1 has no integrated
+named-profile attachment route.
 
-See [Evidence to Promotion](../workflows/evidence-to-promotion.md) for the
-larger scientific workflow and the [Provider contract](../design/provider-contract.md)
-for the shared safety model.
+Provider observation remains optional in both worker paths. Candidate v2 does
+not require MLflow, but if its Evaluation or backing Attempt carries an MLflow
+owner claim, it must name the exact same formal Attempt.
 
-## Future topics
+## Attach MLflow to an Evaluation
 
-These are reserved documentation areas, not supported operations today:
+MLflow attachment is part of immutable Evaluation creation, not a later update.
+For the current formal Candidate v2 path, explicitly bind the successful formal
+Attempt so the command creates Evaluation v2:
 
-- named tracking-server profiles and context-specific authentication guidance;
-- proxy versus direct artifact-access topology and credential boundaries;
-- read-only history comparisons and richer metric diagnostics;
-- workload conventions for sweeps, trials, and nested runs;
-- a separately reviewed, read-only model-registry capability.
+```bash
+exp --mlflow-profile observer evaluation create \
+  --title "Registered validation result" \
+  --spec <EVALUATION_SPEC_ID> \
+  --subject <EXPERIMENT_ID> \
+  --attempt <FORMAL_ATTEMPT_ID> \
+  --outcome passed \
+  --metric 'macro_f1=0.913:score' \
+  --metric 'validation_loss=0.204:loss' \
+  --summary "Passed the sealed protocol" \
+  --mlflow-run-id <WORKLOAD_RUN_ID> \
+  --mlflow-tag 'exp.attempt_id=<FORMAL_ATTEMPT_ID>'
+```
+
+The command requires:
+
+1. the ownership tag to parse as an Attempt in this Project;
+2. a successful terminal Attempt with a canonical Run;
+3. that Run's Experiment to be in the Evaluation subject's lineage;
+4. when `--attempt` is present, an Experiment subject and a successful formal
+   Attempt v3 for that same Experiment;
+5. the explicit Attempt and MLflow owner to match;
+6. every supplied Evaluation numeric metric to equal MLflow exactly—no tolerance;
+7. names/units/threshold-derived outcome to match the EvaluationSpec.
+
+An Experiment subject maps directly. A Candidate subject uses its Experiment.
+A Release subject uses its combination Experiment when set, otherwise a slot
+Candidate lineage. However, Evaluation v2 itself accepts only an Experiment
+subject. Omitting `--attempt` preserves Evaluation v1 even when MLflow metadata
+names an owner; such a record cannot satisfy Candidate v2's typed Attempt gate.
+
+Only after all checks pass is the Evaluation transaction published. MLflow
+verification alone never creates a Finding, Candidate, Release, Champion, or
+Promotion.
+
+## Artifact and promotion boundary
+
+A verified artifact URI is useful navigation and provenance, not evidence that
+bytes are present, immutable, safe, or production-ready. `exp` does not hash,
+copy, cache, compare, register, alias, promote, delete, or serve MLflow artifacts
+or models. Candidate v2 authority comes from clean SourceSnapshots plus typed
+Evaluation; Promotion comes from a sealed holdout and named human approval.
+There is no automatic deployment or rollback based on MLflow state.
+
+## Remaining limits
+
+- No run creation/logging or artifact/model-registry mutation.
+- No artifact-byte store or automatic artifact download.
+- No read-only registry capability beyond sanitized run observation.
+- No environment-bound MLflow profile in formal Pueue runtime.
+- No sweep/trial/nested-run interpretation as canonical Runs or Attempts.

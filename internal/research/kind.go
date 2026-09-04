@@ -14,12 +14,14 @@ const (
 	KindUnknown        Kind = ""
 	KindProject        Kind = "project"
 	KindPolicy         Kind = "policy"
+	KindSource         Kind = "source"
 	KindIdea           Kind = "idea"
 	KindResourcePool   Kind = "resource_pool"
 	KindQueue          Kind = "queue"
 	KindQueueAdvice    Kind = "queue_advice"
 	KindBattle         Kind = "battle"
 	KindPlan           Kind = "plan"
+	KindTry            Kind = "try"
 	KindExperiment     Kind = "experiment"
 	KindRun            Kind = "run"
 	KindAttempt        Kind = "attempt"
@@ -39,22 +41,28 @@ type Schema string
 const (
 	SchemaProject        Schema = "exp.project/v1"
 	SchemaPolicy         Schema = "exp.policy/v1"
+	SchemaSource         Schema = "exp.source/v1"
 	SchemaIdea           Schema = "exp.idea/v1"
+	SchemaIdeaV2         Schema = "exp.idea/v2"
 	SchemaResourcePool   Schema = "exp.resource-pool/v1"
 	SchemaQueue          Schema = "exp.queue/v1"
 	SchemaQueueAdvice    Schema = "exp.queue-advice/v1"
 	SchemaBattle         Schema = "exp.battle/v1"
 	SchemaPlan           Schema = "exp.plan/v1"
 	SchemaPlanV2         Schema = "exp.plan/v2"
+	SchemaTry            Schema = "exp.try/v1"
 	SchemaExperiment     Schema = "exp.experiment/v1"
 	SchemaExperimentV2   Schema = "exp.experiment/v2"
 	SchemaRun            Schema = "exp.run/v1"
 	SchemaAttempt        Schema = "exp.attempt/v1"
 	SchemaAttemptV2      Schema = "exp.attempt/v2"
+	SchemaAttemptV3      Schema = "exp.attempt/v3"
 	SchemaEvaluationSpec Schema = "exp.evaluation-spec/v1"
 	SchemaEvaluation     Schema = "exp.evaluation/v1"
+	SchemaEvaluationV2   Schema = "exp.evaluation/v2"
 	SchemaFinding        Schema = "exp.finding/v1"
 	SchemaCandidate      Schema = "exp.candidate/v1"
+	SchemaCandidateV2    Schema = "exp.candidate/v2"
 	SchemaRelease        Schema = "exp.release/v1"
 	SchemaPromotionSpec  Schema = "exp.promotion-spec/v1"
 	SchemaPromotion      Schema = "exp.promotion/v1"
@@ -70,12 +78,14 @@ var (
 var RecordKinds = []Kind{
 	KindProject,
 	KindPolicy,
+	KindSource,
 	KindIdea,
 	KindResourcePool,
 	KindQueue,
 	KindQueueAdvice,
 	KindBattle,
 	KindPlan,
+	KindTry,
 	KindExperiment,
 	KindRun,
 	KindAttempt,
@@ -106,6 +116,8 @@ func (k Kind) Schema() (Schema, error) {
 		return SchemaProject, nil
 	case KindPolicy:
 		return SchemaPolicy, nil
+	case KindSource:
+		return SchemaSource, nil
 	case KindIdea:
 		return SchemaIdea, nil
 	case KindResourcePool:
@@ -118,6 +130,8 @@ func (k Kind) Schema() (Schema, error) {
 		return SchemaBattle, nil
 	case KindPlan:
 		return SchemaPlan, nil
+	case KindTry:
+		return SchemaTry, nil
 	case KindExperiment:
 		return SchemaExperiment, nil
 	case KindRun:
@@ -152,7 +166,9 @@ func KindForSchema(schema Schema) (Kind, error) {
 		return KindProject, nil
 	case SchemaPolicy:
 		return KindPolicy, nil
-	case SchemaIdea:
+	case SchemaSource:
+		return KindSource, nil
+	case SchemaIdea, SchemaIdeaV2:
 		return KindIdea, nil
 	case SchemaResourcePool:
 		return KindResourcePool, nil
@@ -164,19 +180,21 @@ func KindForSchema(schema Schema) (Kind, error) {
 		return KindBattle, nil
 	case SchemaPlan, SchemaPlanV2:
 		return KindPlan, nil
+	case SchemaTry:
+		return KindTry, nil
 	case SchemaExperiment, SchemaExperimentV2:
 		return KindExperiment, nil
 	case SchemaRun:
 		return KindRun, nil
-	case SchemaAttempt, SchemaAttemptV2:
+	case SchemaAttempt, SchemaAttemptV2, SchemaAttemptV3:
 		return KindAttempt, nil
 	case SchemaEvaluationSpec:
 		return KindEvaluationSpec, nil
-	case SchemaEvaluation:
+	case SchemaEvaluation, SchemaEvaluationV2:
 		return KindEvaluation, nil
 	case SchemaFinding:
 		return KindFinding, nil
-	case SchemaCandidate:
+	case SchemaCandidate, SchemaCandidateV2:
 		return KindCandidate, nil
 	case SchemaRelease:
 		return KindRelease, nil
@@ -194,6 +212,8 @@ func KindForSchema(schema Schema) (Kind, error) {
 // IDPrefix is the persisted typed-ID prefix. Project has a bare UUID.
 func (k Kind) IDPrefix() (string, error) {
 	switch k {
+	case KindSource:
+		return "src_", nil
 	case KindIdea:
 		return "idea_", nil
 	case KindResourcePool:
@@ -206,6 +226,8 @@ func (k Kind) IDPrefix() (string, error) {
 		return "battle_", nil
 	case KindPlan:
 		return "plan_", nil
+	case KindTry:
+		return "try_", nil
 	case KindExperiment:
 		return "exp_", nil
 	case KindRun:
@@ -238,6 +260,8 @@ func (k Kind) IDPrefix() (string, error) {
 // DisplayLetter is the kind letter used by short display codes.
 func (k Kind) DisplayLetter() (byte, error) {
 	switch k {
+	case KindSource:
+		return 'U', nil
 	case KindIdea:
 		return 'I', nil
 	case KindResourcePool:
@@ -250,6 +274,8 @@ func (k Kind) DisplayLetter() (byte, error) {
 		return 'B', nil
 	case KindPlan:
 		return 'P', nil
+	case KindTry:
+		return 'Y', nil
 	case KindExperiment:
 		return 'E', nil
 	case KindRun:
@@ -280,6 +306,8 @@ func (k Kind) DisplayLetter() (byte, error) {
 // KindForDisplayLetter resolves a short-code letter case-insensitively.
 func KindForDisplayLetter(letter byte) (Kind, error) {
 	switch strings.ToUpper(string(letter)) {
+	case "U":
+		return KindSource, nil
 	case "I":
 		return KindIdea, nil
 	case "O":
@@ -292,6 +320,8 @@ func KindForDisplayLetter(letter byte) (Kind, error) {
 		return KindBattle, nil
 	case "P":
 		return KindPlan, nil
+	case "Y":
+		return KindTry, nil
 	case "E":
 		return KindExperiment, nil
 	case "R":

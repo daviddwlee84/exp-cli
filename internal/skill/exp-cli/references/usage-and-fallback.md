@@ -1,38 +1,89 @@
 # Human, agent, and read-only use
 
-## Human use
+## Human orientation
 
-Use explicit flags, inspect the proposed meaning, and review the ordinary Markdown committed to Git. Run `exp validate` before treating records as sound, and use `exp render --check` when verifying that generated project views match canonical records.
+For a new workspace, follow the same terminal sequence the docs and skill use:
 
-`exp doctor` is local-only by default, and current `--live` performs no extra
-contact. Provider contact is operation-specific: Pueue status/cancel, MLflow
-verify, and daemon tick/run. Use those commands only when that external read or
-mutation is intended.
+```text
+exp guide setup
+exp init
+exp guide workspaces
+exp workspace status
+exp source status
+exp guide config
+exp config show
+exp config explain
+```
+
+Bare `exp init` in a TTY defaults to a reviewed dedicated private experiment
+repository plus one initial Source. Complete explicit flags are required in
+non-interactive/JSON mode. `source add` can publish/associate another repository
+or immutable subdir; `source register` repairs only a host-local clone
+association.
+
+Choose the next flow deliberately:
+
+| Need | Start | Continue |
+|---|---|---|
+| quick exploratory answer | `exp guide quick`, `exp try run` | status → finish/abandon → optional adopt |
+| rigorous comparable evidence | `exp guide research`, `exp idea add` | qualify → Queue → runtime v2/daemon → Evaluation v2/Candidate v2 |
+| production decision | `exp guide promotion`, `exp candidate create` | Release → sealed fresh holdout → named-human Promotion |
+
+Use explicit flags, inspect proposed meaning, and review ordinary Markdown/TOML
+committed to Git. Run `exp validate` before treating records as sound and
+`exp render --check` when verifying generated project views.
+
+## Doctor, completion, and UI
+
+Default `exp doctor` performs local executable lookup only. `exp doctor --live`
+explicitly performs bounded version and read-only local-service probes; it does
+not log in, install, write config, start a service, or execute a workload.
+Provider contact remains operation-specific: Pueue status/cancel and daemon
+tick/run, MLflow verify/observation, and explicit readiness refresh.
+
+Missing MLflow, Pueue, or `dev` does not hide commands and does not block a
+native Try. Pueue is needed only for formal daemon dispatch; MLflow is optional
+observation. `dev_cli` lifecycle capabilities remain unsupported until exact
+schema-versioned path receipts exist; native Git remains the byte/inspection/
+cleanup authority.
+
+`exp completion bash|fish|powershell|zsh` emits standard shell completion.
+Completion reads local canonical records, associations, and config only; it does
+not probe providers or resolve environment values. `exp ui` is read-only on real
+terminal stdin/stdout. Startup is local-only; explicit readiness refresh runs
+bounded probes. No UI action mutates, trusts, executes, installs/logs in, starts
+a service, opens an editor, or hands off a workspace. Use `context --json` for
+machine-readable UI-equivalent summary.
 
 ## Agent use
 
 Prefer machine contracts over terminal prose:
 
-- add `--json` to commands that advertise it;
-- use `idea develop --apply` for a schema-validated agent proposal or
-  `idea qualify` for an explicit human qualification; use `plan add --input -`
-  only for the simpler v1 Plan input documented by that command;
-- parse the complete JSON envelope and check its schema version, `ok`, `partial`, data, and diagnostics fields;
-- keep stdout as JSON-only and treat stderr separately;
-- use canonical typed IDs and revisions returned by the command instead of extracting display codes from human output;
-- call `exp validate` after any supported mutation and never reconstruct relationships from generated projections;
+- add `--json` only to commands that advertise it;
+- parse the complete `exp.cli/v1` envelope and check schema version, `ok`,
+  `partial`, data, and diagnostics;
+- keep stdout JSON-only and stderr separate;
+- carry complete typed IDs and revisions returned by commands instead of
+  extracting display codes;
+- resolve Project/Source first; never let config, current-directory convenience,
+  a provider, or an agent response choose canonical authority;
+- inspect `config explain` and require exact-digest capability trust before any
+  repository-selected execution-bearing value is used;
 - treat `queue insert --agent` human-review output as a successful audit with no
-  Queue mutation, not as permission to choose one battle response manually;
-- use `daemon frontier` before enabling dispatch, and never change Policy
-  autonomy without explicit authorization.
+  Queue mutation, not permission to pick one battle response;
+- use `daemon frontier` before enabling dispatch and never change autonomy
+  without explicit authorization;
+- run `validate` after supported mutation and never reconstruct relationships
+  from generated projections.
 
-Command help and [commands.md](commands.md) are authoritative for syntax in this build. If metadata and recollection disagree, stop and use the metadata.
+Command help and [commands.md](commands.md) are authoritative for syntax in this
+build. If metadata and recollection disagree, stop and use the metadata.
 
 ## Agent profile example
 
-Profiles default to `$XDG_CONFIG_HOME/exp/agents.toml`. Configure a fresh CLI
-process, not a provider SDK session. Placeholders must occupy one whole argument.
-The `research-agent` binary below is an example user-supplied wrapper.
+Agent profiles remain separate user-managed `$XDG_CONFIG_HOME/exp/agents.toml`.
+Configure a fresh CLI process, not a provider SDK session. Placeholders occupy a
+whole argument. `research-agent` below is a user-supplied wrapper example.
 
 ```toml
 schema = "exp.agents/v1"
@@ -54,68 +105,131 @@ allowed_env = []
 secret_env = []
 ```
 
-Validate with `exp agent profiles`. The executable name is resolved through
-`PATH`; secret environment entries are names resolved only at process start.
+Validate with `exp agent profiles`. Executable names resolve through `PATH`;
+secret environment entries are names resolved only at process start.
 
-## Runtime contract example
+## Layered MLflow profile example
 
-`.exp/runtime.json` is non-canonical project-local configuration. Replace the
-IDs, absolute executable, full commits, and paths with values returned by the
-reviewed workflow.
+A formal Pueue profile must be value-free because Pueue persists task
+environments. Repository-defined selector/profile bytes require exact
+`mlflow.profile` trust.
+
+```toml
+schema = "exp.config/v1"
+
+[defaults]
+mlflow_profile = "formal-observer"
+
+[mlflow.profiles.formal-observer]
+context = "research"
+binary = "mlflow"
+timeout = "30s"
+default_metrics = ["macro_f1", "validation_loss"]
+```
+
+Inspect with `config show`/`config explain`, then use the `config trust` TTY
+review or complete `--path`, `--digest`, `--capability mlflow.profile`, and
+`--confirm` flags. Direct Try may use trusted environment-name bindings. Formal
+runtime v2 rejects all profile environment bindings; the workload must obtain
+credentials through its own broker.
+
+The workload owns MLflow run creation/logging. exp reads selected values and
+ownership only. Missing optional observation does not reverse process success;
+a strict explicit verification or Evaluation attachment must satisfy all named
+assertions.
+
+## Runtime v2 contract example
+
+`.exp/runtime.json` is strict project-local JSON, separate from layered config.
+Replace each quoted identifier, full commit, absolute executable, and path with
+reviewed values. The example intentionally contains no secret.
 
 ```json
 {
-  "schema_version": "exp.runtime/v1",
+  "schema_version": "exp.runtime/v2",
   "pools": {
-    "pool_01a01e66-f8e0-7202-8000-000000000202": {
+    "pool_replace_with_full_id": {
       "pueue_group": "gpu",
-      "label_prefix": "exp-"
+      "label_prefix": "exp-gpu-"
     }
   },
   "plans": {
-    "plan_01a01e69-e340-7505-8000-000000000505": {
-      "executable": "/opt/project/bin/train",
-      "argv": ["--config", "configs/trial.toml"],
-      "checkout": "main",
+    "plan_replace_with_full_id": {
+      "execution_source": "src_replace_with_full_id",
+      "read_only_sources": [],
+      "executable": "/absolute/path/to/project-runner",
+      "argv": ["--config", "configs/cosine.toml"],
+      "checkout": "managed_worktree",
       "cwd": ".",
-      "timeout": "2h",
-      "allowed_env": [],
+      "timeout": "3h",
+      "allowed_env": ["CUDA_VISIBLE_DEVICES"],
       "secret_env": [],
       "base_commit": "0000000000000000000000000000000000000000",
       "head_commit": "1111111111111111111111111111111111111111",
-      "change_set": ["configs/trial.toml"],
+      "change_set": ["configs/cosine.toml"],
       "expected_outputs": ["outputs/metrics.json"]
     }
   }
 }
 ```
 
-Use `exp daemon frontier` for a provider-free validation/read before any
-dispatch-enabled tick.
+V2 names one writable execution Source and optional read-only Sources. Every
+binding selects `main`, `registered_worktree`, or `managed_worktree`, pins full
+base/head object IDs and an exact ChangeSet, and must capture clean state. A
+no-change observation needs equal commits, an empty `change_set`, and explicit
+`observational_no_change: true`.
 
-Use `checkout: "registered_worktree"` to select the unique registered linked
-worktree at `head_commit`. Pueue persists task environments, so runtime
-`secret_env` must remain empty; retrieve credentials inside the workload from a
-broker or configured provider profile. Label prefixes sharing a Pueue group
-must be prefix-free, and the selected runtime config path cannot be part of a
-Plan's `change_set`.
+Review `.exp/runtime.json`, then approve its raw exact digest for
+`runtime.dispatch` with `config trust`. Use `daemon frontier` for provider-free
+validation before an authorized `daemon tick`/`run`. Runtime v1 remains the
+closed embedded-repository compatibility path and cannot describe external
+Sources.
+
+## Try and formal evidence boundaries
+
+Direct Try publishes Try/Attempt intent before creating the private managed
+native worktree/job. Dirty state is accepted only through bounded
+`--dirty=capture`; raw seed bytes remain in private XDG cache while canonical
+records contain summaries/paths/digests. Finish/abandon only after owned Attempts
+are terminal. A concluded Try can be adopted into Idea v2 but never directly
+supports Candidate creation.
+
+Formal runtime v2 admits only clean exact SourceSnapshots. Candidate v2 requires
+a supported Experiment conclusion including the Run, successful clean formal
+Attempt v3, passing scientific Evaluation v2 bound to that same Attempt, and
+exact snapshot equality. Process/Pueue/MLflow success alone is never enough.
+
+## Storage boundary
+
+Large datasets, model/checkpoint bytes, artifact files, traces, and unbounded
+logs stay in MLflow, DVC, or object storage. Canonical Git records receive only
+bounded summaries, selected metric values, cryptographic digests, exact Source/
+commit identities, and sanitized refs. Never put credentials, raw environments,
+host paths, artifact bytes, or unbounded provider output in Git.
 
 ## Manual read-only fallback
 
-When `exp` is unavailable, a repository must remain understandable with ordinary read-only file tools and Git:
+When `exp` is unavailable, a repository must remain understandable with ordinary
+read-only file tools and Git:
 
-1. Locate the fixed `<git-root>/experiments/PROJECT.md`; version 1 permits one root per Git repository.
-2. Read strict TOML front matter and Markdown bodies without editing them. Treat full typed IDs as identity; paths and short display codes are navigation aids.
-3. Read canonical records rather than rebuilding facts from `README.md`, `ROADMAP.md`, `LEDGER.md`, or `DECISIONS.md`. Those files are deterministic projections and may be stale.
-4. Keep Queue order, Experiment lifecycle/verdict, Run evidence intent, Attempt
-   operational state, Evaluation outcome, and Promotion decision separate. Do
-   not infer missing inverse relationships, terminal state, or current Champion.
-5. Treat external references as provider identity only. Do not claim that cached or committed provider state is live.
-6. Report malformed, missing, ambiguous, or stale material explicitly. Do not repair it by hand.
+1. Locate the exact Project marker at `<git-root>/experiments/PROJECT.md`; a
+   dedicated Project may be separate from every Source repository.
+2. Read strict TOML front matter and Markdown bodies without editing. Full typed
+   IDs are identity; paths/display codes are navigation aids.
+3. Resolve canonical Source records separately from host-local associations.
+   Absence of the private association store does not alter canonical identity.
+4. Read canonical records rather than rebuilding facts from generated
+   `README.md`, `ROADMAP.md`, `LEDGER.md`, `DECISIONS.md`, Champion manifests, or
+   UI output.
+5. Keep Queue order, Experiment lifecycle/verdict, Run intent, Attempt state,
+   Evaluation outcome, Candidate provenance, and Promotion decision separate.
+6. Treat external references as provider identity only. Do not claim cached or
+   committed provider state is live, and do not fetch large bytes implicitly.
+7. Report malformed, missing, ambiguous, or stale material explicitly; do not
+   repair it by hand.
 
-The fallback is deliberately read-only. Do not hand-author an Idea/Plan, change
-Queue order, update front matter, regenerate a projection, allocate an ID,
-approve Promotion, or emulate a transaction. Wait for a compatible `exp`
-binary or make an independently reviewed repository change outside this skill.
-
-Never execute legacy experiment-harness scripts, another skill's helper scripts, notebook code, package installers, authentication flows, schedulers, or provider commands as part of fallback inspection.
+Fallback is deliberately read-only. Do not author a record, reorder a Queue,
+regenerate projections, allocate IDs, grant config/runtime trust, approve
+Promotion, emulate a transaction, run a scheduler/provider, or execute legacy
+scripts. Wait for a compatible `exp` binary or make a separately reviewed
+repository change outside this skill.

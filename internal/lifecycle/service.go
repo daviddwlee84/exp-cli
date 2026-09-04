@@ -38,6 +38,44 @@ type Store interface {
 	Transact(context.Context, record.TransactionRequest) (*record.TransactionResult, error)
 }
 
+// TransactionError preserves durable transaction identity and per-path progress
+// when a scientific lifecycle transaction returns an error after preparation.
+type TransactionError struct {
+	Result *record.TransactionResult
+	Err    error
+}
+
+func (failure *TransactionError) Error() string {
+	if failure == nil || failure.Err == nil {
+		return "canonical scientific lifecycle transaction failed"
+	}
+	return failure.Err.Error()
+}
+
+func (failure *TransactionError) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.Err
+}
+
+// TransactionResultFromError returns durable lifecycle recovery identity carried
+// by err. Callers must treat the returned result as immutable.
+func TransactionResultFromError(err error) (*record.TransactionResult, bool) {
+	var failure *TransactionError
+	if !errors.As(err, &failure) || failure.Result == nil {
+		return nil, false
+	}
+	return failure.Result, true
+}
+
+func lifecycleTransactionError(result *record.TransactionResult, err error) error {
+	if result == nil || err == nil {
+		return err
+	}
+	return &TransactionError{Result: result, Err: err}
+}
+
 // Service owns lifecycle transitions for one canonical record store.
 type Service struct {
 	store          Store

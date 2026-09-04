@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/daviddwlee84/exp-cli/internal/pathx"
 	"github.com/daviddwlee84/exp-cli/internal/research"
@@ -38,6 +39,8 @@ type Inventory struct {
 	Diagnostics []Diagnostic
 
 	byID                   map[research.ID][]*Document
+	bySourceKey            map[string][]*Document
+	evaluationMLflowOwners map[research.ID]research.ID
 	locations              map[string]Location
 	boundRoot              *os.Root
 	boundVerify            func() error
@@ -224,7 +227,7 @@ func (scanner *inventoryScanner) scanRoot(root *os.Root) error {
 			scanner.inspectCandidate(root, name, name, info)
 			continue
 		}
-		if experimentDirPattern.MatchString(name) && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		if (experimentDirPattern.MatchString(name) || tryDirPattern.MatchString(name)) && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
 			scanner.note(name, info, nil)
 			scanner.scanExperiment(root, name, info)
 			continue
@@ -270,13 +273,15 @@ func (scanner *inventoryScanner) scanExperiment(root *os.Root, directory string,
 			continue
 		}
 		scanner.note(relative, info, nil)
-		if name == "runs" || name == "attempts" {
+		isExperiment := experimentDirPattern.MatchString(directory)
+		if name == "attempts" || isExperiment && name == "runs" {
 			if !scanner.openAndScanFlat(experiment, name, relative, info) {
 				scanner.inspectCandidate(experiment, name, relative, info)
 			}
 			continue
 		}
 		if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			scanner.inspectCandidate(experiment, name, relative, info)
 			scanner.scanInvalidTree(experiment, name, relative, info)
 			continue
 		}
@@ -389,7 +394,7 @@ func (scanner *inventoryScanner) inspectCandidate(parent *os.Root, name, relativ
 		return
 	}
 	if !recognized {
-		if info.Mode()&os.ModeSymlink != 0 && reservedPathPrefix(relative) {
+		if info.Mode()&os.ModeSymlink != 0 && reservedPathPrefix(relative) && !unrelatedLegacySourcePath(relative) {
 			scanner.inventory.addDiagnostic(relative, "path.symlink", "a symlink occupies a reserved canonical path")
 		}
 		return
@@ -463,9 +468,13 @@ func readRootDirectory(root *os.Root) ([]fs.DirEntry, error) {
 		return nil, err
 	}
 	opened, statErr := directory.Stat()
-	if statErr != nil || !os.SameFile(before, opened) {
+	if statErr != nil {
 		_ = directory.Close()
-		return nil, fmt.Errorf("directory changed while opening: %w", statErr)
+		return nil, fmt.Errorf("inspect opened directory: %w", statErr)
+	}
+	if !os.SameFile(before, opened) {
+		_ = directory.Close()
+		return nil, errors.New("directory changed while opening")
 	}
 	entries, readErr := directory.ReadDir(-1)
 	closeErr := directory.Close()
@@ -473,8 +482,11 @@ func readRootDirectory(root *os.Root) ([]fs.DirEntry, error) {
 		return nil, errors.Join(readErr, closeErr)
 	}
 	after, err := root.Stat(".")
-	if err != nil || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("directory changed while reading: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("inspect directory after reading: %w", err)
+	}
+	if !os.SameFile(before, after) {
+		return nil, errors.New("directory changed while reading")
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].Name() < entries[right].Name() })
 	return entries, nil
@@ -551,10 +563,12 @@ func inventoryFromDocuments(root string, documents []*Document, imported bool) *
 
 func newInventory(root string) *Inventory {
 	return &Inventory{
-		Root:       root,
-		byID:       make(map[research.ID][]*Document),
-		locations:  make(map[string]Location),
-		identities: make(map[string]fs.FileInfo),
+		Root:                   root,
+		byID:                   make(map[research.ID][]*Document),
+		bySourceKey:            make(map[string][]*Document),
+		evaluationMLflowOwners: make(map[research.ID]research.ID),
+		locations:              make(map[string]Location),
+		identities:             make(map[string]fs.FileInfo),
 	}
 }
 
@@ -577,6 +591,9 @@ func (inventory *Inventory) finalize() {
 			}
 			continue
 		}
+		if source, ok := document.Record.(*research.Source); ok {
+			inventory.bySourceKey[source.Key] = append(inventory.bySourceKey[source.Key], document)
+		}
 		id, ok := document.ID()
 		if ok {
 			inventory.byID[id] = append(inventory.byID[id], document)
@@ -595,11 +612,105 @@ func (inventory *Inventory) finalize() {
 	if !inventory.skipImportedProvenance {
 		inventory.validateImportedProvenance()
 	}
+	inventory.validateEvaluationMLflowOwnership()
 	inventory.validateRelationships()
+	inventory.validateTryClosureSemantics()
+	inventory.validateTryRetrySemantics()
 	inventory.validatePlanExperimentSemantics()
 	inventory.validatePromotionSemantics()
 	inventory.validateCycles()
 	inventory.sortDiagnostics()
+}
+
+// validateTryClosureSemantics mirrors the Try service at the whole-inventory
+// boundary so hand-authored closures cannot strand live work or claim unrelated
+// private result identities.
+func (inventory *Inventory) validateTryClosureSemantics() {
+	attempts := make(map[research.ID][]*Document)
+	for _, document := range inventory.OfKind(research.KindAttempt) {
+		attempt := document.Record.(*research.Attempt)
+		if !attempt.Try.IsZero() {
+			attempts[attempt.Try] = append(attempts[attempt.Try], document)
+		}
+	}
+	for _, document := range inventory.OfKind(research.KindTry) {
+		value := document.Record.(*research.Try)
+		if value.State == research.TryOpen {
+			continue
+		}
+		available := make(map[string]struct{})
+		for _, attemptDocument := range attempts[value.ID] {
+			attempt := attemptDocument.Record.(*research.Attempt)
+			if !terminalAttemptState(attempt.State) {
+				inventory.addDiagnostic(document.Path, "try.nonterminal_attempt", fmt.Sprintf("closed Try %s owns nonterminal Attempt %s (%s)", value.ID, attempt.ID, attempt.State))
+			}
+			if table := attempt.Extensions["io.github.daviddwlee84.exp-cli.tryflow"]; table != nil {
+				for _, digest := range inventoryExtensionStrings(table["result_digests"]) {
+					available[digest] = struct{}{}
+				}
+			}
+		}
+		if value.Conclusion != nil {
+			for _, digest := range value.Conclusion.ResultDigests {
+				if _, found := available[digest]; !found {
+					inventory.addDiagnostic(document.Path, "try.result_not_owned", fmt.Sprintf("conclusion result digest %s was not produced by a terminal owned Attempt", digest))
+				}
+			}
+		}
+	}
+}
+
+func (inventory *Inventory) validateTryRetrySemantics() {
+	successors := make(map[research.ID][]*Document)
+	for _, document := range inventory.OfKind(research.KindAttempt) {
+		attempt := document.Record.(*research.Attempt)
+		if attempt.RetryOf.IsZero() {
+			continue
+		}
+		successors[attempt.RetryOf] = append(successors[attempt.RetryOf], document)
+		previousDocument := inventory.unique(attempt.RetryOf)
+		if previousDocument == nil || previousDocument.Kind() != research.KindAttempt {
+			continue
+		}
+		previous := previousDocument.Record.(*research.Attempt)
+		if previous.Try.IsZero() || previous.Try != attempt.Try {
+			inventory.addDiagnostic(document.Path, "attempt.retry_owner", "retry_of must identify an Attempt owned by the same Try")
+		}
+		if !terminalAttemptState(previous.State) {
+			inventory.addDiagnostic(document.Path, "attempt.retry_nonterminal", fmt.Sprintf("retry predecessor %s is nonterminal (%s)", previous.ID, previous.State))
+		}
+		if !previous.CreatedAt.Before(attempt.CreatedAt) {
+			inventory.addDiagnostic(document.Path, "attempt.retry_order", "retry successor must be created after its predecessor")
+		}
+		if previous.CWD != attempt.CWD || !reflect.DeepEqual(previous.Argv, attempt.Argv) || previous.ExecutionSource != attempt.ExecutionSource {
+			inventory.addDiagnostic(document.Path, "attempt.retry_identity", "retry successor must preserve cwd, argv, and execution Source")
+		}
+	}
+	for predecessor, documents := range successors {
+		if len(documents) < 2 {
+			continue
+		}
+		for _, document := range documents {
+			inventory.addDiagnostic(document.Path, "attempt.retry_duplicate", fmt.Sprintf("Attempt %s has %d retry successors", predecessor, len(documents)))
+		}
+	}
+}
+
+func inventoryExtensionStrings(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
 
 // validatePromotionSemantics mirrors the append-only lifecycle service at the
@@ -710,6 +821,21 @@ func (inventory *Inventory) validateDuplicates() {
 		}
 	}
 
+	sourceKeys := make([]string, 0, len(inventory.bySourceKey))
+	for key := range inventory.bySourceKey {
+		sourceKeys = append(sourceKeys, key)
+	}
+	sort.Strings(sourceKeys)
+	for _, key := range sourceKeys {
+		documents := inventory.bySourceKey[key]
+		if len(documents) < 2 {
+			continue
+		}
+		for _, document := range documents {
+			inventory.addDiagnostic(document.Path, "source.duplicate_key", fmt.Sprintf("Source key %q occurs in %d records", key, len(documents)))
+		}
+	}
+
 	aliases := map[string][]*Document{}
 	for _, document := range inventory.Documents {
 		common := document.Record.GetCommon()
@@ -738,8 +864,113 @@ func (inventory *Inventory) validateDuplicates() {
 	}
 }
 
+// validateEvaluationMLflowOwnership binds provider ownership metadata back to
+// canonical Attempt/Run/subject lineage before Candidate validation consumes it.
+// Metadata without an owner remains readable for backward compatibility; once a
+// producer claims an owner, the claim must be canonical, unique, and resolvable.
+func (inventory *Inventory) validateEvaluationMLflowOwnership() {
+	for _, document := range inventory.OfKind(research.KindEvaluation) {
+		evaluation := document.Record.(*research.Evaluation)
+		owner := research.ID{}
+		ownerFound := false
+		valid := true
+		for index, reference := range evaluation.ExternalRefs {
+			if reference.Provider != "mlflow" || reference.Role != research.ExternalTracker {
+				continue
+			}
+			field := fmt.Sprintf("external_refs[%d].metadata", index)
+			if subjectValue, present := reference.Metadata["mlflow.owner_subject"]; present {
+				subject, ok := subjectValue.(string)
+				if !ok || subject != evaluation.Subject.String() {
+					inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_subject", field+" MLflow owner subject does not match the Evaluation subject")
+					valid = false
+				}
+			}
+			ownerValue, present := reference.Metadata["mlflow.owner_attempt"]
+			if !present {
+				continue
+			}
+			ownerText, ok := ownerValue.(string)
+			if !ok || ownerText == "" {
+				inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_invalid", field+" MLflow owner Attempt is not a canonical ID")
+				valid = false
+				continue
+			}
+			parsed, err := research.ParseIDForKind(ownerText, research.KindAttempt)
+			if err != nil {
+				inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_invalid", field+" MLflow owner Attempt is not a canonical ID")
+				valid = false
+				continue
+			}
+			if ownerFound && owner != parsed {
+				inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_conflict", "MLflow references claim different owner Attempts")
+				valid = false
+				continue
+			}
+			owner, ownerFound = parsed, true
+		}
+		if !ownerFound || !valid {
+			continue
+		}
+		inventory.evaluationMLflowOwners[evaluation.ID] = owner
+		if evaluation.Schema == research.SchemaEvaluationV2 && evaluation.Attempt != owner {
+			inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_attempt", "MLflow owner Attempt does not match the typed Evaluation Attempt")
+		}
+		attemptDocument := inventory.unique(owner)
+		if attemptDocument == nil || attemptDocument.Kind() != research.KindAttempt {
+			inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_unresolved", fmt.Sprintf("MLflow owner Attempt %s does not resolve uniquely", owner))
+			continue
+		}
+		attempt := attemptDocument.Record.(*research.Attempt)
+		if attempt.State != research.AttemptSucceeded || attempt.Terminal == nil || attempt.Run.IsZero() {
+			inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_provenance", "MLflow owner must be a successful terminal Run-backed Attempt")
+			continue
+		}
+		runDocument := inventory.unique(attempt.Run)
+		if runDocument == nil || runDocument.Kind() != research.KindRun {
+			inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_provenance", "MLflow owner Attempt has no uniquely resolvable Run")
+			continue
+		}
+		run := runDocument.Record.(*research.Run)
+		subjectDocument := inventory.unique(evaluation.Subject)
+		if subjectDocument != nil && !inventory.evaluationSubjectIncludesExperiment(subjectDocument, run.Experiment) {
+			inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_lineage", "MLflow owner Attempt Run is outside the Evaluation subject lineage")
+		}
+	}
+}
+
+func (inventory *Inventory) evaluationSubjectIncludesExperiment(subject *Document, experimentID research.ID) bool {
+	if subject == nil || experimentID.IsZero() {
+		return false
+	}
+	switch value := subject.Record.(type) {
+	case *research.Experiment:
+		return value.ID == experimentID
+	case *research.Candidate:
+		return value.Experiment == experimentID
+	case *research.Release:
+		if !value.CombinationExperiment.IsZero() && value.CombinationExperiment == experimentID {
+			return true
+		}
+		for _, slot := range value.Slots {
+			candidate := inventory.unique(slot.Candidate)
+			if candidate != nil && candidate.Kind() == research.KindCandidate && candidate.Record.(*research.Candidate).Experiment == experimentID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (inventory *Inventory) validateRelationships() {
 	queuePartitions := map[string]*Document{}
+	ideaOrigins := map[research.ID][]*Document{}
+	for _, document := range inventory.OfKind(research.KindIdea) {
+		idea := document.Record.(*research.Idea)
+		if !idea.OriginTry.IsZero() {
+			ideaOrigins[idea.OriginTry] = append(ideaOrigins[idea.OriginTry], document)
+		}
+	}
 	for _, document := range inventory.OfKind(research.KindQueue) {
 		queue := document.Record.(*research.Queue)
 		for _, partition := range queue.Partitions {
@@ -754,6 +985,26 @@ func (inventory *Inventory) validateRelationships() {
 	}
 	for _, document := range inventory.Documents {
 		switch value := document.Record.(type) {
+		case *research.Source:
+		case *research.Try:
+			for index, id := range value.Sources {
+				sourceDocument := inventory.require(document, fmt.Sprintf("sources[%d]", index), id, research.KindSource)
+				if sourceDocument != nil {
+					source := sourceDocument.Record.(*research.Source)
+					if source.State == research.SourceRetired && source.RetiredAt != nil && !source.RetiredAt.After(value.CreatedAt) {
+						inventory.addDiagnostic(document.Path, "try.source_retired", fmt.Sprintf("Source %s was retired before this Try was created", source.ID))
+					}
+				}
+			}
+			if !value.AdoptedIdea.IsZero() {
+				ideaDocument := inventory.require(document, "adopted_idea", value.AdoptedIdea, research.KindIdea)
+				if ideaDocument != nil && ideaDocument.Record.(*research.Idea).OriginTry != value.ID {
+					inventory.addDiagnostic(document.Path, "try.idea_mismatch", "Try adopted_idea does not point back through Idea.origin_try")
+				}
+			}
+			if origins := ideaOrigins[value.ID]; len(origins) > 1 {
+				inventory.addDiagnostic(document.Path, "try.multiple_adoptions", fmt.Sprintf("Try is claimed by %d Ideas", len(origins)))
+			}
 		case *research.Idea:
 			for index, id := range value.Parents {
 				inventory.require(document, fmt.Sprintf("parents[%d]", index), id, research.KindIdea)
@@ -766,6 +1017,15 @@ func (inventory *Inventory) validateRelationships() {
 			}
 			if !value.MergedInto.IsZero() {
 				inventory.require(document, "merged_into", value.MergedInto, research.KindIdea)
+			}
+			if !value.OriginTry.IsZero() {
+				tryDocument := inventory.require(document, "origin_try", value.OriginTry, research.KindTry)
+				if tryDocument != nil {
+					origin := tryDocument.Record.(*research.Try)
+					if origin.State != research.TryAdopted || origin.AdoptedIdea != value.ID {
+						inventory.addDiagnostic(document.Path, "idea.try_mismatch", "Idea origin_try is not adopted by this Try")
+					}
+				}
 			}
 			inventory.validateClassificationValues(document, &value.Classification)
 			inventory.validateClusterValue(document, value.PrimaryCluster)
@@ -882,29 +1142,76 @@ func (inventory *Inventory) validateRelationships() {
 				inventory.validateRunLocation(document, target)
 			}
 		case *research.Attempt:
-			target := inventory.require(document, "run", value.Run, research.KindRun)
-			if target != nil {
-				inventory.validateAttemptLocation(document, target)
-				run := target.Record.(*research.Run)
-				experimentDocument := inventory.unique(run.Experiment)
-				if experimentDocument != nil {
-					experiment := experimentDocument.Record.(*research.Experiment)
-					if experiment.Design.DesignLockedAt == nil || experiment.Design.DesignDigest == "" {
-						inventory.addDiagnostic(document.Path, "experiment.design_unlocked", fmt.Sprintf("Attempt %s cannot be registered before Experiment %s locks its design", value.ID, experiment.ID))
-					} else if experiment.Design.DesignLockedAt.After(value.CreatedAt) {
-						inventory.addDiagnostic(document.Path, "experiment.design_unlocked", fmt.Sprintf("Attempt %s predates Experiment %s's design lock", value.ID, experiment.ID))
+			if !value.RetryOf.IsZero() {
+				inventory.require(document, "retry_of", value.RetryOf, research.KindAttempt)
+			}
+			if !value.Run.IsZero() {
+				target := inventory.require(document, "run", value.Run, research.KindRun)
+				if target != nil {
+					inventory.validateAttemptLocation(document, target)
+					run := target.Record.(*research.Run)
+					experimentDocument := inventory.unique(run.Experiment)
+					if experimentDocument != nil {
+						experiment := experimentDocument.Record.(*research.Experiment)
+						if experiment.Design.DesignLockedAt == nil || experiment.Design.DesignDigest == "" {
+							inventory.addDiagnostic(document.Path, "experiment.design_unlocked", fmt.Sprintf("Attempt %s cannot be registered before Experiment %s locks its design", value.ID, experiment.ID))
+						} else if experiment.Design.DesignLockedAt.After(value.CreatedAt) {
+							inventory.addDiagnostic(document.Path, "experiment.design_unlocked", fmt.Sprintf("Attempt %s predates Experiment %s's design lock", value.ID, experiment.ID))
+						}
 					}
 				}
 			}
-			if value.Schema == research.SchemaAttemptV2 {
+			if !value.Try.IsZero() {
+				target := inventory.require(document, "try", value.Try, research.KindTry)
+				if target != nil {
+					inventory.validateTryAttemptLocation(document, target)
+					owner := target.Record.(*research.Try)
+					if closedAt, closed := tryClosedAt(owner); closed && value.CreatedAt.After(closedAt) {
+						inventory.addDiagnostic(document.Path, "try.attempt_after_close", fmt.Sprintf("Attempt %s was created after Try %s closed", value.ID, owner.ID))
+					}
+					if !idSubset(snapshotSourceIDs(value.SourceSnapshots), owner.Sources) {
+						inventory.addDiagnostic(document.Path, "try.source_mismatch", "every Attempt SourceSnapshot must use a Source declared by its Try")
+					}
+				}
+			}
+			if value.Schema == research.SchemaAttemptV2 || value.Schema == research.SchemaAttemptV3 && !value.Pool.IsZero() {
 				inventory.require(document, "pool", value.Pool, research.KindResourcePool)
 				inventory.require(document, "queue", value.Queue, research.KindQueue)
+			}
+			if value.Schema == research.SchemaAttemptV3 {
+				for index := range value.SourceSnapshots {
+					snapshot := &value.SourceSnapshots[index]
+					field := fmt.Sprintf("source_snapshots[%d].source", index)
+					sourceDocument := inventory.require(document, field, snapshot.Source, research.KindSource)
+					if sourceDocument == nil {
+						continue
+					}
+					source := sourceDocument.Record.(*research.Source)
+					if source.Subdir != snapshot.Subdir {
+						inventory.addDiagnostic(document.Path, "source_snapshot.subdir_mismatch", fmt.Sprintf("SourceSnapshot %s subdir %q does not match Source subdir %q", source.ID, snapshot.Subdir, source.Subdir))
+					}
+					if source.State == research.SourceRetired && source.RetiredAt != nil && !snapshot.CapturedAt.Before(*source.RetiredAt) {
+						inventory.addDiagnostic(document.Path, "source_snapshot.retired", fmt.Sprintf("SourceSnapshot %s was captured after Source retirement", source.ID))
+					}
+				}
 			}
 		case *research.EvaluationSpec:
 			inventory.require(document, "budget_pool", value.BudgetPool, research.KindResourcePool)
 		case *research.Evaluation:
 			specDocument := inventory.require(document, "spec", value.Spec, research.KindEvaluationSpec)
-			inventory.requireAny(document, "subject", value.Subject, research.KindExperiment, research.KindCandidate, research.KindRelease)
+			subjectDocument := inventory.requireAny(document, "subject", value.Subject, research.KindExperiment, research.KindCandidate, research.KindRelease)
+			if value.Schema == research.SchemaEvaluationV2 {
+				attemptDocument := inventory.require(document, "attempt", value.Attempt, research.KindAttempt)
+				if attemptDocument != nil && subjectDocument != nil && subjectDocument.Kind() == research.KindExperiment {
+					attempt := attemptDocument.Record.(*research.Attempt)
+					runDocument := inventory.unique(attempt.Run)
+					if attempt.Schema != research.SchemaAttemptV3 || attempt.State != research.AttemptSucceeded || attempt.Terminal == nil || !attempt.Try.IsZero() || runDocument == nil || runDocument.Kind() != research.KindRun || runDocument.Record.(*research.Run).Experiment != value.Subject {
+						inventory.addDiagnostic(document.Path, "evaluation.attempt_provenance", "Evaluation Attempt must be a successful formal exp.attempt/v3 for its Experiment subject")
+					} else if attempt.Terminal.EndedAt.After(value.EvaluatedAt) {
+						inventory.addDiagnostic(document.Path, "evaluation.attempt_time", "Evaluation cannot predate its backing Attempt terminal observation")
+					}
+				}
+			}
 			if specDocument != nil {
 				spec := specDocument.Record.(*research.EvaluationSpec)
 				allowedMetrics := make(map[string]research.MetricSpec, len(spec.Metrics))
@@ -940,18 +1247,6 @@ func (inventory *Inventory) validateRelationships() {
 				}
 				if thresholds > 0 && value.Outcome != research.EvaluationInvalid && (passed && value.Outcome != research.EvaluationPassed || !passed && value.Outcome != research.EvaluationFailed) {
 					inventory.addDiagnostic(document.Path, "evaluation.outcome_threshold", "Evaluation outcome does not match its declared metric thresholds")
-				}
-			}
-			mlflowOwner := ""
-			for _, reference := range value.ExternalRefs {
-				if reference.Provider != "mlflow" || reference.Role != research.ExternalTracker {
-					continue
-				}
-				if owner, ok := reference.Metadata["mlflow.owner_attempt"].(string); ok && owner != "" {
-					if mlflowOwner != "" && mlflowOwner != owner {
-						inventory.addDiagnostic(document.Path, "evaluation.mlflow_owner_conflict", "MLflow references claim different owner Attempts")
-					}
-					mlflowOwner = owner
 				}
 			}
 		case *research.Finding:
@@ -1003,6 +1298,21 @@ func (inventory *Inventory) validateRelationships() {
 			}
 			for index, id := range value.Parents {
 				inventory.require(document, fmt.Sprintf("parents[%d]", index), id, research.KindCandidate)
+			}
+			if value.Schema == research.SchemaCandidateV2 {
+				inventory.require(document, "attempt", value.Attempt, research.KindAttempt)
+				if evaluationDocument != nil {
+					evaluation := evaluationDocument.Record.(*research.Evaluation)
+					if evaluation.Schema != research.SchemaEvaluationV2 || evaluation.Attempt != value.Attempt {
+						inventory.addDiagnostic(document.Path, "candidate.evaluation_attempt", "Candidate v2 Evaluation must be typed-bound to the same backing Attempt")
+					}
+					if owner, found := inventory.evaluationMLflowOwners[evaluation.ID]; found && owner != value.Attempt {
+						inventory.addDiagnostic(document.Path, "candidate.mlflow_owner_attempt", "Candidate backing Attempt does not own its Evaluation MLflow telemetry")
+					}
+				}
+				for index, source := range value.Sources {
+					inventory.require(document, fmt.Sprintf("sources[%d].source", index), source.Source, research.KindSource)
+				}
 			}
 			if !inventory.candidateHasSuccessfulAttempt(value, experimentDocument) {
 				inventory.addDiagnostic(document.Path, "candidate.attempt_provenance", "Candidate Git commit and change_set require a matching successful Attempt in its Experiment")
@@ -1161,6 +1471,40 @@ func experimentIncludesRun(experiment *research.Experiment, run research.ID) boo
 	return false
 }
 
+func tryClosedAt(value *research.Try) (time.Time, bool) {
+	if value == nil {
+		return time.Time{}, false
+	}
+	if value.Conclusion != nil {
+		return value.Conclusion.ConcludedAt, true
+	}
+	if value.Abandonment != nil {
+		return value.Abandonment.AbandonedAt, true
+	}
+	return time.Time{}, false
+}
+
+func snapshotSourceIDs(snapshots []research.SourceSnapshot) []research.ID {
+	ids := make([]research.ID, len(snapshots))
+	for index := range snapshots {
+		ids[index] = snapshots[index].Source
+	}
+	return ids
+}
+
+func idSubset(values, allowed []research.ID) bool {
+	set := make(map[research.ID]struct{}, len(allowed))
+	for _, id := range allowed {
+		set[id] = struct{}{}
+	}
+	for _, id := range values {
+		if _, found := set[id]; !found {
+			return false
+		}
+	}
+	return true
+}
+
 func (inventory *Inventory) validatePlanExperimentSemantics() {
 	origins := map[research.ID][]*Document{}
 	for _, document := range inventory.OfKind(research.KindPlan) {
@@ -1196,24 +1540,32 @@ func (inventory *Inventory) candidateHasSuccessfulAttempt(candidate *research.Ca
 		return false
 	}
 	experiment := experimentDocument.Record.(*research.Experiment)
-	mlflowOwner := ""
-	mlflowOwnerConflict := false
-	if evaluationDocument := inventory.unique(candidate.Evaluation); evaluationDocument != nil {
-		for _, reference := range evaluationDocument.Record.(*research.Evaluation).ExternalRefs {
-			if reference.Provider == "mlflow" && reference.Role == research.ExternalTracker {
-				if owner, ok := reference.Metadata["mlflow.owner_attempt"].(string); ok {
-					if mlflowOwner != "" && owner != "" && mlflowOwner != owner {
-						mlflowOwnerConflict = true
-					}
-					if owner != "" {
-						mlflowOwner = owner
-					}
-				}
+	mlflowOwner, hasMLflowOwner := inventory.evaluationMLflowOwners[candidate.Evaluation]
+	if candidate.Schema == research.SchemaCandidateV2 {
+		attemptDocument := inventory.unique(candidate.Attempt)
+		if attemptDocument == nil || attemptDocument.Kind() != research.KindAttempt {
+			return false
+		}
+		attempt := attemptDocument.Record.(*research.Attempt)
+		if attempt.Schema != research.SchemaAttemptV3 || attempt.Run.IsZero() || !attempt.Try.IsZero() ||
+			attempt.State != research.AttemptSucceeded || attempt.Terminal == nil || len(attempt.SourceSnapshots) == 0 ||
+			experiment.Conclusion == nil || attempt.CreatedAt.After(experiment.Conclusion.ConcludedAt) || attempt.Terminal.EndedAt.After(experiment.Conclusion.ConcludedAt) {
+			return false
+		}
+		if hasMLflowOwner && attempt.ID != mlflowOwner {
+			return false
+		}
+		for _, snapshot := range attempt.SourceSnapshots {
+			if snapshot.State != research.SourceSnapshotClean {
+				return false
 			}
 		}
-	}
-	if mlflowOwnerConflict {
-		return false
+		if !reflect.DeepEqual(candidate.Sources, candidateSourcesForAttempt(attempt)) {
+			return false
+		}
+		runDocument := inventory.unique(attempt.Run)
+		return runDocument != nil && runDocument.Kind() == research.KindRun &&
+			runDocument.Record.(*research.Run).Experiment == candidate.Experiment && experimentIncludesRun(experiment, attempt.Run)
 	}
 	for _, document := range inventory.OfKind(research.KindAttempt) {
 		attempt := document.Record.(*research.Attempt)
@@ -1221,19 +1573,29 @@ func (inventory *Inventory) candidateHasSuccessfulAttempt(candidate *research.Ca
 			attempt.HeadCommit != candidate.GitCommit || !reflect.DeepEqual(attempt.ChangeSet, candidate.ChangeSet) {
 			continue
 		}
-		if mlflowOwner != "" && attempt.ID.String() != mlflowOwner {
+		if hasMLflowOwner && attempt.ID != mlflowOwner {
 			continue
 		}
 		runDocument := inventory.unique(attempt.Run)
-		if runDocument != nil && runDocument.Record.(*research.Run).Experiment == candidate.Experiment && experiment.Conclusion != nil {
-			for _, evidence := range experiment.Conclusion.Evidence {
-				if evidence.Run == attempt.Run && evidence.Disposition == research.EvidenceIncluded {
-					return true
-				}
-			}
+		if runDocument != nil && runDocument.Record.(*research.Run).Experiment == candidate.Experiment && experimentIncludesRun(experiment, attempt.Run) {
+			return true
 		}
 	}
 	return false
+}
+
+func candidateSourcesForAttempt(attempt *research.Attempt) []research.CandidateSource {
+	if attempt == nil {
+		return nil
+	}
+	sources := make([]research.CandidateSource, len(attempt.SourceSnapshots))
+	for index, snapshot := range attempt.SourceSnapshots {
+		sources[index] = research.CandidateSource{
+			Source: snapshot.Source, HeadCommit: snapshot.HeadCommit,
+			ChangeSet: append([]string{}, snapshot.ChangeSet...),
+		}
+	}
+	return sources
 }
 
 func (inventory *Inventory) require(source *Document, field string, id research.ID, expected research.Kind) *Document {
@@ -1391,12 +1753,33 @@ func (inventory *Inventory) validateRunLocation(runDocument, experimentDocument 
 func (inventory *Inventory) validateAttemptLocation(attemptDocument, runDocument *Document) {
 	attemptLocation, attemptFound := inventory.locations[attemptDocument.Path]
 	runLocation, runFound := inventory.locations[runDocument.Path]
-	if !attemptFound || !runFound || attemptLocation.ExperimentDir == "" || runLocation.ExperimentDir == "" {
+	if !attemptFound || !runFound || runLocation.ExperimentDir == "" {
 		return
 	}
-	if attemptLocation.ExperimentDir != runLocation.ExperimentDir {
-		inventory.addDiagnostic(attemptDocument.Path, "relationship.wrong_owner", fmt.Sprintf("Attempt is stored under %s but its Run is under %s", attemptLocation.ExperimentDir, runLocation.ExperimentDir))
+	if attemptLocation.ExperimentDir == "" || attemptLocation.ExperimentDir != runLocation.ExperimentDir {
+		inventory.addDiagnostic(attemptDocument.Path, "relationship.wrong_owner", fmt.Sprintf("Attempt is stored under %s but its Run is under %s", ownerDirectory(attemptLocation), runLocation.ExperimentDir))
 	}
+}
+
+func (inventory *Inventory) validateTryAttemptLocation(attemptDocument, tryDocument *Document) {
+	attemptLocation, attemptFound := inventory.locations[attemptDocument.Path]
+	tryLocation, tryFound := inventory.locations[tryDocument.Path]
+	if !attemptFound || !tryFound || tryLocation.TryDir == "" {
+		return
+	}
+	if attemptLocation.TryDir == "" || attemptLocation.TryDir != tryLocation.TryDir {
+		inventory.addDiagnostic(attemptDocument.Path, "relationship.wrong_owner", fmt.Sprintf("Attempt is stored under %s but its Try is under %s", ownerDirectory(attemptLocation), tryLocation.TryDir))
+	}
+}
+
+func ownerDirectory(location Location) string {
+	if location.ExperimentDir != "" {
+		return location.ExperimentDir
+	}
+	if location.TryDir != "" {
+		return location.TryDir
+	}
+	return "an unowned path"
 }
 
 func (inventory *Inventory) validateCycles() {
@@ -1575,19 +1958,29 @@ func (inventory *Inventory) validateCommittedPathContainment(document *Document)
 			validate(fmt.Sprintf("expected_outputs[%d]", index), output, false)
 		}
 	case *research.Attempt:
-		validate("cwd", value.CWD, true)
-		for index, changed := range value.ChangeSet {
-			validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+		if value.Schema != research.SchemaAttemptV3 {
+			validate("cwd", value.CWD, true)
+			for index, changed := range value.ChangeSet {
+				validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+			}
 		}
 	case *research.Candidate:
-		for index, changed := range value.ChangeSet {
-			validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+		if value.Schema == research.SchemaCandidate {
+			for index, changed := range value.ChangeSet {
+				validate(fmt.Sprintf("change_set[%d]", index), changed, false)
+			}
 		}
 	}
 }
 
+func unrelatedLegacySourcePath(relative string) bool {
+	parts := strings.Split(relative, "/")
+	return len(parts) > 1 && parts[0] == SourcesDir && (len(parts) != 2 || !sourceNamePattern.MatchString(parts[1]))
+}
+
 func reservedPathPrefix(relative string) bool {
-	if relative == ProjectFile || relative == PolicyFile || strings.HasPrefix(relative, "e-") {
+	first := strings.SplitN(relative, "/", 2)[0]
+	if relative == ProjectFile || relative == PolicyFile || strings.HasPrefix(relative, "e-") || tryDirPattern.MatchString(first) {
 		return true
 	}
 	for directory := range flatLayouts {
@@ -1629,6 +2022,40 @@ func (inventory *Inventory) ByID(id research.ID) (*Document, error) {
 	default:
 		return nil, fmt.Errorf("%s has duplicate records: %w", id, research.ErrAmbiguousReference)
 	}
+}
+
+// BySourceKey returns the unique Source bound to an exact canonical key.
+func (inventory *Inventory) BySourceKey(key string) (*Document, error) {
+	if inventory == nil {
+		return nil, research.ErrReferenceNotFound
+	}
+	switch documents := inventory.bySourceKey[key]; len(documents) {
+	case 0:
+		return nil, fmt.Errorf("Source key %q: %w", key, research.ErrReferenceNotFound)
+	case 1:
+		return documents[0], nil
+	default:
+		return nil, fmt.Errorf("Source key %q has duplicate records: %w", key, research.ErrAmbiguousReference)
+	}
+}
+
+// ResolveSource accepts a canonical key as well as every ordinary typed Source
+// ID, prefix, and display-code form. Reserved typed-reference syntax takes
+// precedence over key normalization so one Source key cannot shadow another
+// Source's identity. Noncanonical human key spellings remain accepted only when
+// they are not themselves valid Source-reference syntax.
+func (inventory *Inventory) ResolveSource(query string) (*Document, error) {
+	query = strings.TrimSpace(query)
+	if document, err := inventory.Resolve(query, research.KindSource); err == nil || errors.Is(err, research.ErrAmbiguousReference) {
+		return document, err
+	}
+	if key, err := research.NormalizeSourceKey(query); err == nil {
+		document, keyErr := inventory.BySourceKey(key)
+		if keyErr == nil || errors.Is(keyErr, research.ErrAmbiguousReference) {
+			return document, keyErr
+		}
+	}
+	return inventory.Resolve(query, research.KindSource)
 }
 
 // Resolve accepts a full ID, unique prefix/display code, or migration alias.

@@ -1,0 +1,135 @@
+//go:build windows
+
+package pathx
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"runtime"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+// DirectoryFilesystemIdentity returns a stable local filesystem identifier for a directory.
+func DirectoryFilesystemIdentity(path string) (string, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return "", err
+	}
+	index := uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
+	return fmt.Sprintf("windows:%x:%x", uint64(info.VolumeSerialNumber), index), nil
+}
+
+func protectPrivateOpenFile(file *os.File, want fs.FileMode, directory bool) error {
+	if file == nil || want.Perm()&0o077 != 0 {
+		return nil
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return fmt.Errorf("resolve current user for private ACL: %w", err)
+	}
+	var pinner runtime.Pinner
+	pinner.Pin(user.User.Sid)
+	defer pinner.Unpin()
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if directory {
+		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.SET_ACCESS,
+		Inheritance:       inheritance,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
+		},
+	}}, nil)
+	if err != nil {
+		return fmt.Errorf("construct private ACL: %w", err)
+	}
+	if err := windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil); err != nil {
+		return fmt.Errorf("apply private ACL: %w", err)
+	}
+	return nil
+}
+
+func checkPrivateOpenFile(file *os.File, _ fs.FileMode, description string, singleLink bool) error {
+	handle := windows.Handle(file.Fd())
+	var information windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
+		return err
+	}
+	if information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("%s is a reparse point", description)
+	}
+	if singleLink && information.NumberOfLinks != 1 {
+		return fmt.Errorf("%s has %d hard links; want 1", description, information.NumberOfLinks)
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("inspect %s owner and ACL: %w", description, err)
+	}
+	if descriptor == nil {
+		return fmt.Errorf("inspect %s owner and ACL: security descriptor is unavailable", description)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("inspect %s owner: %w", description, err)
+	}
+	if owner == nil {
+		return fmt.Errorf("inspect %s owner: owner SID is unavailable", description)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("inspect current user for %s: %w", description, err)
+	}
+	if user == nil || user.User.Sid == nil || !owner.Equals(user.User.Sid) {
+		return fmt.Errorf("%s is not owned by the current user", description)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("inspect %s security descriptor control: %w", description, err)
+	}
+	if control&windows.SE_DACL_PRESENT == 0 || control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("%s discretionary ACL is absent or inherits access", description)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("inspect %s discretionary ACL: %w", description, err)
+	}
+	if dacl == nil || dacl.AceCount != 1 {
+		return fmt.Errorf("%s must have exactly one owner-only discretionary ACL entry", description)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil || ace == nil {
+		return fmt.Errorf("inspect %s discretionary ACL entry: %w", description, err)
+	}
+	entrySID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 || ace.Mask == 0 || entrySID == nil || !entrySID.Equals(user.User.Sid) {
+		return fmt.Errorf("%s discretionary ACL grants access beyond the current user", description)
+	}
+	return nil
+}

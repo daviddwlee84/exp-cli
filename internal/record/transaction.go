@@ -78,11 +78,32 @@ type TransactionRequest struct {
 	AllowStale bool
 }
 
+// TransactionState describes the durable journal state observed by Transact.
+type TransactionState string
+
+const (
+	TransactionPrepared  TransactionState = "prepared"
+	TransactionCommitted TransactionState = "committed"
+)
+
+// TransactionPathResult records whether one canonical destination already has
+// the transaction's new state. It is populated even when Transact returns an
+// error after durable preparation.
+type TransactionPathResult struct {
+	Path      string `json:"path"`
+	Published bool   `json:"published"`
+}
+
 // TransactionResult identifies a durably prepared transaction and returns the
-// normalized create/replace documents. Deletes have no result document.
+// normalized create/replace documents plus publication progress. Deletes have
+// no result document. RecoveryRequired is conservative whenever publication did
+// not finish cleanly, even if every destination is already visible.
 type TransactionResult struct {
-	TransactionID string
-	Documents     []*Document
+	TransactionID    string                  `json:"transaction_id"`
+	State            TransactionState        `json:"state"`
+	RecoveryRequired bool                    `json:"recovery_required"`
+	Paths            []TransactionPathResult `json:"paths"`
+	Documents        []*Document             `json:"-"`
 }
 
 var (
@@ -115,6 +136,7 @@ type preparedTransactionEntry struct {
 }
 
 type preparedTransaction struct {
+	directory    string
 	journal      transactionJournal
 	journalBytes []byte
 	entries      []preparedTransactionEntry
@@ -138,21 +160,60 @@ func (store *Store) Transact(ctx context.Context, request TransactionRequest) (*
 		}
 		prepared, durable, err := store.prepareTransactionLocked(ctx, inventory, request)
 		if prepared != nil && durable {
-			result = &TransactionResult{TransactionID: prepared.journal.TransactionID, Documents: cloneDocuments(prepared.documents)}
+			result = newPreparedTransactionResult(prepared)
 		}
 		if err != nil {
+			if result != nil {
+				err = errors.Join(err, store.observeTransactionResult(ctx, result, prepared))
+			}
 			return err
 		}
 		if prepared == nil {
 			return errors.New("transaction preparation returned no journal")
 		}
-		result = &TransactionResult{TransactionID: prepared.journal.TransactionID, Documents: cloneDocuments(prepared.documents)}
+		result = newPreparedTransactionResult(prepared)
 		// Re-open and verify the durable journal plus every staged byte before
 		// canonical publication. The in-memory candidate is never treated as a
 		// substitute for the crash-recovery source of truth.
-		return store.recoverPreparedTransactionsLocked(ctx)
+		recoveryErr := store.recoverPreparedTransactionsLocked(ctx)
+		if recoveryErr == nil {
+			result.State = TransactionCommitted
+			result.RecoveryRequired = false
+			for index := range result.Paths {
+				result.Paths[index].Published = true
+			}
+			return nil
+		}
+		return errors.Join(recoveryErr, store.observeTransactionResult(ctx, result, prepared))
 	})
 	return result, err
+}
+
+func newPreparedTransactionResult(prepared *preparedTransaction) *TransactionResult {
+	result := &TransactionResult{
+		TransactionID: prepared.journal.TransactionID,
+		State:         TransactionPrepared, RecoveryRequired: true,
+		Documents: cloneDocuments(prepared.documents),
+		Paths:     make([]TransactionPathResult, len(prepared.entries)),
+	}
+	for index := range prepared.entries {
+		result.Paths[index].Path = prepared.entries[index].journal.Path
+	}
+	return result
+}
+
+func (store *Store) observeTransactionResult(ctx context.Context, result *TransactionResult, prepared *preparedTransaction) error {
+	if result == nil || prepared == nil {
+		return nil
+	}
+	for index := range prepared.entries {
+		observed, _, _, err := canonicalDestinationState(ctx, store.canonicalRoot, prepared.entries[index].journal.Path)
+		if err != nil {
+			return fmt.Errorf("inspect transaction publication progress: %w", err)
+		}
+		result.Paths[index].Published = observed == prepared.entries[index].journal.NewHash
+	}
+	return nil
 }
 
 func (store *Store) transactionInventoryLocked(ctx context.Context) (*Inventory, error) {
@@ -267,9 +328,10 @@ func (store *Store) prepareTransactionLocked(ctx context.Context, inventory *Inv
 		return nil, false, err
 	}
 	journal := transactionJournal{
-		Schema:        transactionSchema,
+		Schema:        transactionSchemaV2,
 		TransactionID: transactionID,
 		ProjectID:     projectID,
+		WorktreeID:    store.worktreeID,
 		Operation:     request.Operation,
 		CreatedAt:     now,
 		Phase:         transactionPhasePrepared,
@@ -283,7 +345,7 @@ func (store *Store) prepareTransactionLocked(ctx context.Context, inventory *Inv
 		entries[index].journal.Staged = staged
 		journal.Entries[index] = entries[index].journal
 	}
-	prepared := &preparedTransaction{journal: journal, entries: entries, documents: results}
+	prepared := &preparedTransaction{directory: transactionDirectoryV2, journal: journal, entries: entries, documents: results}
 
 	durable, persistErr := store.persistPreparedTransaction(transactionRoot, stagedRoot, prepared)
 	closeErr := errors.Join(stagedRoot.Close(), transactionRoot.Close())
@@ -426,6 +488,9 @@ func (store *Store) prepareTransactionChange(ctx context.Context, base, working 
 			return empty, nil, change.ID, fmt.Errorf("Project cannot participate in a transaction: %w", ErrInvalidTransaction)
 		}
 		if immutableTransactionDelete(current) {
+			if current.Kind() == research.KindSource {
+				return empty, nil, change.ID, fmt.Errorf("published Source records cannot be deleted: %w", ErrInvalidTransaction)
+			}
 			return empty, nil, change.ID, fmt.Errorf("%s records are immutable audit evidence and cannot be deleted: %w", current.Kind(), ErrInvalidTransaction)
 		}
 		if current.Revision != change.ExpectedRevision {
@@ -455,7 +520,7 @@ func immutableTransactionDelete(document *Document) bool {
 		return false
 	}
 	switch document.Kind() {
-	case research.KindQueueAdvice, research.KindBattle, research.KindPlan, research.KindRun,
+	case research.KindSource, research.KindTry, research.KindQueueAdvice, research.KindBattle, research.KindPlan, research.KindRun,
 		research.KindAttempt, research.KindEvaluationSpec, research.KindEvaluation, research.KindFinding,
 		research.KindCandidate, research.KindPromotionSpec, research.KindPromotion,
 		research.KindDecision:

@@ -55,7 +55,7 @@ func decodeWithValidator(data []byte, validate func(research.Record) error) (*Do
 		return nil, &Error{Code: "record.schema", Message: err.Error(), Err: err}
 	}
 	record := newRecord(kind)
-	if err := preflightFrontMatter(raw, reflect.TypeOf(record)); err != nil {
+	if err := preflightFrontMatter(raw, preflightTypeForSchema(schema, record)); err != nil {
 		return nil, err
 	}
 	metadata, err := toml.Decode(string(front), record)
@@ -106,8 +106,20 @@ func preflightSchemaFields(raw map[string]any, schema research.Schema) error {
 		forbidden = []string{"idea", "primary_cluster", "classification", "dependencies", "resources", "utility"}
 	case research.SchemaExperiment:
 		forbidden = []string{"parents", "candidate_inputs"}
+	case research.SchemaIdea:
+		forbidden = []string{"origin_try"}
 	case research.SchemaAttempt:
-		forbidden = []string{"pool", "queue", "queue_revision", "lane", "dispatch_id", "base_commit", "head_commit", "change_set"}
+		forbidden = []string{"try", "retry_of", "execution_source", "source_snapshots", "pool", "queue", "queue_revision", "lane", "dispatch_id", "base_commit", "head_commit", "change_set"}
+	case research.SchemaAttemptV2:
+		forbidden = []string{"try", "retry_of", "execution_source", "source_snapshots"}
+	case research.SchemaAttemptV3:
+		forbidden = []string{"base_commit", "head_commit", "change_set"}
+	case research.SchemaEvaluation:
+		forbidden = []string{"attempt"}
+	case research.SchemaCandidate:
+		forbidden = []string{"attempt", "sources"}
+	case research.SchemaCandidateV2:
+		forbidden = []string{"git_commit", "change_set"}
 	}
 	for _, field := range forbidden {
 		if _, found := raw[field]; found {
@@ -119,7 +131,8 @@ func preflightSchemaFields(raw map[string]any, schema research.Schema) error {
 
 func openContainerPath(name string) bool {
 	return name == "extensions" || strings.HasPrefix(name, "extensions.") ||
-		name == "external_refs.metadata" || strings.HasPrefix(name, "external_refs.metadata.")
+		name == "external_refs.metadata" || strings.HasPrefix(name, "external_refs.metadata.") ||
+		name == "conclusion.external_refs.metadata" || strings.HasPrefix(name, "conclusion.external_refs.metadata.")
 }
 
 var (
@@ -160,6 +173,33 @@ func exactSchemaSelector(raw map[string]any) (research.Schema, error) {
 		return "", schemaPreflightError("record.field_type", "schema", "field must be a TOML string", ErrInvalidEnvelope)
 	}
 	return research.Schema(text), nil
+}
+
+func preflightTypeForSchema(schema research.Schema, fallback research.Record) reflect.Type {
+	var exact any
+	switch schema {
+	case research.SchemaIdea:
+		exact = &ideaV1{}
+	case research.SchemaPlan:
+		exact = &planV1{}
+	case research.SchemaExperiment:
+		exact = &experimentV1{}
+	case research.SchemaAttempt:
+		exact = &attemptV1{}
+	case research.SchemaAttemptV2:
+		exact = &attemptV2{}
+	case research.SchemaEvaluation:
+		exact = &evaluationV1{}
+	case research.SchemaEvaluationV2:
+		exact = &evaluationV2{}
+	case research.SchemaCandidate:
+		exact = &candidateV1{}
+	case research.SchemaCandidateV2:
+		exact = &candidateV2{}
+	default:
+		exact = fallback
+	}
+	return reflect.TypeOf(exact)
 }
 
 func preflightFrontMatter(raw map[string]any, target reflect.Type) error {
@@ -342,6 +382,8 @@ func newRecord(kind research.Kind) research.Record {
 		return &research.Project{}
 	case research.KindPolicy:
 		return &research.Policy{}
+	case research.KindSource:
+		return &research.Source{}
 	case research.KindIdea:
 		return &research.Idea{}
 	case research.KindResourcePool:
@@ -354,6 +396,8 @@ func newRecord(kind research.Kind) research.Record {
 		return &research.Battle{}
 	case research.KindPlan:
 		return &research.Plan{}
+	case research.KindTry:
+		return &research.Try{}
 	case research.KindExperiment:
 		return &research.Experiment{}
 	case research.KindRun:

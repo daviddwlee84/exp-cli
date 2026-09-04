@@ -156,6 +156,27 @@ func SanitizeURI(raw string) (string, error) {
 	return SanitizeURIWithPolicy(raw, DefaultRedactionPolicy())
 }
 
+// SanitizeCanonicalURI converts a provider URI directly into the stricter form
+// accepted by canonical ExternalRefs. Display-safe query data is still omitted:
+// canonical references never retain any top-level query component.
+func SanitizeCanonicalURI(raw string) (string, error) {
+	safe, err := SanitizeURI(raw)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := parseProviderURI(safe, DefaultRedactionPolicy())
+	if err != nil {
+		return "", err
+	}
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	canonical := parsed.String()
+	if err := ValidateCanonicalURI(canonical); err != nil {
+		return "", err
+	}
+	return canonical, nil
+}
+
 // SanitizeURIWithPolicy creates a bounded display-safe URI. It never returns
 // the raw input on parse or bound failures.
 func SanitizeURIWithPolicy(raw string, policy RedactionPolicy) (string, error) {

@@ -64,17 +64,24 @@ func (service *Service) CreatePromotionSpec(ctx context.Context, request CreateP
 		return nil, err
 	}
 	changes.create(&record.Document{Record: spec, Body: request.Body})
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "promotion-spec.create", Changes: changes.changes,
 	})
-	if err != nil {
-		return nil, err
+	result := &CreatePromotionSpecResult{}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Spec, _ = resultDocument(transaction, id)
 	}
-	document, err := resultDocument(transaction, id)
-	if err != nil {
-		return nil, err
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
 	}
-	return &CreatePromotionSpecResult{TransactionID: transaction.TransactionID, Spec: document}, nil
+	if result.Spec == nil {
+		return nil, fmt.Errorf("canonical transaction omitted PromotionSpec %s", id)
+	}
+	return result, nil
 }
 
 // AppendPromotionRequest appends one human decision to a target's Promotion
@@ -252,21 +259,27 @@ func (service *Service) AppendPromotion(ctx context.Context, request AppendPromo
 		Extensions: cloneExtensions(request.Extensions),
 	}
 	changes.create(&record.Document{Record: promotion, Body: request.Body})
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "promotion.append", Changes: changes.changes,
 	})
-	if err != nil {
-		return nil, err
+	result := &AppendPromotionResult{}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Promotion, _ = resultDocument(transaction, id)
 	}
-	document, err := resultDocument(transaction, id)
-	if err != nil {
-		return nil, err
-	}
-	result := &AppendPromotionResult{TransactionID: transaction.TransactionID, Promotion: document}
 	if request.Outcome == research.PromotionAccepted || request.Outcome == research.PromotionRolledBack {
 		result.Champion = &record.Champion{Target: request.Target, Release: challenger.ID, Promotion: id}
 	} else if !state.championRelease.IsZero() {
 		result.Champion = &record.Champion{Target: request.Target, Release: state.championRelease, Promotion: state.championPromotionID}
+	}
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
+	}
+	if result.Promotion == nil {
+		return nil, fmt.Errorf("canonical transaction omitted Promotion %s", id)
 	}
 	return result, nil
 }

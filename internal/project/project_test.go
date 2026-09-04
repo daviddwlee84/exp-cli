@@ -70,6 +70,70 @@ func TestInitializeIsIdempotentAndCreatesOnlyCanonicalRoot(t *testing.T) {
 	}
 }
 
+func TestInitializeRemainsIdempotentAfterCommittedSourceTransaction(t *testing.T) {
+	repositoryRoot := initRepository(t)
+	now := time.Date(2026, 8, 29, 10, 20, 0, 0, time.UTC)
+	projectUUID := uuid.MustParse("01a01e66-0e80-7102-8000-000000000102")
+	info, created, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Journal idempotence"}, WithClock(func() time.Time { return now }), WithUUIDGenerator(func(time.Time) (uuid.UUID, error) {
+		return projectUUID, nil
+	}))
+	if err != nil || !created {
+		t.Fatalf("initial Initialize = %#v, %t, %v", info, created, err)
+	}
+	sourceID, err := research.NewID(research.KindSource, uuid.MustParse("01a01e66-0e80-7103-8000-000000000103"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := record.NewStore(info.Root, info.Repository.GitCommonDir).Transact(context.Background(), record.TransactionRequest{
+		Operation: "source.add",
+		Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{
+			Record: &research.Source{
+				Common: research.Common{Schema: research.SchemaSource, ID: sourceID, Title: "Production", CreatedAt: now, UpdatedAt: now},
+				Key:    "production", Kind: research.SourceGit, Subdir: ".", LocatorHints: []string{}, State: research.SourceActive,
+			},
+			Body: "\n# Production\n",
+		}}},
+	})
+	if err != nil || transaction == nil || transaction.State != record.TransactionCommitted {
+		t.Fatalf("committed Source transaction = %#v, %v", transaction, err)
+	}
+	reopened, created, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Journal idempotence"}, WithUUIDGenerator(func(time.Time) (uuid.UUID, error) {
+		t.Fatal("idempotent init generated another Project identity")
+		return uuid.Nil, nil
+	}))
+	if err != nil || created || reopened.Project().ProjectID != info.Project().ProjectID {
+		t.Fatalf("Initialize after committed transaction = %#v, %t, %v", reopened, created, err)
+	}
+}
+
+func TestExistingProjectKeepsLegacyUnrelatedSourcesPath(t *testing.T) {
+	repositoryRoot := initRepository(t)
+	info, _, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Legacy sources"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(info.Root, record.SourcesDir)
+	if err := os.Remove(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte("previously unrelated v1 content\n")
+	if err := os.WriteFile(legacyPath, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reopened, created, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Legacy sources"})
+	if err != nil || created || reopened.Project().ProjectID != info.Project().ProjectID {
+		t.Fatalf("Initialize with legacy sources path = %#v, %t, %v", reopened, created, err)
+	}
+	actual, err := os.ReadFile(legacyPath)
+	if err != nil || string(actual) != string(legacy) {
+		t.Fatalf("legacy sources path changed: %q, %v", actual, err)
+	}
+	inventory, err := record.LoadInventory(info.Root)
+	if err != nil || !inventory.Valid() {
+		t.Fatalf("legacy sources path invalidated v1 inventory: %#v, %v", inventory, err)
+	}
+}
+
 func TestDiscoverRequiresGitAndIgnoresOutOfScopeMarkers(t *testing.T) {
 	if _, err := Discover(context.Background(), t.TempDir()); !errors.Is(err, gitx.ErrNotRepository) {
 		t.Fatalf("non-Git discovery = %v", err)
@@ -469,6 +533,45 @@ func TestInitializeRebuildsMissingOrCorruptReceiptFromCanonicalProject(t *testin
 				t.Fatalf("rebuilt receipt = %#v, %v, %v", receipt, readErr, closeErr)
 			}
 		})
+	}
+}
+
+func TestInitializeRemainsIdempotentWithCommittedTransactionJournal(t *testing.T) {
+	repositoryRoot := initRepository(t)
+	info, created, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Journal idempotence"},
+		WithClock(func() time.Time { return time.Date(2026, 9, 3, 16, 0, 0, 0, time.UTC) }),
+		WithUUIDGenerator(func(time.Time) (uuid.UUID, error) {
+			return uuid.MustParse("01a06600-0000-7001-8000-000000000001"), nil
+		}),
+	)
+	if err != nil || !created {
+		t.Fatalf("initialize = %#v, %t, %v", info, created, err)
+	}
+	planID, err := research.NewID(research.KindPlan, uuid.MustParse("01a06600-0000-7002-8000-000000000002"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 3, 16, 1, 0, 0, time.UTC)
+	store := record.NewStore(info.Root, info.Repository.GitCommonDir,
+		record.WithClock(func() time.Time { return now }),
+		record.WithUUIDGenerator(func(time.Time) (uuid.UUID, error) {
+			return uuid.MustParse("01a06600-0000-7003-8000-000000000003"), nil
+		}),
+	)
+	_, err = store.Transact(context.Background(), record.TransactionRequest{
+		Operation: "test.init-idempotence",
+		Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{Record: &research.Plan{
+			Common:   research.Common{Schema: research.SchemaPlan, ID: planID, Title: "Committed", CreatedAt: now, UpdatedAt: now},
+			Priority: research.PriorityP1, Effort: research.EffortS, State: research.PlanQueued,
+			ExpectedPayoff: research.ExpectedPayoff{Summary: "Retain a committed journal", Metric: "score", Unit: "score"},
+		}, Body: "committed transaction\n"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, repeatedCreated, err := Initialize(context.Background(), InitRequest{StartDir: repositoryRoot, Name: "Journal idempotence"})
+	if err != nil || repeatedCreated || repeated.Project().ProjectID != info.Project().ProjectID {
+		t.Fatalf("repeat init with committed journal = %#v, %t, %v", repeated, repeatedCreated, err)
 	}
 }
 

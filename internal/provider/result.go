@@ -120,12 +120,40 @@ type CapabilityResult struct {
 	NativeSupport string     `json:"native_support,omitempty"`
 }
 
-// ProbeResult is a local-only provider discovery result.
+// ReadinessState is local operational readiness and remains independent from
+// per-capability support.
+type ReadinessState string
+
+const (
+	ReadinessBuiltIn            ReadinessState = "built-in"
+	ReadinessMissing            ReadinessState = "missing"
+	ReadinessInstalledNotProbed ReadinessState = "installed-not-probed"
+	ReadinessReady              ReadinessState = "ready"
+	ReadinessMisconfigured      ReadinessState = "misconfigured"
+	ReadinessUnsupported        ReadinessState = "unsupported"
+	ReadinessUnknown            ReadinessState = "unknown"
+)
+
+func (state ReadinessState) Valid() bool {
+	switch state {
+	case ReadinessBuiltIn, ReadinessMissing, ReadinessInstalledNotProbed, ReadinessReady,
+		ReadinessMisconfigured, ReadinessUnsupported, ReadinessUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// ProbeResult is a local-only provider discovery result. The resolved binary
+// path is an invocation capability and is deliberately excluded from JSON.
 type ProbeResult struct {
 	Provider           ProviderName       `json:"provider"`
 	Context            ContextName        `json:"context"`
-	ResolvedBinaryPath string             `json:"resolved_binary_path,omitempty"`
+	ResolvedBinaryPath string             `json:"-"`
 	ProviderVersion    string             `json:"provider_version,omitempty"`
+	Readiness          ReadinessState     `json:"readiness"`
+	Reason             string             `json:"reason,omitempty"`
+	Probed             bool               `json:"probed"`
 	Capabilities       []CapabilityResult `json:"capabilities"`
 	ObservedAt         time.Time          `json:"observed_at"`
 	Diagnostics        []Diagnostic       `json:"diagnostics"`
@@ -154,6 +182,15 @@ func (r ProbeResult) Validate(descriptor Descriptor) error {
 	}
 	if r.ObservedAt.IsZero() {
 		return fmt.Errorf("probe observation time is required")
+	}
+	if !r.Readiness.Valid() {
+		return fmt.Errorf("probe readiness state is invalid")
+	}
+	if len(r.Reason) > 128 || hasControl(r.Reason) || strings.ContainsAny(r.Reason, `/\\`) {
+		return fmt.Errorf("probe readiness reason is invalid")
+	}
+	if r.Readiness == ReadinessBuiltIn && len(descriptor.CandidateBinaries) != 0 || r.Readiness == ReadinessMissing && r.ResolvedBinaryPath != "" || r.Probed && r.Readiness == ReadinessInstalledNotProbed {
+		return fmt.Errorf("probe readiness state conflicts with discovery metadata")
 	}
 	seen := make(map[Capability]struct{}, len(r.Capabilities))
 	for _, capability := range r.Capabilities {

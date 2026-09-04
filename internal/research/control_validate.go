@@ -3,6 +3,7 @@ package research
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -76,6 +77,17 @@ func validatePolicy(policy *Policy, collector *issueCollector) {
 	}
 }
 
+// IsHumanIdentity reports whether a canonical approval/adoption identity is an
+// explicit non-agent single-line value. Services and validators share this gate
+// so direct Git edits cannot bypass a human-only transition.
+func IsHumanIdentity(value string) bool {
+	if !singleLine(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	lower := strings.ToLower(value)
+	return !strings.HasPrefix(lower, "agent:") && !strings.HasPrefix(lower, "bot:") && !strings.HasPrefix(lower, "model:")
+}
+
 func validateIdea(idea *Idea, collector *issueCollector) {
 	switch idea.State {
 	case IdeaProposed, IdeaDeveloping, IdeaQualified, IdeaQueued, IdeaDismissed, IdeaMerged:
@@ -120,6 +132,19 @@ func validateIdea(idea *Idea, collector *issueCollector) {
 	}
 	if (idea.State == IdeaProposed || idea.State == IdeaDeveloping) && !idea.ResultingPlan.IsZero() {
 		collector.add("idea.resulting_plan", "resulting_plan", "proposed and developing ideas cannot already point to a Plan")
+	}
+	switch idea.Schema {
+	case SchemaIdea:
+		if !idea.OriginTry.IsZero() {
+			collector.add("record.schema_field", "origin_try", "origin_try requires exp.idea/v2")
+		}
+	case SchemaIdeaV2:
+		if !idea.OriginTry.IsZero() {
+			validateReferenceKind(idea.OriginTry, KindTry, "origin_try", collector)
+			if !IsHumanIdentity(idea.ProposedBy) {
+				collector.add("idea.human_adoption", "proposed_by", "Try adoption requires an explicit human proposed_by")
+			}
+		}
 	}
 }
 
@@ -306,6 +331,17 @@ func validateEvaluationSpec(spec *EvaluationSpec, collector *issueCollector) {
 func validateEvaluation(evaluation *Evaluation, collector *issueCollector) {
 	validateImmutable(&evaluation.Common, "Evaluation", collector)
 	validateReferenceKind(evaluation.Spec, KindEvaluationSpec, "spec", collector)
+	switch evaluation.Schema {
+	case SchemaEvaluation:
+		if !evaluation.Attempt.IsZero() {
+			collector.add("record.schema_field", "attempt", "Attempt provenance requires exp.evaluation/v2")
+		}
+	case SchemaEvaluationV2:
+		validateReferenceKind(evaluation.Attempt, KindAttempt, "attempt", collector)
+		if evaluation.Subject.Kind() != KindExperiment {
+			collector.add("evaluation.attempt_subject", "subject", "Attempt-bound Evaluations require an Experiment subject")
+		}
+	}
 	if evaluation.Subject.IsZero() {
 		collector.add("reference.required", "subject", "subject reference is required")
 	} else {
@@ -366,10 +402,50 @@ func validateCandidate(candidate *Candidate, collector *issueCollector) {
 			collector.add("reference.self", "parents", "a Candidate cannot derive from itself")
 		}
 	}
-	if !gitCommitPattern.MatchString(candidate.GitCommit) {
-		collector.add("candidate.git_commit", "git_commit", "git_commit must be a full lower-case SHA-1 or SHA-256 object ID")
+	switch candidate.Schema {
+	case SchemaCandidate:
+		if !gitCommitPattern.MatchString(candidate.GitCommit) {
+			collector.add("candidate.git_commit", "git_commit", "git_commit must be a full lower-case SHA-1 or SHA-256 object ID")
+		}
+		validatePathList(candidate.ChangeSet, "change_set", true, collector)
+		if !candidate.Attempt.IsZero() || candidate.Sources != nil {
+			collector.add("record.schema_field", "attempt", "Attempt and Source identities require exp.candidate/v2")
+		}
+	case SchemaCandidateV2:
+		if candidate.GitCommit != "" || candidate.ChangeSet != nil {
+			collector.add("record.schema_field", "git_commit", "legacy git_commit and change_set fields are forbidden in exp.candidate/v2")
+		}
+		validateReferenceKind(candidate.Attempt, KindAttempt, "attempt", collector)
+		if len(candidate.Sources) == 0 {
+			collector.add("candidate.sources", "sources", "exp.candidate/v2 requires at least one Source identity")
+		}
+		seen := make(map[ID]struct{}, len(candidate.Sources))
+		previous := ""
+		for index := range candidate.Sources {
+			source := &candidate.Sources[index]
+			field := fmt.Sprintf("sources[%d]", index)
+			validateReferenceKind(source.Source, KindSource, field+".source", collector)
+			if _, duplicate := seen[source.Source]; duplicate {
+				collector.add("reference.duplicate", field+".source", "Source occurs more than once")
+			}
+			seen[source.Source] = struct{}{}
+			if key := source.Source.String(); previous != "" && key <= previous {
+				collector.add("record.set_order", "sources", "Candidate Sources must be sorted by canonical Source ID")
+			} else {
+				previous = key
+			}
+			if !gitCommitPattern.MatchString(source.HeadCommit) {
+				collector.add("candidate.head_commit", field+".head_commit", "head_commit must be a full lower-case SHA-1 or SHA-256 object ID")
+			}
+			if source.ChangeSet == nil {
+				collector.add("record.list_required", field+".change_set", "change_set array must be present, even when empty")
+			}
+			validatePathList(source.ChangeSet, field+".change_set", false, collector)
+			if !sort.StringsAreSorted(source.ChangeSet) {
+				collector.add("record.set_order", field+".change_set", "change_set must be sorted")
+			}
+		}
 	}
-	validatePathList(candidate.ChangeSet, "change_set", true, collector)
 	for index := range candidate.ExternalRefs {
 		validateExternalRef(&candidate.ExternalRefs[index], fmt.Sprintf("external_refs[%d]", index), collector)
 	}
@@ -578,10 +654,108 @@ func validateExperimentVersion(experiment *Experiment, collector *issueCollector
 func validateAttemptVersion(attempt *Attempt, collector *issueCollector) {
 	switch attempt.Schema {
 	case SchemaAttempt:
-		if !attempt.Pool.IsZero() || !attempt.Queue.IsZero() || attempt.QueueRevision != 0 || attempt.Lane != "" || attempt.DispatchID != "" || attempt.BaseCommit != "" || attempt.HeadCommit != "" || len(attempt.ChangeSet) > 0 {
-			collector.add("record.schema_field", "schema", "dispatch and ChangeSet fields require exp.attempt/v2")
+		if !attempt.Try.IsZero() || !attempt.RetryOf.IsZero() || !attempt.ExecutionSource.IsZero() || len(attempt.SourceSnapshots) > 0 || !attempt.Pool.IsZero() || !attempt.Queue.IsZero() || attempt.QueueRevision != 0 || attempt.Lane != "" || attempt.DispatchID != "" || attempt.BaseCommit != "" || attempt.HeadCommit != "" || len(attempt.ChangeSet) > 0 {
+			collector.add("record.schema_field", "schema", "dispatch, Try ownership, and Source snapshot fields require a newer Attempt schema")
 		}
 	case SchemaAttemptV2:
+		if !attempt.Try.IsZero() || !attempt.RetryOf.IsZero() || !attempt.ExecutionSource.IsZero() || len(attempt.SourceSnapshots) > 0 {
+			collector.add("record.schema_field", "schema", "Try ownership and Source snapshot fields require exp.attempt/v3")
+		}
+		validateAttemptDispatch(attempt, true, collector)
+		if !gitCommitPattern.MatchString(attempt.BaseCommit) {
+			collector.add("attempt.base_commit", "base_commit", "base_commit must be a full lower-case Git object ID")
+		}
+		if !gitCommitPattern.MatchString(attempt.HeadCommit) {
+			collector.add("attempt.head_commit", "head_commit", "head_commit must be a full lower-case Git object ID")
+		}
+		validatePathList(attempt.ChangeSet, "change_set", true, collector)
+	case SchemaAttemptV3:
+		if !attempt.RetryOf.IsZero() {
+			validateReferenceKind(attempt.RetryOf, KindAttempt, "retry_of", collector)
+			if attempt.RetryOf == attempt.ID {
+				collector.add("reference.self", "retry_of", "an Attempt cannot retry itself")
+			}
+			if attempt.Try.IsZero() {
+				collector.add("attempt.retry_owner", "retry_of", "retry_of is supported only for Try-backed Attempts")
+			}
+		}
+		if attempt.BaseCommit != "" || attempt.HeadCommit != "" || attempt.ChangeSet != nil {
+			collector.add("record.schema_field", "base_commit", "top-level Git identity fields are legacy-only and forbidden in exp.attempt/v3")
+		}
+		validateReferenceKind(attempt.ExecutionSource, KindSource, "execution_source", collector)
+		if len(attempt.SourceSnapshots) == 0 {
+			collector.add("attempt.source_snapshots", "source_snapshots", "exp.attempt/v3 requires at least one SourceSnapshot")
+		}
+		seen := make(map[ID]struct{}, len(attempt.SourceSnapshots))
+		previous := ""
+		executionFound := false
+		for index := range attempt.SourceSnapshots {
+			snapshot := &attempt.SourceSnapshots[index]
+			field := fmt.Sprintf("source_snapshots[%d]", index)
+			validateSourceSnapshot(attempt, snapshot, field, collector)
+			if _, duplicate := seen[snapshot.Source]; duplicate {
+				collector.add("reference.duplicate", field+".source", "Source occurs more than once")
+			}
+			seen[snapshot.Source] = struct{}{}
+			if key := snapshot.Source.String(); previous != "" && key <= previous {
+				collector.add("record.set_order", "source_snapshots", "SourceSnapshots must be sorted by canonical Source ID")
+			} else {
+				previous = key
+			}
+			executionFound = executionFound || snapshot.Source == attempt.ExecutionSource
+			if snapshot.State == SourceSnapshotDirty && attempt.Try.IsZero() {
+				collector.add("attempt.dirty_owner", field+".state", "dirty SourceSnapshots are legal only on Try-backed Attempts")
+			}
+		}
+		if !attempt.ExecutionSource.IsZero() && !executionFound {
+			collector.add("attempt.execution_source", "execution_source", "execution_source must identify exactly one SourceSnapshot")
+		}
+		if executionFound && attempt.Provenance != nil {
+			validateV3ProvenanceSnapshot(attempt, collector)
+		}
+		validateAttemptDispatch(attempt, false, collector)
+	}
+}
+
+func validateV3ProvenanceSnapshot(attempt *Attempt, collector *issueCollector) {
+	var primary *SourceSnapshot
+	for index := range attempt.SourceSnapshots {
+		if attempt.SourceSnapshots[index].Source == attempt.ExecutionSource {
+			primary = &attempt.SourceSnapshots[index]
+			break
+		}
+	}
+	if primary == nil || attempt.Provenance == nil {
+		return
+	}
+	provenance := attempt.Provenance
+	if provenance.GitCommit != primary.HeadCommit {
+		collector.add("attempt.provenance_source", "provenance.git_commit", "git_commit must equal the primary SourceSnapshot head_commit")
+	}
+	dirty := primary.State == SourceSnapshotDirty
+	if provenance.GitDirty != dirty {
+		collector.add("attempt.provenance_source", "provenance.git_dirty", "git_dirty must match the primary SourceSnapshot state")
+	}
+	if dirty && provenance.DirtyDigest != primary.DirtyDigest {
+		collector.add("attempt.provenance_source", "provenance.dirty_digest", "dirty_digest must equal the primary SourceSnapshot dirty_digest")
+	}
+	if provenance.Reproducibility != primary.Reproducibility {
+		collector.add("attempt.provenance_source", "provenance.reproducibility", "reproducibility must match the primary SourceSnapshot")
+	}
+}
+
+func validateAttemptDispatch(attempt *Attempt, required bool, collector *issueCollector) {
+	hasPool := !attempt.Pool.IsZero()
+	hasQueue := !attempt.Queue.IsZero()
+	hasRevision := attempt.QueueRevision != 0
+	hasLane := attempt.Lane != ""
+	hasDispatchID := attempt.DispatchID != ""
+	hasAny := hasPool || hasQueue || hasRevision || hasLane || hasDispatchID
+	hasAll := hasPool && hasQueue && hasRevision && hasLane && hasDispatchID
+	if !required && hasAny && !hasAll {
+		collector.add("attempt.dispatch", "pool", "exp.attempt/v3 dispatch fields must be all present or all absent")
+	}
+	if required || hasAny {
 		validateReferenceKind(attempt.Pool, KindResourcePool, "pool", collector)
 		validateReferenceKind(attempt.Queue, KindQueue, "queue", collector)
 		if attempt.QueueRevision == 0 {
@@ -592,14 +766,87 @@ func validateAttemptVersion(attempt *Attempt, collector *issueCollector) {
 			collector.add("attempt.dispatch_id", "dispatch_id", "dispatch_id must be a non-empty single line")
 		}
 		validateCommitSafeString(attempt.DispatchID, "dispatch_id", collector)
-		if !gitCommitPattern.MatchString(attempt.BaseCommit) {
-			collector.add("attempt.base_commit", "base_commit", "base_commit must be a full lower-case Git object ID")
-		}
-		if !gitCommitPattern.MatchString(attempt.HeadCommit) {
-			collector.add("attempt.head_commit", "head_commit", "head_commit must be a full lower-case Git object ID")
-		}
-		validatePathList(attempt.ChangeSet, "change_set", true, collector)
 	}
+}
+
+func validateSourceSnapshot(attempt *Attempt, snapshot *SourceSnapshot, field string, collector *issueCollector) {
+	validateReferenceKind(snapshot.Source, KindSource, field+".source", collector)
+	if normalized, err := NormalizeSourceSubdir(snapshot.Subdir); err != nil || normalized != snapshot.Subdir {
+		collector.add("source_snapshot.subdir", field+".subdir", "subdir must use normalized Git-root-relative POSIX syntax")
+	}
+	if !validSlug(snapshot.PolicyVersion) {
+		collector.add("source_snapshot.policy_version", field+".policy_version", "policy_version must be a lower-case slug")
+	}
+	if !validUTC(snapshot.CapturedAt) {
+		collector.add("timestamp.utc", field+".captured_at", "captured_at must be UTC")
+	} else if snapshot.CapturedAt.Before(attempt.CreatedAt) || snapshot.CapturedAt.After(attempt.UpdatedAt) {
+		collector.add("timestamp.order", field+".captured_at", "captured_at must fall within the Attempt lifetime")
+	}
+	objectLength := 0
+	switch snapshot.GitObjectFormat {
+	case GitObjectSHA1:
+		objectLength = 40
+	case GitObjectSHA256:
+		objectLength = 64
+	default:
+		collector.add("source_snapshot.git_object_format", field+".git_object_format", "git_object_format must be sha1 or sha256")
+	}
+	if !validGitObjectID(snapshot.BaseCommit, objectLength) {
+		collector.add("source_snapshot.base_commit", field+".base_commit", "base_commit must be a full lower-case object ID matching git_object_format")
+	}
+	if !validGitObjectID(snapshot.HeadCommit, objectLength) {
+		collector.add("source_snapshot.head_commit", field+".head_commit", "head_commit must be a full lower-case object ID matching git_object_format")
+	}
+	if snapshot.ChangeSet == nil {
+		collector.add("record.list_required", field+".change_set", "change_set array must be present, even when empty")
+	}
+	validatePathList(snapshot.ChangeSet, field+".change_set", false, collector)
+	if !sort.StringsAreSorted(snapshot.ChangeSet) {
+		collector.add("record.set_order", field+".change_set", "change_set must be sorted")
+	}
+	switch snapshot.State {
+	case SourceSnapshotClean:
+		if snapshot.DirtyDigest != "" || snapshot.DirtySummary != "" {
+			collector.add("source_snapshot.clean_fields", field+".state", "clean snapshots forbid dirty_digest and dirty_summary")
+		}
+		if snapshot.Reproducibility != ReproducibilityExact {
+			collector.add("source_snapshot.reproducibility", field+".reproducibility", "clean snapshots require exact reproducibility")
+		}
+	case SourceSnapshotDirty:
+		if !validDigest(snapshot.DirtyDigest) {
+			collector.add("source_snapshot.dirty_digest", field+".dirty_digest", "dirty snapshots require a lower-case sha256 dirty_digest")
+		}
+		if !nonempty(snapshot.DirtySummary) {
+			collector.add("source_snapshot.dirty_summary", field+".dirty_summary", "dirty snapshots require a bounded summary")
+		} else if len(snapshot.DirtySummary) > MaxSourceSnapshotSummaryBytes {
+			collector.add("source_snapshot.dirty_summary_size", field+".dirty_summary", "dirty summary exceeds the %d-byte bound", MaxSourceSnapshotSummaryBytes)
+		}
+		validateCommitSafeString(snapshot.DirtySummary, field+".dirty_summary", collector)
+		if snapshot.Reproducibility != ReproducibilityExact && snapshot.Reproducibility != ReproducibilityBounded {
+			collector.add("source_snapshot.reproducibility", field+".reproducibility", "complete dirty captures require exact or bounded reproducibility")
+		}
+	default:
+		collector.add("source_snapshot.state", field+".state", "state must be clean or dirty")
+	}
+	if !validDigest(snapshot.Digest) {
+		collector.add("source_snapshot.digest", field+".digest", "digest must be lower-case sha256")
+	} else if computed, err := SourceSnapshotDigest(*snapshot); err != nil || computed != snapshot.Digest {
+		collector.add("source_snapshot.digest_mismatch", field+".digest", "digest does not match the canonical SourceSnapshot fields")
+	}
+}
+
+func validGitObjectID(value string, length int) bool {
+	if length == 0 || len(value) != length || value != strings.ToLower(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateClassification(classification *Classification, prefix string, collector *issueCollector) {

@@ -7,10 +7,13 @@ DAG while keeping canonical Markdown as the only scientific authority.
 
 ```mermaid
 flowchart LR
-  I[Human or agent Idea] --> P[Qualified Plan]
+  S[Source] --> T[Bounded Try]
+  T -->|human adoption| I[Human or agent Idea]
+  S --> A
+  I --> P[Qualified Plan]
   P --> Q[Pool x lane Queue]
-  Q --> A[Attempt]
-  A --> E[Evaluation]
+  Q --> A[Clean formal Attempt]
+  A --> E[Typed Evaluation]
   E --> F[Finding]
   F --> I
   E --> C[Candidate]
@@ -39,18 +42,20 @@ experiment dispatch only after the caller supplies the explicit
 `--confirm-auto-experiment` acknowledgement. Promotion is a separate authority
 boundary and remains human-only in every mode.
 
-The remaining additions use typed UUIDv7 IDs:
+The additions use typed UUIDv7 IDs:
 
 | Record | Authority |
 |---|---|
-| Idea | Human/agent proposal, qualification state, origin, cluster, and parent ideas |
+| Source | Project-local Git identity, immutable subdir, sanitized locators, lifecycle |
+| Try | Bounded goal, declared Sources, human conclusion/abandonment/adoption |
+| Idea | Human/agent proposal, qualification state, origin, cluster, and parent Ideas; v2 can own `origin_try` |
 | ResourcePool | A bounded bottleneck, capacity, unit, and optional cost |
 | Queue | Ordered Plan entries partitioned by ResourcePool and exploit/explore lane |
 | QueueAdvice | Immutable listwise ranking suggestion against one Queue revision |
 | Battle | Immutable order-swapped pairwise comparison and confidence |
 | EvaluationSpec | Metrics, direction, protocol, resource budget, and optional seal |
-| Evaluation | Immutable measured outcome for an Experiment, Candidate, or Release |
-| Candidate | Evaluated Experiment result, Git identity, ChangeSet, and parent candidates |
+| Evaluation | Immutable measured outcome; v2 additionally owns one formal Attempt for an Experiment subject |
+| Candidate | Evaluated Experiment result and parents; v2 pins clean formal Attempt and Source commits/paths |
 | Release | Target plus typed slots filled by Candidates |
 | PromotionSpec | Sealed holdout protocol and mandatory human approval policy |
 | Promotion | Append-only challenger/incumbent decision linked to the previous Promotion |
@@ -95,32 +100,36 @@ represented as a composite pool until atomic multi-pool admission exists.
 
 ## Execution and evaluation
 
-Experiment v2 adds replication, sweep, and combination designs, multi-parent
-lineage, and explicit Candidate inputs for combination experiments. Attempt v2
-adds the ResourcePool, Queue revision, lane, dispatch identity, base/head Git
-commits, and exact ChangeSet. V1 Plan, Experiment, and Attempt files continue to
-use their exact closed decoders; a v1 schema claiming any v2-only field is
-rejected.
+Experiment v2 adds replication, sweep, combination designs, multi-parent
+lineage, and explicit Candidate inputs. Attempt v2 is the closed legacy formal
+dispatch shape with Pool/Queue/lane/dispatch identity and top-level Git
+base/head/ChangeSet. Attempt v3 instead owns exactly one Run or Try and carries
+an execution Source plus sorted SourceSnapshots; formal dispatch fields are
+all-present or all-absent, and only Try-owned v3 may be dirty or use `retry_of`.
+Every older schema remains an exact closed decoder.
 
-`.exp/runtime.json` binds canonical Pool and Plan identities to a Pueue group,
-stable label namespace, exact workload argv, environment-variable names, and
-full Git base/head/ChangeSet. It is operational configuration, not a canonical
-record. Pool label prefixes are prefix-free within each Pueue group, and the
-selected config path is excluded from experiment ChangeSets. Git verification
-covers queued work and active prepared Attempts rather than obsolete terminal
-Plan entries. The daemon uses a private SQLite lease, fencing tokens, jobs, fairness
-counters, and an outbox; Pueue remains authoritative for live task state. A
-worker freezes a bounded result and publishes its terminal marker before
-updating SQLite so replay can return the durable result without re-executing
-the workload. Dispatch IDs, labels, outbox recovery, and marker names include a
-canonical-worktree scope even though SQLite is shared through Git-common.
+`.exp/runtime.json` is operational configuration, not a canonical record.
+Runtime v1 retains the embedded Pool/Plan/Pueue and Git contract. Runtime v2
+requires exact `runtime.dispatch` trust, resolves canonical Sources through
+host-local associations, binds one writable and optional read-only Sources to
+explicit checkouts, and captures only clean SourceSnapshots. Pool label prefixes
+remain prefix-free, environment arrays contain names only, and Pueue secret
+environment arrays remain empty.
 
-Code-editing agents use a dedicated linked worktree at an exact base. `exp`
-commits only the observed allowlisted paths and returns the base/head and diff
-digest. It never merges the experiment branch, removes the worktree, or grants
-the agent integration authority. That commit is preparation, not evidence; a
-Candidate still requires a successful direct Attempt for an included Run with
-the identical head and ChangeSet.
+The daemon uses private SQLite leases, fencing, jobs, fairness, and outbox while
+Pueue owns live tasks. Worker-job v2 is invoked with explicit canonical root,
+Project UUID, and checkout-local scope; the worker verifies metadata authority
+before payload, then verifies private checkout/snapshot identity. It freezes a
+bounded result and publishes a durable v2 terminal marker before SQLite, so a
+valid marker (including a recoverable temporary plus exact frozen result) can be
+replayed without executing twice. Missing evidence remains unknown/blocked.
+
+Code-editing agents use a Source-aware linked worktree at an exact clean base.
+`exp` commits only observed allowlisted paths and never merges/pushes or grants
+integration authority. A dirty Try may use a private bounded seed and native
+verified cleanup, but cannot back a Candidate. Candidate v2 requires a successful
+clean formal Attempt v3 for an included Run, Evaluation v2 bound to the same
+Attempt, and Source IDs/head commits/ChangeSets copied exactly from its snapshots.
 
 Optuna or another search backend may own ask/tell trials and pruning inside one
 Plan. It does not own the global Idea queue, cross-Plan resource allocation,
@@ -153,6 +162,7 @@ New typed records use flat reserved directories under `experiments/`:
 
 ```text
 POLICY.md
+sources/
 ideas/
 resource-pools/
 queues/
@@ -166,5 +176,7 @@ promotion-specs/
 promotions/
 ```
 
-The existing Plan, Experiment, Run, Attempt, Finding, and Decision paths remain
-unchanged.
+Try records use `t-<full-uuid-hex>-<slug>/TRY.md` with owned Attempts below
+`attempts/`. Existing Plan, Experiment, Run, Attempt, Finding, and Decision paths
+remain unchanged. Source recognition reserves only exact canonical filenames, so
+unrelated legacy `sources` content is not reinterpreted.

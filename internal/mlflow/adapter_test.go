@@ -1,6 +1,7 @@
 package mlflow
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,36 @@ func TestParseDescribeReportsMissingOrMismatchedFields(t *testing.T) {
 	}
 	if run.Verified || len(run.Diagnostics) != 4 {
 		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestParseDescribeRejectsUnsafeIdentitiesAndRedactsSelectedSensitiveTags(t *testing.T) {
+	unsafe := []byte(`{"info":{"run_id":"token=LEAK","experiment_id":"7","status":"FINISHED"},"data":{"metrics":{},"tags":{}}}`)
+	if _, err := ParseDescribe(unsafe, DescribeRequest{RunID: "expected", ExpectedTags: map[string]string{"exp.attempt_id": "att_1"}}); err == nil || strings.Contains(err.Error(), "LEAK") {
+		t.Fatalf("unsafe returned run identity error = %v", err)
+	}
+	raw := []byte(`{"info":{"run_id":"safe-run","experiment_id":"password=LEAK","status":"FINISHED"},"data":{"metrics":{},"tags":{"api_token":"SECRET"}}}`)
+	run, err := ParseDescribe(raw, DescribeRequest{RunID: "safe-run", ExpectedTags: map[string]string{"api_token": "SECRET"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(run)
+	if run.Verified || run.ExperimentID != "" || run.Tags["api_token"] != "[REDACTED]" || strings.Contains(string(encoded), "SECRET") {
+		t.Fatalf("unsafe selected metadata crossed parser: %#v", run)
+	}
+}
+
+func TestParseDescribeCanonicalizesArtifactURIAndRejectsEmptyAssertions(t *testing.T) {
+	raw := []byte(`{"info":{"run_id":"run-1","experiment_id":"7","status":"FINISHED","artifact_uri":"https://tracking.example/runs/1?version=2"},"data":{"metrics":{"score":1},"tags":{}}}`)
+	run, err := ParseDescribe(raw, DescribeRequest{RunID: "run-1", MetricNames: []string{"score"}})
+	if err != nil || !run.Verified || run.ArtifactURI != "https://tracking.example/runs/1" {
+		t.Fatalf("canonical artifact URI = %#v, %v", run, err)
+	}
+	if _, err := ParseDescribe(raw, DescribeRequest{RunID: "run-1", MetricNames: []string{""}}); err == nil {
+		t.Fatal("empty metric selector bypassed assertion validation")
+	}
+	if _, err := ParseDescribe(raw, DescribeRequest{RunID: "run-1", MetricNames: []string{}}); err == nil {
+		t.Fatal("empty normalized assertion set was accepted")
 	}
 }
 

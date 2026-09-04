@@ -3,13 +3,16 @@
 package operation
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,7 +98,17 @@ func TestJobsOutboxAndFairness(t *testing.T) {
 	if err != nil || claimed.State != JobRunning || claimed.FencingToken != 1 || claimed.AttemptCount != 1 {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
 	}
+	renewed, err := store.RenewJobClaim(t.Context(), claimed.ID, claimed.FencingToken, "daemon-a", 2*time.Minute)
+	if err != nil || renewed.LeaseExpiresAt == nil || renewed.FencingToken != claimed.FencingToken {
+		t.Fatalf("renewed job claim = %#v err=%v", renewed, err)
+	}
+	if _, err := store.RenewJobClaim(t.Context(), claimed.ID, claimed.FencingToken, "other", time.Minute); !errors.Is(err, ErrFenced) {
+		t.Fatalf("wrong-holder renewal error = %v", err)
+	}
 	taskID := int64(42)
+	if err := store.SetJobExternalRefs(t.Context(), claimed.ID, claimed.FencingToken, &taskID, "token=OPERATION_SECRET_CANARY"); err == nil || strings.Contains(err.Error(), "OPERATION_SECRET_CANARY") {
+		t.Fatalf("unsafe MLflow job identity error = %v", err)
+	}
 	if err := store.SetJobExternalRefs(t.Context(), claimed.ID, claimed.FencingToken, &taskID, "run-abc"); err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +140,62 @@ func TestJobsOutboxAndFairness(t *testing.T) {
 	}
 	if lane, _ := ChooseLane(fairness, true, true, 80, 20); lane != "explore" {
 		t.Fatalf("after exploit service lane = %q, fairness=%#v", lane, fairness)
+	}
+}
+
+func TestJobExternalRefsConvergeAcrossRaceOrderAndTerminalReplay(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t, &clock)
+	for index, workerFirst := range []bool{true, false} {
+		input := JobInput{
+			ID: fmt.Sprintf("job-ref-race-%d", index), IdempotencyKey: fmt.Sprintf("ref-race-%d", index),
+			Kind: "experiment.run", Role: "execute", SubjectID: fmt.Sprintf("att-%d", index),
+			Pool: "gpu", Lane: "exploit", Profile: "worker", Payload: json.RawMessage(`{}`), MaxAttempts: 1,
+		}
+		job, _, err := store.EnqueueJob(t.Context(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err = store.ClaimJobByID(t.Context(), job.ID, "controller", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		taskID := int64(140 + index)
+		runID := fmt.Sprintf("run-race-%d", index)
+		setScheduler := func() error { return store.SetJobExternalRefs(t.Context(), job.ID, job.FencingToken, &taskID, "") }
+		setWorker := func() error { return store.SetJobExternalRefs(t.Context(), job.ID, job.FencingToken, nil, runID) }
+		if workerFirst {
+			err = errors.Join(setWorker(), setScheduler())
+		} else {
+			err = errors.Join(setScheduler(), setWorker())
+		}
+		if err != nil {
+			t.Fatalf("race ordering workerFirst=%t: %v", workerFirst, err)
+		}
+		loaded, err := store.GetJob(t.Context(), job.ID)
+		if err != nil || loaded.PueueTaskID == nil || *loaded.PueueTaskID != taskID || loaded.MLflowRunID != runID {
+			t.Fatalf("converged refs workerFirst=%t: %#v, %v", workerFirst, loaded, err)
+		}
+		if err := errors.Join(setScheduler(), setWorker()); err != nil {
+			t.Fatalf("idempotent replay workerFirst=%t: %v", workerFirst, err)
+		}
+		otherTask := taskID + 1000
+		if err := store.SetJobExternalRefs(t.Context(), job.ID, job.FencingToken, &otherTask, ""); !errors.Is(err, ErrConflict) {
+			t.Fatalf("conflicting task replacement = %v", err)
+		}
+		if err := store.SetJobExternalRefs(t.Context(), job.ID, job.FencingToken, nil, runID+"-other"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("conflicting run replacement = %v", err)
+		}
+		if _, err := store.FinishJob(t.Context(), job.ID, job.FencingToken, JobSucceeded, json.RawMessage(`{"ok":true}`), ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := errors.Join(setWorker(), setScheduler()); err != nil {
+			t.Fatalf("terminal replay workerFirst=%t: %v", workerFirst, err)
+		}
+		loaded, err = store.GetJob(t.Context(), job.ID)
+		if err != nil || loaded.PueueTaskID == nil || *loaded.PueueTaskID != taskID || loaded.MLflowRunID != runID {
+			t.Fatalf("terminal replay refs workerFirst=%t: %#v, %v", workerFirst, loaded, err)
+		}
 	}
 }
 
@@ -422,6 +491,68 @@ func TestSchemaV4DatabaseMigratesFairnessAccountingToV5(t *testing.T) {
 	}
 	if _, err := store.RecordDispatchOnce(t.Context(), job.ID, "gpu", "exploit", 1); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenReadOnlyReadsCurrentSchemaAndRejectsMutation(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 16, 0, 0, 0, time.UTC)
+	gitCommon := filepath.Join(t.TempDir(), ".git")
+	if err := os.Mkdir(gitCommon, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writable, err := Open(t.Context(), gitCommon, WithClock(func() time.Time { return clock }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := writable.EnqueueJob(t.Context(), JobInput{
+		ID: "read-only-job", IdempotencyKey: "read-only-job", Kind: "experiment.run", Role: "execute",
+		SubjectID: "att-read-only", Pool: "gpu", Lane: "exploit", Profile: "worker", Payload: json.RawMessage(`{}`), MaxAttempts: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := writable.Path()
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadOnly(t.Context(), gitCommon, WithClock(func() time.Time { return clock }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := reader.ListJobSummaries(t.Context())
+	if err != nil || len(jobs) != 1 || jobs[0].ID != "read-only-job" || jobs[0].SubjectID != "att-read-only" {
+		t.Fatalf("read-only job summaries = %#v, %v", jobs, err)
+	}
+	if _, err := reader.RuntimeState(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.SetPaused(t.Context(), true, "must fail"); err == nil {
+		t.Fatal("query-only connection accepted a mutation")
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("read-only open changed operational database bytes")
+	}
+	if beforeInfo.Mode() != afterInfo.Mode() {
+		t.Fatalf("read-only open changed mode from %s to %s", beforeInfo.Mode(), afterInfo.Mode())
 	}
 }
 

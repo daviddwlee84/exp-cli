@@ -119,7 +119,7 @@ func runPlanRefresh(command *cobra.Command, app *App, root *rootOptions, options
 	}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "plan.refresh", Changes: changes, AllowStale: true})
 	if err != nil {
-		return commandFailure(app, options.json, "plan refresh", struct{}{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "plan refresh", result, err)
 	}
 	planResult := transactionDocument(result, research.KindPlan)
 	data := struct {

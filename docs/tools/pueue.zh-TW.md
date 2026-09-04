@@ -64,8 +64,8 @@ exp provider pueue cancel 42 \
 是必要條件，但並不足夠。呼叫 `pueue kill` 前，`exp` 會要求下列條件全部成立：
 
 1. 目前 project 中恰好一筆 canonical Attempt 參照該 native Pueue task ID。
-2. Attempt 將 scheduler ownership 指定給 `pueue`，且是具有 canonical pool 與
-   dispatch route 的 v2 dispatch。
+2. Attempt 將 scheduler ownership 指定給 `pueue`，且是帶 canonical pool/route 的
+   dispatch-bearing Attempt v2 或 formal Attempt v3。
 3. External reference context 是 local Pueue context。
 4. Attempt 保存的 Pueue group 與 label 仍符合目前 runtime pool binding。
 5. Live scheduler snapshot 中恰好一個 task 使用該 ID，且其 group 與 label 符合
@@ -95,9 +95,10 @@ Daemon 會套用下列規則：
   path 與 validated argument tokens；任意 shell fragments 與 record titles 都不能成為
   submitted command。
 
-Pueue 會將 task environments 保存在 daemon state。因此 runtime `secret_env` 必須為空，
-`allowed_env` 只能包含明確核准的非秘密 names。需要 credentials 的 workloads 必須在
-啟動後，透過 workload-side broker 或 provider profile 取得。
+Pueue 會把 task environment 保存於 daemon state。因此 runtime `secret_env` 必須空，
+`allowed_env` 只能含 explicit approved non-secret names。需要 credential 的 workload 必須在
+startup 後透過 workload-side broker 取得。Formal runtime v2 也拒絕帶 environment binding 的
+MLflow profile；named profile 不能繞過此 scheduler boundary。
 
 完整 workload contract 請參閱 [執行與派送](../workflows/runtime-dispatch.md)；scheduler
 effects 與 safety invariants 請參閱 [Provider 契約](../design/provider-contract.md)。

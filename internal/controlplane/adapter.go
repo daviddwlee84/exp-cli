@@ -18,14 +18,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/config"
 	"github.com/daviddwlee84/exp-cli/internal/controller"
 	"github.com/daviddwlee84/exp-cli/internal/gitx"
+	"github.com/daviddwlee84/exp-cli/internal/mlflow"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
 	"github.com/daviddwlee84/exp-cli/internal/pathx"
+	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/pueue"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
+	"github.com/daviddwlee84/exp-cli/internal/sourcesnapshot"
+	"github.com/daviddwlee84/exp-cli/internal/trust"
 	"github.com/daviddwlee84/exp-cli/internal/worker"
+	"github.com/daviddwlee84/exp-cli/internal/workspace"
+	"github.com/daviddwlee84/exp-cli/internal/workspacebackend"
 )
 
 const attemptExtension = "io.github.daviddwlee84.exp-cli.controlplane"
@@ -40,16 +47,47 @@ type recoveringStore interface {
 	Recover(context.Context) error
 }
 
+// RuntimeSourceResolver resolves canonical Source identity separately from the
+// canonical Project checkout. The production workspace resolver implements it.
+type RuntimeSourceResolver interface {
+	Resolve(context.Context, workspace.ResolveRequest) (*workspace.Context, error)
+}
+
+// RuntimeConfigLoader loads effective Source-scoped preferences only after the
+// canonical Project and local Source checkout are independently resolved.
+type RuntimeConfigLoader interface {
+	Load(context.Context, config.Request) (*config.Result, error)
+}
+
+// RuntimeTrustChecker approves the exact raw exp.runtime/v2 file digest.
+type RuntimeTrustChecker interface {
+	Check(context.Context, trust.Subject, string, trust.Capability) (bool, error)
+}
+
+// RuntimeSourceCapturer is the clean-only formal snapshot boundary.
+type RuntimeSourceCapturer interface {
+	CaptureClean(context.Context, sourcesnapshot.Request) (research.SourceSnapshot, error)
+}
+
 // Adapter is the production controller.Canonical implementation.
 type Adapter struct {
-	Store            Store
-	RepositoryRoot   string
-	ConfigPath       string
-	WorkerExecutable string
-	WorkerArgs       []string
-	Clock            func() time.Time
-	GenerateUUID     research.UUIDGenerator
-	Git              gitx.Runner
+	Store              Store
+	CanonicalWorkspace *project.Info
+	RepositoryRoot     string
+	ConfigPath         string
+	WorkerExecutable   string
+	WorkerArgs         []string
+	Clock              func() time.Time
+	GenerateUUID       research.UUIDGenerator
+	Git                gitx.Runner
+
+	SourceResolver   RuntimeSourceResolver
+	ConfigLoader     RuntimeConfigLoader
+	RuntimeTrust     RuntimeTrustChecker
+	SourceCapturer   RuntimeSourceCapturer
+	Workspace        workspacebackend.Backend
+	WorkspaceBackend string
+	MLflowProfile    string
 }
 
 var _ controller.Canonical = Adapter{}
@@ -163,7 +201,7 @@ func (adapter Adapter) Next(ctx context.Context, poolName, laneName string) (con
 	// but its planned Attempt is the durable recovery frontier.
 	for _, document := range snapshot.inventory.OfKind(research.KindAttempt) {
 		attempt := document.Record.(*research.Attempt)
-		if attempt.Schema != research.SchemaAttemptV2 || attempt.State != research.AttemptPlanned || attempt.DispatchID == "" ||
+		if !formalDispatchAttempt(attempt) || attempt.State != research.AttemptPlanned || attempt.DispatchID == "" ||
 			attempt.Pool != poolID || attempt.Lane != lane {
 			continue
 		}
@@ -180,7 +218,7 @@ func (adapter Adapter) Next(ctx context.Context, poolName, laneName string) (con
 		if len(plan.Resources) != 1 {
 			return controller.Selection{}, errors.New("autonomous dispatch requires exactly one ResourcePool need; use a composite pool")
 		}
-		if _, prepareErr := adapter.preparedForAttempt(snapshot, document); prepareErr != nil {
+		if _, prepareErr := adapter.preparedForAttempt(ctx, snapshot, document); prepareErr != nil {
 			return controller.Selection{}, prepareErr
 		}
 		return controller.Selection{ID: attempt.DispatchID, Pool: poolName, Lane: laneName, Weight: planWeight(plan, poolID), Units: planUnits(plan, poolID)}, nil
@@ -209,7 +247,7 @@ func (adapter Adapter) Prepare(ctx context.Context, selection controller.Selecti
 		return controller.Prepared{}, err
 	}
 	if existing := findAttemptByDispatch(snapshot.inventory, selection.ID); existing != nil {
-		return adapter.preparedForAttempt(snapshot, existing)
+		return adapter.preparedForAttempt(ctx, snapshot, existing)
 	}
 	if !dispatchEnabled(snapshot.policy) {
 		return controller.Prepared{}, controller.ErrNoWork
@@ -217,6 +255,9 @@ func (adapter Adapter) Prepare(ctx context.Context, selection controller.Selecti
 	candidate, err := findCandidate(snapshot, selection)
 	if err != nil {
 		return controller.Prepared{}, err
+	}
+	if candidate.runtime.V2 != nil {
+		return adapter.prepareV2(ctx, snapshot, candidate, selection)
 	}
 	now := adapter.now()
 	experimentID, err := adapter.newID(research.KindExperiment, now)
@@ -289,7 +330,7 @@ func (adapter Adapter) Prepare(ctx context.Context, selection controller.Selecti
 		// reported an error. Idempotently prefer the canonical dispatch record.
 		if refreshed, loadErr := adapter.snapshot(ctx); loadErr == nil {
 			if existing := findAttemptByDispatch(refreshed.inventory, selection.ID); existing != nil {
-				return adapter.preparedForAttempt(refreshed, existing)
+				return adapter.preparedForAttempt(ctx, refreshed, existing)
 			}
 		}
 		return controller.Prepared{}, err
@@ -392,7 +433,7 @@ func (adapter Adapter) ReconcileAcknowledged(ctx context.Context, scheduler cont
 		return nil, err
 	}
 	runtime := loadedRuntime{plans: map[research.ID]validatedPlanRuntime{}, pools: map[research.ID]PoolRuntime{}}
-	if loaded, loadErr := loadRuntime(ctx, adapter.RepositoryRoot, adapter.ConfigPath); loadErr == nil {
+	if loaded, loadErr := loadRuntimeContract(ctx, adapter.canonicalRepositoryRoot(), adapter.ConfigPath); loadErr == nil {
 		runtime = loaded
 	}
 	markerRoot, err := adapter.workerMarkerRoot(ctx)
@@ -429,7 +470,7 @@ func (adapter Adapter) ReconcileAcknowledged(ctx context.Context, scheduler cont
 	acknowledged := []string{}
 	for _, document := range inventory.OfKind(research.KindAttempt) {
 		attempt := document.Record.(*research.Attempt)
-		if attempt.Schema != research.SchemaAttemptV2 || attempt.DispatchID == "" {
+		if !formalDispatchAttempt(attempt) || attempt.DispatchID == "" {
 			continue
 		}
 		if attempt.Terminal == nil || attempt.Terminal.Source != "direct" {
@@ -470,19 +511,26 @@ func (adapter Adapter) ReconcileAcknowledged(ctx context.Context, scheduler cont
 		if terminalAttempt(attempt.State) {
 			continue
 		}
+		runtimePool, configured := runtime.pools[attempt.Pool]
+		group, label, routed := attemptRoute(attempt)
+		if !routed || configured && (group != runtimePool.PueueGroup || label != runtimePool.LabelPrefix+attempt.DispatchID) {
+			continue
+		}
 		task, found := controller.SchedulerTask{}, false
-		if reference, referenced := pueueReference(attempt); referenced {
-			task, found = byID[reference.NativeID]
-		} else if group, label, routed := attemptRoute(attempt); routed {
+		reference, referenceCount := uniquePueueReference(attempt)
+		switch referenceCount {
+		case 0:
 			task, found = byLabel[label]
-			if found && task.Group != group {
-				found = false
+		case 1:
+			if reference.Context != LocalPueueContext {
+				continue
 			}
-		} else if runtimePool, configured := runtime.pools[attempt.Pool]; configured {
-			task, found = byLabel[runtimePool.LabelPrefix+attempt.DispatchID]
-			if found && task.Group != runtimePool.PueueGroup {
-				found = false
-			}
+			task, found = byID[reference.NativeID]
+		default:
+			continue
+		}
+		if found && (task.Group != group || task.Label != label) {
+			found = false
 		}
 		if !found {
 			continue
@@ -596,6 +644,19 @@ func (adapter Adapter) markerTerminalReplacement(document *record.Document, term
 			updated.ExternalRefs = append(updated.ExternalRefs, schedulerReference(nativeID, now))
 		}
 	}
+	if terminal.MLflow != nil && terminal.MLflow.State == mlflow.ObservationVerified {
+		reference, referenceErr := terminal.MLflow.ExternalRef(updated.ID.String())
+		if referenceErr != nil {
+			return nil, errors.New("worker MLflow observation does not belong to canonical Attempt")
+		}
+		if existing, found := mlflowRunReference(updated); found {
+			if !reflect.DeepEqual(existing, reference) {
+				return nil, errors.New("worker MLflow identity conflicts with canonical Attempt")
+			}
+		} else {
+			updated.ExternalRefs = append(updated.ExternalRefs, reference)
+		}
+	}
 	if updated.Extensions == nil {
 		updated.Extensions = research.Extensions{}
 	}
@@ -618,7 +679,7 @@ func (adapter Adapter) workerMarkerRoot(ctx context.Context) (string, error) {
 	if runner == nil {
 		runner = gitx.ExecRunner{}
 	}
-	repository, err := gitx.DiscoverWithRunner(ctx, adapter.RepositoryRoot, runner)
+	repository, err := gitx.DiscoverWithRunner(ctx, adapter.canonicalRepositoryRoot(), runner)
 	if err != nil {
 		return "", err
 	}
@@ -633,7 +694,25 @@ func sameImportedWorkerTerminal(attempt *research.Attempt, terminal worker.Termi
 		return false
 	}
 	table := attempt.Extensions[attemptExtension]
-	return table != nil && table["worker_result_sha256"] == terminal.ResultSHA256 && table["worker_result_size"] == terminal.ResultSize && reflect.DeepEqual(table["worker_outputs"], outputs)
+	if table == nil || table["worker_result_sha256"] != terminal.ResultSHA256 || table["worker_result_size"] != terminal.ResultSize || !reflect.DeepEqual(table["worker_outputs"], outputs) {
+		return false
+	}
+	if terminal.MLflow == nil || terminal.MLflow.State != mlflow.ObservationVerified {
+		return true
+	}
+	expected, err := terminal.MLflow.ExternalRef(attempt.ID.String())
+	if err != nil {
+		return false
+	}
+	observed, found := mlflowRunReference(attempt)
+	return found && reflect.DeepEqual(observed, expected)
+}
+
+func (adapter Adapter) canonicalRepositoryRoot() string {
+	if adapter.CanonicalWorkspace != nil && adapter.CanonicalWorkspace.Repository.Root != "" {
+		return adapter.CanonicalWorkspace.Repository.Root
+	}
+	return adapter.RepositoryRoot
 }
 
 func (adapter Adapter) snapshot(ctx context.Context) (canonicalSnapshot, error) {
@@ -641,14 +720,18 @@ func (adapter Adapter) snapshot(ctx context.Context) (canonicalSnapshot, error) 
 	if err != nil {
 		return canonicalSnapshot{}, err
 	}
-	runtime, err := loadRuntime(ctx, adapter.RepositoryRoot, adapter.ConfigPath)
+	runtime, err := loadRuntimeContract(ctx, adapter.canonicalRepositoryRoot(), adapter.ConfigPath)
 	if err != nil {
 		return canonicalSnapshot{}, err
 	}
-	if err := adapter.verifyRuntimeGit(ctx, inventory, &runtime); err != nil {
+	if runtime.schema == RuntimeSchemaV2 {
+		if err := adapter.verifyRuntimeV2(ctx, inventory, &runtime); err != nil {
+			return canonicalSnapshot{}, err
+		}
+	} else if err := adapter.verifyRuntimeGit(ctx, inventory, &runtime); err != nil {
 		return canonicalSnapshot{}, err
 	}
-	scope, err := ScopeID(adapter.RepositoryRoot)
+	scope, err := ScopeID(adapter.canonicalRepositoryRoot())
 	if err != nil {
 		return canonicalSnapshot{}, err
 	}
@@ -659,7 +742,7 @@ func (adapter Adapter) canonical(ctx context.Context) (*record.Inventory, *resea
 	if adapter.Store == nil {
 		return nil, nil, errors.New("canonical Store is required")
 	}
-	if adapter.RepositoryRoot == "" {
+	if adapter.canonicalRepositoryRoot() == "" {
 		return nil, nil, errors.New("repository root is required")
 	}
 	if recovering, ok := adapter.Store.(recoveringStore); ok {
@@ -674,7 +757,7 @@ func (adapter Adapter) canonical(ctx context.Context) (*record.Inventory, *resea
 	if !inventory.Valid() {
 		return nil, nil, &record.InventoryError{Diagnostics: append([]record.Diagnostic(nil), inventory.Diagnostics...)}
 	}
-	canonicalRepository, err := pathx.Canonical(adapter.RepositoryRoot)
+	canonicalRepository, err := pathx.Canonical(adapter.canonicalRepositoryRoot())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -684,6 +767,16 @@ func (adapter Adapter) canonical(ctx context.Context) (*record.Inventory, *resea
 	}
 	if canonicalRepository != inventoryRepository {
 		return nil, nil, errors.New("runtime repository root does not own the canonical experiments root")
+	}
+	if adapter.CanonicalWorkspace != nil {
+		projectRecord := adapter.CanonicalWorkspace.Project()
+		if projectRecord == nil || inventory.Project == nil {
+			return nil, nil, errors.New("canonical project.Info or PROJECT.md is missing")
+		}
+		inventoryProject, ok := inventory.Project.Record.(*research.Project)
+		if !ok || inventoryProject.ProjectID != projectRecord.ProjectID {
+			return nil, nil, errors.New("canonical Store belongs to a different Project")
+		}
 	}
 	if inventory.Policy == nil {
 		return nil, nil, errors.New("canonical POLICY.md is required")
@@ -791,7 +884,7 @@ func findCandidate(snapshot canonicalSnapshot, selection controller.Selection) (
 	return dispatchCandidate{}, controller.ErrNoWork
 }
 
-func (adapter Adapter) preparedForAttempt(snapshot canonicalSnapshot, document *record.Document) (controller.Prepared, error) {
+func (adapter Adapter) preparedForAttempt(ctx context.Context, snapshot canonicalSnapshot, document *record.Document) (controller.Prepared, error) {
 	attempt := document.Record.(*research.Attempt)
 	runDocument, err := snapshot.inventory.ByID(attempt.Run)
 	if err != nil {
@@ -816,15 +909,18 @@ func (adapter Adapter) preparedForAttempt(snapshot canonicalSnapshot, document *
 	if !configured {
 		return controller.Prepared{}, fmt.Errorf("Plan %s has no runtime executable contract", plan.ID)
 	}
+	poolRuntime, configured := snapshot.runtime.pools[attempt.Pool]
+	if !configured {
+		return controller.Prepared{}, fmt.Errorf("ResourcePool %s has no runtime Pueue binding", attempt.Pool)
+	}
+	if attempt.Schema == research.SchemaAttemptV3 {
+		return adapter.preparedForAttemptV2(ctx, snapshot, plan, run, attempt, runtimePlan, poolRuntime)
+	}
 	if run.ConfigDigest != runtimePlan.digest || attempt.CWD != runtimePlan.CWD ||
 		attempt.BaseCommit != runtimePlan.BaseCommit || attempt.HeadCommit != runtimePlan.HeadCommit ||
 		!sameStrings(attempt.ChangeSet, runtimePlan.ChangeSet) ||
 		!sameStrings(attempt.Argv, append([]string{runtimePlan.Executable}, runtimePlan.Argv...)) {
 		return controller.Prepared{}, errors.New("runtime contract drifted after canonical dispatch preparation")
-	}
-	poolRuntime, configured := snapshot.runtime.pools[attempt.Pool]
-	if !configured {
-		return controller.Prepared{}, fmt.Errorf("ResourcePool %s has no runtime Pueue binding", attempt.Pool)
 	}
 	if group, label, routed := attemptRoute(attempt); !routed || group != poolRuntime.PueueGroup || label != poolRuntime.LabelPrefix+attempt.DispatchID {
 		return controller.Prepared{}, errors.New("Pueue routing drifted after canonical dispatch preparation")
@@ -837,7 +933,7 @@ func (adapter Adapter) buildPrepared(plan *research.Plan, attempt *research.Atte
 		return controller.Prepared{}, errors.New("worker executable is required")
 	}
 	jobID := jobID(attempt.DispatchID)
-	canonicalScope, err := ScopeID(adapter.RepositoryRoot)
+	canonicalScope, err := ScopeID(adapter.canonicalRepositoryRoot())
 	if err != nil {
 		return controller.Prepared{}, err
 	}
@@ -886,10 +982,14 @@ func ScopeID(repositoryRoot string) (string, error) {
 	return "scope-" + hex.EncodeToString(digest[:16]), nil
 }
 
+func formalDispatchAttempt(attempt *research.Attempt) bool {
+	return attempt != nil && (attempt.Schema == research.SchemaAttemptV2 || attempt.Schema == research.SchemaAttemptV3 && !attempt.Run.IsZero() && attempt.Try.IsZero())
+}
+
 func findAttemptByDispatch(inventory *record.Inventory, dispatch string) *record.Document {
 	for _, document := range inventory.OfKind(research.KindAttempt) {
 		attempt := document.Record.(*research.Attempt)
-		if attempt.Schema == research.SchemaAttemptV2 && attempt.DispatchID == dispatch {
+		if formalDispatchAttempt(attempt) && attempt.DispatchID == dispatch {
 			return document
 		}
 	}
@@ -1055,9 +1155,29 @@ func schedulerReference(nativeID string, observed time.Time) research.ExternalRe
 	}
 }
 
-func pueueReference(attempt *research.Attempt) (research.ExternalRef, bool) {
+func uniquePueueReference(attempt *research.Attempt) (research.ExternalRef, int) {
+	var matched research.ExternalRef
+	count := 0
+	if attempt == nil {
+		return matched, count
+	}
 	for _, reference := range attempt.ExternalRefs {
 		if reference.Role == research.ExternalScheduler && reference.Provider == "pueue" && reference.NativeKind == "task" {
+			matched = reference
+			count++
+		}
+	}
+	return matched, count
+}
+
+func pueueReference(attempt *research.Attempt) (research.ExternalRef, bool) {
+	reference, count := uniquePueueReference(attempt)
+	return reference, count == 1
+}
+
+func mlflowRunReference(attempt *research.Attempt) (research.ExternalRef, bool) {
+	for _, reference := range attempt.ExternalRefs {
+		if reference.Role == research.ExternalTracker && reference.Provider == "mlflow" && reference.NativeKind == "run" {
 			return reference, true
 		}
 	}

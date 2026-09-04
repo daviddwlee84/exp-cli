@@ -265,7 +265,15 @@ func (runner Runner) Run(ctx context.Context, request Request) (Result, error) {
 		return Result{}, fmt.Errorf("create private agent workspace: %w", err)
 	}
 	defer os.RemoveAll(temporary)
-	if err := os.Chmod(temporary, 0o700); err != nil {
+	temporaryRoot, err := os.OpenRoot(temporary)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := pathx.ProtectPrivateRoot(temporaryRoot, 0o700); err != nil {
+		_ = temporaryRoot.Close()
+		return Result{}, err
+	}
+	if err := temporaryRoot.Close(); err != nil {
 		return Result{}, err
 	}
 	promptPath := filepath.Join(temporary, "prompt.txt")

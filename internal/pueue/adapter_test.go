@@ -3,6 +3,9 @@ package pueue
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +39,32 @@ func TestParseStatusStripsEnvironmentAndNormalizesResults(t *testing.T) {
 	}
 }
 
+func TestPueueRequirementErrorsDistinguishMissingBinaryAndDaemon(t *testing.T) {
+	missing := Adapter{LookupBinary: func(string) (string, error) { return "", errors.New("not found") }}
+	_, err := missing.Status(t.Context())
+	var requirement *RequirementError
+	if !errors.As(err, &requirement) || !errors.Is(err, ErrBinaryMissing) || requirement.Reason != "binary-missing" || !strings.Contains(err.Error(), "install Pueue 4.x") {
+		t.Fatalf("missing Pueue error = %#v, %v", requirement, err)
+	}
+	if strings.Contains(err.Error(), "/") {
+		t.Fatalf("missing Pueue remediation exposed a path: %v", err)
+	}
+
+	service := Adapter{
+		LookupBinary: func(string) (string, error) { return "/synthetic/pueue", nil },
+		Invoker: execx.InvokerFunc(func(context.Context, execx.CommandSpec) (execx.Result, error) {
+			return execx.Result{}, errors.New("token=DAEMON_SECRET")
+		}),
+	}
+	_, err = service.Status(t.Context())
+	if !errors.As(err, &requirement) || !errors.Is(err, ErrServiceUnavailable) || requirement.Reason != "service-unavailable" || !strings.Contains(err.Error(), "start the Pueue daemon") {
+		t.Fatalf("misconfigured Pueue error = %#v, %v", requirement, err)
+	}
+	if strings.Contains(err.Error(), "DAEMON_SECRET") || strings.Contains(err.Error(), "/synthetic") {
+		t.Fatalf("Pueue remediation leaked provider details: %v", err)
+	}
+}
+
 func TestWorkerCommandOnlyAcceptsSafeEnvelopeTokens(t *testing.T) {
 	worker := filepath.Join(string(filepath.Separator), "opt", "exp bin", "exp")
 	command, err := WorkerCommand(worker, []string{"worker", "run", "--job", "job_123"})
@@ -48,6 +77,51 @@ func TestWorkerCommandOnlyAcceptsSafeEnvelopeTokens(t *testing.T) {
 	if _, err := WorkerCommand(worker, []string{"$(touch /tmp/nope)"}); err == nil {
 		t.Fatal("expected shell-bearing token to fail")
 	}
+}
+
+func TestWorkerCommandV2QuotesExplicitAuthorityPaths(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("POSIX shell unavailable")
+	}
+	directory := t.TempDir()
+	worker := filepath.Join(directory, "exp worker's")
+	output := filepath.Join(directory, "arguments")
+	canary := filepath.Join(directory, "must-not-exist")
+	script := "#!/bin/sh\nout=$1\nshift\nprintf '%s\\n' \"$@\" > \"$out\"\n"
+	if err := os.WriteFile(worker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{output, "canonical root with spaces", "$(touch " + canary + ")", "quote'preserved"}
+	command, err := WorkerCommandV2(worker, arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := exec.Command("/bin/sh", "-c", command)
+	if outputBytes, err := process.CombinedOutput(); err != nil {
+		t.Fatalf("execute quoted worker command: %v\n%s", err, outputBytes)
+	}
+	content, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Split(strings.TrimSuffix(string(content), "\n"), "\n"), arguments[1:]; !equalStringSlices(got, want) {
+		t.Fatalf("quoted arguments = %#v, want %#v; command=%q", got, want, command)
+	}
+	if _, err := os.Stat(canary); !os.IsNotExist(err) {
+		t.Fatalf("shell-bearing argument executed: %v", err)
+	}
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSubmitBuildsOnlyInternalWorkerEnvelope(t *testing.T) {

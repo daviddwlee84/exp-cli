@@ -37,7 +37,7 @@ func (adapter Adapter) verifyRuntimeGit(ctx context.Context, inventory *record.I
 	if runner == nil {
 		runner = gitx.ExecRunner{}
 	}
-	main, err := gitx.DiscoverWithRunner(ctx, adapter.RepositoryRoot, runner)
+	main, err := gitx.DiscoverWithRunner(ctx, adapter.canonicalRepositoryRoot(), runner)
 	if err != nil {
 		return fmt.Errorf("discover runtime repository: %w", err)
 	}
@@ -95,8 +95,11 @@ func (adapter Adapter) verifyRuntimeGit(ctx context.Context, inventory *record.I
 			return fmt.Errorf("runtime Plan %s inspect committed change set: %w", planID, err)
 		}
 		paths, err := parseRuntimePaths(diff)
-		if err != nil || !equalRuntimePaths(paths, plan.ChangeSet) {
-			return fmt.Errorf("runtime Plan %s committed base..head paths differ from change_set: %w", planID, err)
+		if err != nil {
+			return fmt.Errorf("runtime Plan %s parse committed base..head paths: %w", planID, err)
+		}
+		if !equalRuntimePaths(paths, plan.ChangeSet) {
+			return fmt.Errorf("runtime Plan %s committed base..head paths differ from change_set", planID)
 		}
 		verified[key] = struct{}{}
 	}

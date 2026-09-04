@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/controlplane"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
 	"github.com/daviddwlee84/exp-cli/internal/project"
+	"github.com/daviddwlee84/exp-cli/internal/projection"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
 	"github.com/daviddwlee84/exp-cli/internal/worker"
@@ -41,6 +45,64 @@ func TestDaemonStatusPauseResume(t *testing.T) {
 	}
 	resumed := invokeCommand(t, app, "", "--start-dir", repository, "daemon", "resume", "--json")
 	requireCommandSuccess(t, resumed)
+}
+
+func TestDaemonStatusDoesNotRepairOrMigrateOperationalState(t *testing.T) {
+	repository := newGitRepository(t)
+	app := NewApp(t.Context(), nil, nil, nil)
+	requireCommandSuccess(t, invokeCommand(t, app, "", "--start-dir", repository, "init", "--name", "Read-only daemon status", "--json"))
+	info, err := project.Discover(t.Context(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := operation.PathFor(info.Repository.GitCommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(database), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(database), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(database, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(database, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status := invokeCommand(t, app, "", "--start-dir", repository, "daemon", "status", "--json")
+	if status.err == nil {
+		t.Fatalf("malformed operational database was silently repaired: %s", status.stdout)
+	}
+	infoAfter, err := os.Stat(database)
+	if err != nil || infoAfter.Size() != 0 {
+		t.Fatalf("daemon status changed database: %#v, %v", infoAfter, err)
+	}
+	if runtime.GOOS != "windows" && infoAfter.Mode().Perm() != 0o644 {
+		t.Fatalf("daemon status changed mode to %04o", infoAfter.Mode().Perm())
+	}
+}
+
+func TestDaemonRunRejectsJSONBeforeOperationalInitialization(t *testing.T) {
+	repository := newGitRepository(t)
+	app := NewApp(t.Context(), nil, nil, nil)
+	requireCommandSuccess(t, invokeCommand(t, app, "", "--start-dir", repository, "init", "--name", "Daemon JSON preflight", "--json"))
+	info, err := project.Discover(t.Context(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := operation.PathFor(info.Repository.GitCommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := invokeCommand(t, app, "", "--start-dir", repository, "daemon", "run", "--json")
+	if invocation.err == nil || !strings.Contains(invocation.err.Error(), "unknown flag: --json") {
+		t.Fatalf("daemon run --json = %v\n%s", invocation.err, invocation.stdout)
+	}
+	if _, err := os.Stat(database); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected daemon run initialized operational state: %v", err)
+	}
 }
 
 func TestAgentProfilesAndRun(t *testing.T) {
@@ -79,6 +141,25 @@ output = "output_file_json"
 	decodeData(t, decodeEnvelope(t, run.stdout), &data)
 	if data.Profile != "fake" || !strings.Contains(string(data.Output), `"ok":true`) {
 		t.Fatalf("agent run = %#v", data)
+	}
+}
+
+func TestSuccessfulMutationReportsPartialProjectionRefresh(t *testing.T) {
+	repository := newGitRepository(t)
+	app := NewApp(t.Context(), nil, nil, nil)
+	requireCommandSuccess(t, invokeCommand(t, app, "", "--start-dir", repository, "init", "--name", "Projection partiality", "--json"))
+	requireCommandSuccess(t, invokeCommand(t, app, "", "--start-dir", repository, "policy", "init", "--json"))
+	injected := errors.New("injected projection failure")
+	app.RenderProjections = func(context.Context, *record.Inventory) (projection.Result, error) {
+		return projection.Result{}, injected
+	}
+	invocation := invokeCommand(t, app, "", "--start-dir", repository, "pool", "add", "--title", "GPU", "--unit", "gpu", "--bottleneck", "gpu", "--json")
+	if invocation.err != nil {
+		t.Fatalf("durable mutation failed with projection: %v\n%s", invocation.err, invocation.stdout)
+	}
+	envelope := decodeEnvelope(t, invocation.stdout)
+	if !envelope.OK || !envelope.Partial || len(envelope.Diagnostics) != 1 || envelope.Diagnostics[0].Code != "projection.refresh_failed" {
+		t.Fatalf("projection partial envelope = %#v", envelope)
 	}
 }
 
@@ -226,5 +307,65 @@ func TestWorkerFailurePersistsTerminalAndReturnsCommandError(t *testing.T) {
 	finished, err := store.GetJob(t.Context(), job.ID)
 	if err != nil || finished.State != operation.JobFailed {
 		t.Fatalf("finished job=%#v err=%v", finished, err)
+	}
+}
+
+func TestWorkerExplicitAuthorityPrecedesPayloadDecoding(t *testing.T) {
+	repository := newGitRepository(t)
+	app := NewApp(t.Context(), nil, nil, nil)
+	requireCommandSuccess(t, invokeCommand(t, app, "", "--start-dir", repository, "init", "--name", "Explicit worker authority", "--json"))
+	info, err := project.Discover(t.Context(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := controlplane.ScopeID(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := operation.Open(t.Context(), info.Repository.GitCommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := store.EnqueueJob(t.Context(), operation.JobInput{
+		ID: "job-explicit-authority", IdempotencyKey: "worker-explicit-authority",
+		Kind: "experiment.run", Role: "execute", SubjectID: "att_explicit",
+		CanonicalScope: scope, Pool: "cpu", Lane: "exploit", Profile: "source-runtime-v2",
+		Payload: json.RawMessage(`{}`), MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.ClaimJobByID(t.Context(), job.ID, "pueue", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := t.TempDir()
+	baseArgs := []string{
+		"--start-dir", unrelated, "worker", "run", "--job", job.ID,
+		"--fencing-token", "1", "--canonical-root", repository,
+		"--project", info.Project().ProjectID.String(), "--scope", scope,
+	}
+	wrongProject := append([]string{}, baseArgs...)
+	for index := range wrongProject {
+		if wrongProject[index] == info.Project().ProjectID.String() {
+			wrongProject[index] = "01a09000-0000-7001-8000-000000000999"
+		}
+	}
+	invocation := invokeCommand(t, app, "", wrongProject...)
+	if invocation.err == nil || !strings.Contains(invocation.err.Error(), "explicit canonical root does not own") || strings.Contains(invocation.err.Error(), "worker job schema") {
+		t.Fatalf("wrong Project authority error = %v", invocation.err)
+	}
+	wrongScope := append([]string{}, baseArgs...)
+	wrongScope[len(wrongScope)-1] = "scope-wrong"
+	invocation = invokeCommand(t, app, "", wrongScope...)
+	if invocation.err == nil || !strings.Contains(invocation.err.Error(), "canonical scope does not match") || strings.Contains(invocation.err.Error(), "worker job schema") {
+		t.Fatalf("wrong scope authority error = %v", invocation.err)
+	}
+	invocation = invokeCommand(t, app, "", baseArgs...)
+	if invocation.err == nil || !strings.Contains(invocation.err.Error(), "worker job schema is unsupported") {
+		t.Fatalf("authorized worker did not reach payload decoder: %v", invocation.err)
 	}
 }

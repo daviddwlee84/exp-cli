@@ -8,10 +8,11 @@
 ## 此契約的狀態
 
 本文件中的預備式多記錄日誌 (prepared multi-record journal) 與向前滾動復原協定
-(roll-forward recovery protocol) 已實作。它們支援 Idea qualification、Queue mutation、
-dispatch preparation、Experiment closure、Candidate/Release/Promotion operations、
-harness migration coordination，以及公開、低風險的 `exp record transaction`／`exp record recover`
-介面。公開 raw transactions 僅限 Idea 與 ResourcePool changes；scientific lifecycle records
+(roll-forward recovery protocol) 已實作。新的 canonical transaction 使用 worktree-scoped
+`exp.transaction/v2` journal；closed v1 journal 依下方 compatibility rules 維持可讀。
+Transactions 支援 Source/Try lifecycle change、Idea qualification、Queue mutation、dispatch
+preparation、Experiment closure、Candidate/Release/Promotion operations、harness migration
+coordination，以及公開、低風險的 `exp record transaction`／`exp record recover` 介面。公開 raw transactions 僅限 Idea 與 ResourcePool changes；scientific lifecycle records
 必須使用其 domain services。
 
 以 receipt 支援的 initialization、linked-worktree ID reservations 與 single-record publication 仍可使用。
@@ -20,16 +21,19 @@ generated projections 使用自身可重建的 replacement path，且絕不作�
 
 ## 共用協調
 
-Version 1 僅探索 `<git-root>/experiments`；具名或多個 roots 延後處理。解析絕對 Git common directory，
-而不是目前 worktree 的 `.git` indirection，並使用：
+每個 selected Project 仍擁有 fixed `<experiment-git-root>/experiments` root；該 experiment
+repository 可以獨立於其 Source repositories。解析 experiment clone 的 absolute Git common
+directory，而不是目前 worktree 的 `.git` indirection，並使用：
 
 ```text
-<git-common-dir>/exp/v1/
+<experiment-git-common-dir>/exp/v1/
 ├── lock
 ├── project-receipt.json
 ├── reservations/
 │   └── <typed-id>
-├── transactions/
+├── transactions/       # legacy exp.transaction/v1
+├── transactions-v2/    # current exp.transaction/v2
+├── workspaces/
 └── attempts/
 ```
 
@@ -147,7 +151,7 @@ replace/delete operations 要求精確的目前 normalized revision。
 compound operation 會建立：
 
 ```text
-<git-common-dir>/exp/v1/transactions/<transaction-uuid>/
+<experiment-git-common-dir>/exp/v1/transactions-v2/<transaction-uuid>/
 ├── journal.toml
 └── staged/
     ├── 0000
@@ -155,18 +159,24 @@ compound operation 會建立：
     └── ...
 ```
 
-transaction ID 是 UUIDv7。`journal.toml` 使用 schema `exp.transaction/v1` 與 mode `0600`，
-自身也以 atomic 方式發布。它包含：
+Transaction ID 是 UUIDv7。`journal.toml` 使用 schema `exp.transaction/v2` 與 mode `0600`，
+自身也 atomically publish。它包含：
 
 ```text
 schema
 transaction_id
 project_id
+worktree_id           sha256 path-free worktree identity
 operation
 created_at
 phase                 prepared | committed
 entries[]
 ```
+
+`worktree_id` 會 hash domain separator、worktree Git directory 相對 Git common directory 的
+位置（primary worktree 為 `.`），以及該 directory 的 filesystem identity；不含 absolute
+worktree path。Store construction 時會 pin 此 value，mutation/recovery 前重新計算；identity
+若改變就 fail closed。
 
 每個 ordered entry 包含：
 
@@ -195,8 +205,9 @@ journal 絕不儲存 secrets、absolute worktree paths 或 projection entries。
    replacements 與 deletions 保留其 existing reservations。
 6. 依 path byte order 排序 entries，使 publication 與 tests 具決定性。
 7. 將每個新的精確 byte sequence 寫入 `staged/<index>`、fsync 每個 staged file，並 fsync `staged/`。
-8. 記錄精確 old/new SHA-256 hashes，以 `phase = "prepared"` 寫入 `journal.toml`，fsync 它、
-   以 atomic 方式發布，並 fsync transaction directory 與 parent `transactions/` directory。
+8. 記錄精確 old/new SHA-256 hashes 與目前 worktree identity，以 `phase = "prepared"` 寫入
+   `journal.toml`，fsync、atomically publish，並 fsync transaction directory 與 parent
+   `transactions-v2/` directory。
 
 在 prepared journal 與所有 staged bytes 皆持久化前，不會變更任何 canonical file。
 
@@ -219,12 +230,42 @@ UUID-scoped staging 不具持久權威，可在相同 common lock 內安全移�
 在每個 destination 都符合 `new_hash`／`absent` 後，以 atomic 方式將 journal 替換為 `phase = "committed"`，
 並 fsync 其 directories。至此 canonical publication 完成，最後從 committed inventory 重新產生 projections。
 
+若 durable preparation 後發生 error，`Transact` 會同時回傳 error 與 non-nil
+`TransactionResult`，其中包含 transaction ID、state、逐 path publication progress、documents 與
+`recovery_required`。Source、Try、Experiment closure、Evaluation、Candidate、Release、
+PromotionSpec 與 Promotion service 都會透過 typed error 與 operation-specific partial result 保留
+這些資料。CLI JSON 會回報 `partial:true` 與 recovery identity，讓使用者先執行
+`exp record recover` 再決定是否 retry；不能只因 commit marking 失敗就另行 allocate replacement
+record。
+
 只有在 directory fsync 後才能移除 committed journals；為 bounded diagnostics 保留它們也同樣安全。
 cleanup policy 不得影響 correctness。
 
+### 精確 v1/v2 backward compatibility
+
+Recovery 與 read-only inspection 會 scan 兩個 namespaces，但絕不把 journal 跨 namespace
+重新解讀：
+
+| Namespace | Required schema | Recovery rule |
+|---|---|---|
+| `transactions/` | exactly `exp.transaction/v1`，且不得有 `worktree_id` | 只有 Git common directory 沒有任何 linked-worktree metadata entry 時，prepared v1 journal 才可 roll forward。只要存在一筆 linked worktree entry，缺少 worktree authority 就有歧義，journal 會 block access，直到明確處理。Committed v1 journal 是 history，可 retain/prune，不會 replay。 |
+| `transactions-v2/` | exactly `exp.transaction/v2`，並有 valid `worktree_id` | 只有 worktree identity 等於目前 Store 的 journal 才會參與 prepared recovery。屬於另一個 linked worktree 的 valid journal 會由目前 worktree 忽略；絕不根據 canonical path 重新指派或推論 identity。 |
+
+除此之外，兩個 schema 都保持相同的 exact project binding、strict field set、entry ordering、
+hash form、staging name、phase、permission 與 byte verification。V2 journal 放在 v1 directory、
+v1 journal 放在 v2 directory、unknown field/schema、unsafe artifact 或 malformed identity 都會
+fail closed。系統沒有 journal-upgrade writer：舊 completed journal 維持舊格式，所有新 canonical
+transaction 都使用 v2。
+
+Journal loading 前，兩個 namespaces 只會移除 recognized atomic-writer temporary，以及沒有
+published journal、沒有 unknown artifact 的 native-UUID preparation directory。Published
+prepared journal 絕不會被當成 garbage。
+
 ## 冪等復原
 
-每個 mutating command 都會在持有 common lock 時、讀取其自身 candidate state 前，復原 prepared journals。
+每個 mutating command 都會在持有 common lock 時、讀取其自身 candidate state 前，recovery
+目前 worktree 符合資格的 prepared journals。屬於另一個 v2 worktree 的 journal 會隔離，不能透過
+目前 canonical root roll forward。
 
 對每個 entry：
 
@@ -258,20 +299,32 @@ canonical commit 後：
 這能避免 generated-file conflict 阻止或破壞 scientific state。readers 絕不使用 projection 作為 relationship
 或 lifecycle input。
 
-## Attempt markers
+## Attempt marker 與 result recovery
 
-private worker 會在完成其 SQLite job 前寫入一個 terminal marker：
+Private worker 會先 freeze bounded result，再於完成 SQLite job 前寫入 terminal marker：
 
 ```text
-<git-common-dir>/exp/v1/attempts/job-<sha256-prefix-of-operational-job-id>.json
+<experiment-git-common-dir>/exp/v1/attempts/
+├── job-<sha256-prefix-of-operational-job-id>.result.json
+└── job-<sha256-prefix-of-operational-job-id>.json
 ```
 
-固定長度的 hash 可避免 attacker-controlled job IDs 出現在 filenames 中。有界且 secret-safe 的
-`exp.worker-terminal/v1` JSON 包含 original job ID、canonical Attempt ID、fencing token、operational state、
-process timing、exit code，以及選用的 result digest/size。publication 使用 private temporary、file fsync、
-rename 與 directory fsync。相同 job/fencing claim 會回傳 existing marker，而不是再次執行 workload。
-即使沒有找到 process，marker 不存在仍表示 `unknown`。reconciliation 會透過 revision-checked canonical Attempt mutation
-匯入 observation；marker 既不是 scientific evidence，也不能取代 Attempt record。
+固定長度 hash 避免 attacker-controlled job IDs 出現在 filename。Closed v1 job 使用
+`exp.worker-terminal/v1` 與 `exp.worker-result/v1`；Source-aware job 使用彼此分離的 v2
+terminal/result schemas。V1 decoding 會拒絕 v2 stream 與 Source fields。V2 可額外保存 bounded
+redacted stdout/stderr 與 valid optional MLflow observation。兩種 marker 都包含 original job ID、
+canonical Attempt ID、fencing token、terminal operational state、process timing、exit code，以及
+optional result/output digests。
+
+Result bytes 會在 marker publication 前 freeze。Marker 經 private `.tmp`、file fsync、rename 與
+directory fsync 發布。Restart 時，若 final marker 缺少，但 `.tmp` marker valid 且 frozen result
+精確相符，系統會 promote 並 fsync；invalid pair 會 fail closed。Final marker 也可在沒有 SQLite 時
+使用；驗證 job/Attempt、fencing、schema、timing、result digest 與 optional MLflow ownership 後，
+可修復仍為 running 的 row。相同 job/fencing claim 會回傳 existing marker，不會重跑 workload。
+
+即使找不到 process，marker 缺少仍表示 `unknown`。Reconciliation 透過 revision-checked canonical
+Attempt mutation 匯入 observation；marker、captured stream、result JSON 與 artifact URI 都不是
+scientific evidence，也不能取代 Attempt/Evaluation records。
 
 ## 必要驗證
 

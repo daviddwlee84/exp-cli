@@ -9,7 +9,6 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 	"unicode/utf8"
 
@@ -138,15 +137,7 @@ func runPlanAdd(command *cobra.Command, app *App, rootOptions *rootOptions, opti
 	if err != nil {
 		return commandFailure(app, options.json, "plan add", struct{}{}, false, nil, err)
 	}
-	start, err := app.startDir(rootOptions.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, "plan add", struct{}{}, false, nil, err)
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
-	if err != nil {
-		return commandFailure(app, options.json, "plan add", struct{}{}, false, nil, err)
-	}
-	store, err := app.NewStore(info)
+	info, store, err := openProjectStore(command, app, rootOptions)
 	if err != nil {
 		return commandFailure(app, options.json, "plan add", struct{}{}, false, nil, err)
 	}
@@ -232,21 +223,13 @@ func runPlanAdd(command *cobra.Command, app *App, rootOptions *rootOptions, opti
 }
 
 func runPlanList(command *cobra.Command, app *App, rootOptions *rootOptions, options *planListOptions) error {
-	start, err := app.startDir(rootOptions.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, "plan list", planListData{Plans: []planView{}}, false, nil, err)
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	info, store, err := openProjectStore(command, app, rootOptions)
 	if err != nil {
 		return commandFailure(app, options.json, "plan list", planListData{Plans: []planView{}}, false, nil, err)
 	}
 	projectData, err := makeProjectView(info)
 	if err != nil {
 		return commandFailure(app, options.json, "plan list", planListData{Plans: []planView{}}, false, nil, err)
-	}
-	store, err := app.NewStore(info)
-	if err != nil {
-		return commandFailure(app, options.json, "plan list", planListData{Project: projectData, Plans: []planView{}}, false, nil, err)
 	}
 	documents, recordDiagnostics, err := store.ListPlans(command.Context())
 	if err != nil {
@@ -264,7 +247,7 @@ func runPlanList(command *cobra.Command, app *App, rootOptions *rootOptions, opt
 		if options.json {
 			return commandFailure(app, true, "plan list", data, true, diagnostics, inventoryErr)
 		}
-		if writeErr := app.WriteHuman(safeHumanOutput(human)); writeErr != nil {
+		if writeErr := app.WriteStyledHuman(safeHumanOutput(human)); writeErr != nil {
 			return writeErr
 		}
 		return inventoryErr
@@ -546,15 +529,11 @@ func renderPlanListHuman(plans []planView) string {
 	if len(plans) == 0 {
 		return "No Plans.\n"
 	}
-	var output strings.Builder
-	writer := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(writer, "DISPLAY\tSTATE\tPRIORITY\tEFFORT\tTITLE\tID\tREVISION")
+	table := newHumanTable("DISPLAY", "STATE", "PRIORITY", "EFFORT", "TITLE", "ID", "REVISION")
 	for _, plan := range plans {
-		_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			plan.Display, plan.State, plan.Priority, plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
+		table.Add(plan.Display, plan.State, plan.Priority, plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
 	}
-	_ = writer.Flush()
-	return output.String()
+	return mustRenderTable(table)
 }
 
 func singleLineHuman(value string) string {

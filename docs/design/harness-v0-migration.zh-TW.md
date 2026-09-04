@@ -22,8 +22,23 @@ INBOX.md
 README.md and other root-level Markdown summaries (views only)
 ```
 
-v0 tree 是 legacy input，而非格式錯誤的 v1。`migrate plan` 會回報解析出的 records、raw spans
-與 diagnostics，不會重寫任何來源 byte。
+V0 tree 是 legacy input，而非 malformed v1。`migrate plan` 會回報 parsed records、raw
+spans 與 diagnostics，不會重寫任何 source byte。
+
+## 與目前 versioned compatibility 的邊界
+
+此 migrator 不是 valid `exp.project/v1` Project 的 upgrader。Dedicated 與 embedded Project
+使用相同 Project v1 schema；Source records 與 Try paths 是 additive canonical namespaces，
+採 conservative exact path recognition。Idea v1/v2、Attempt v1/v2/v3、Evaluation v1/v2 與
+Candidate v1/v2 都保留 closed decoders，因此 older record 仍是 older record。Runtime v1/v2
+與 worker job/terminal/result v1/v2 是彼此分離的 strict JSON contracts。Transaction v1 只會依
+linked-worktree safety rule 從 `transactions/` 讀取；所有新 transaction 都使用
+`transactions-v2/` 中的 worktree-scoped v2。
+
+Host-local association、layered configuration 與 trust receipt 絕不是 migration source evidence，
+也不會放入 archive。既有 embedded Project 在沒有 association 時仍可 physical discovery。
+每個新 feature 的 exact matrix 與 opt-in path 請見
+[Migration and backward compatibility](../workflows/migration.md)。
 
 ## 無損讀取器
 

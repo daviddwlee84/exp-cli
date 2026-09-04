@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/daviddwlee84/exp-cli/internal/controlplane"
+	"github.com/daviddwlee84/exp-cli/internal/execx"
+	"github.com/daviddwlee84/exp-cli/internal/mlflow"
 	"github.com/daviddwlee84/exp-cli/internal/pueue"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
@@ -64,6 +69,55 @@ func TestPueueCancelRequiresUniqueSchedulerOwnershipAndLiveRoute(t *testing.T) {
 	}
 }
 
+func TestProviderMLflowVerifyUsesNamedProfileDefaultsAndRejectsMixedOverrides(t *testing.T) {
+	fixture := newDirectTryCLIFixture(t)
+	const secret = "PROVIDER_PROFILE_SECRET_CANARY_25d8"
+	t.Setenv("PARENT_MLFLOW_TOKEN", secret)
+	writeDirectMLflowProfile(t, fixture, true)
+	mlflowBinary := filepath.Join(fixture.base, "tools", "mlflow-test")
+	originalLookup := fixture.app.BinaryLookup
+	fixture.app.BinaryLookup = func(name string) (string, error) {
+		if name == "mlflow-test" {
+			return mlflowBinary, nil
+		}
+		return originalLookup(name)
+	}
+	invocations := 0
+	fixture.app.Invoker = execx.InvokerFunc(func(_ context.Context, spec execx.CommandSpec) (execx.Result, error) {
+		invocations++
+		if spec.Executable != mlflowBinary || !strings.Contains(strings.Join(spec.Argv, " "), "verify-run") {
+			t.Fatalf("profile did not select expected binary/argv: %#v", spec)
+		}
+		variables := spec.Environment.Variables()
+		foundBinding := false
+		for _, variable := range variables {
+			if variable.Name == "WORKLOAD_SECRET" && variable.Sensitive {
+				foundBinding = true
+			}
+		}
+		if !foundBinding {
+			t.Fatalf("profile environment metadata = %#v", variables)
+		}
+		return execx.Result{ExitCode: 0, Stdout: `{"info":{"run_id":"verify-run","experiment_id":"3","status":"FINISHED"},"data":{"metrics":{"score":0.75},"tags":{}}}`}, nil
+	})
+	verified := invokeCommand(t, fixture.app, "", "--start-dir", fixture.sourcePath,
+		"provider", "mlflow", "verify", "--run-id", "verify-run", "--json")
+	if verified.err != nil {
+		t.Fatalf("profile verification = %v\n%s", verified.err, verified.stdout)
+	}
+	var run mlflow.Run
+	decodeData(t, decodeEnvelope(t, verified.stdout), &run)
+	if !run.Verified || run.Profile != "training" || run.Context != "direct" || run.Metrics["score"] != 0.75 || strings.Contains(verified.stdout, secret) {
+		t.Fatalf("profile verification run = %#v output=%s", run, verified.stdout)
+	}
+
+	mixed := invokeCommand(t, fixture.app, "", "--start-dir", fixture.sourcePath,
+		"--mlflow-profile", "training", "provider", "mlflow", "verify", "--run-id", "verify-run", "--allow-env", "EXTRA", "--json")
+	if mixed.err == nil || !errors.Is(mixed.err, mlflow.ErrAmbiguousSelection) || invocations != 1 {
+		t.Fatalf("mixed profile compatibility invocation = err=%v calls=%d output=%s", mixed.err, invocations, mixed.stdout)
+	}
+}
+
 func TestMLflowAttachmentRequiresCanonicalAttemptOwnershipTag(t *testing.T) {
 	fixture := mlflowOwnershipInventory(t)
 	subjectA, err := fixture.inventory.ByID(fixture.experimentA)
@@ -112,6 +166,26 @@ func TestMLflowAttachmentRequiresCanonicalAttemptOwnershipTag(t *testing.T) {
 				t.Fatalf("supported subject lineage rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestMLflowOwnershipDoesNotImplicitlyUpgradeEvaluation(t *testing.T) {
+	fixture := mlflowOwnershipInventory(t)
+	reference, err := explicitEvaluationAttemptReference(nil, fixture.attempt)
+	if err != nil || !reference.ID.IsZero() || reference.Revision != "" {
+		t.Fatalf("implicit MLflow attempt reference = %#v, %v", reference, err)
+	}
+	attempt, err := fixture.inventory.ByID(fixture.attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err = explicitEvaluationAttemptReference(attempt, fixture.attempt)
+	if err != nil || reference.ID != fixture.attempt {
+		t.Fatalf("explicit matching attempt reference = %#v, %v", reference, err)
+	}
+	other := mustProviderID(t, "att_01a01e61-0000-7041-8000-000000000041")
+	if _, err := explicitEvaluationAttemptReference(attempt, other); err == nil {
+		t.Fatal("explicit Attempt mismatch was accepted")
 	}
 }
 

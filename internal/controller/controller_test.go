@@ -15,11 +15,13 @@ import (
 const testCanonicalScope = "scope-test"
 
 type fakeCanonical struct {
-	pools      []Pool
-	ready      map[string][]Selection
-	prepared   []Selection
-	submitted  []Selection
-	reconciled int
+	pools         []Pool
+	ready         map[string][]Selection
+	prepared      []Selection
+	submitted     []Selection
+	blocked       []Selection
+	revalidateErr error
+	reconciled    int
 }
 
 func (value *fakeCanonical) Pools(context.Context) ([]Pool, error) { return value.pools, nil }
@@ -48,6 +50,13 @@ func (value *fakeCanonical) Submitted(_ context.Context, selection Selection, _ 
 }
 func (value *fakeCanonical) Reconcile(context.Context, SchedulerSnapshot) error {
 	value.reconciled++
+	return nil
+}
+func (value *fakeCanonical) RevalidateSubmission(context.Context, Selection, operation.Job) error {
+	return value.revalidateErr
+}
+func (value *fakeCanonical) SubmissionBlocked(_ context.Context, selection Selection, _ operation.Job) error {
+	value.blocked = append(value.blocked, selection)
 	return nil
 }
 
@@ -89,6 +98,31 @@ func TestTickDispatchesOneReadyFrontierAndHonorsCapacity(t *testing.T) {
 	result, err = controller.Tick(t.Context())
 	if err != nil || len(result.Dispatched) != 0 || len(scheduler.submits) != 1 {
 		t.Fatalf("second tick=%#v submits=%d err=%v", result, len(scheduler.submits), err)
+	}
+}
+
+func TestTickBlocksUnstartedJobWhenRuntimeAuthorityDisappears(t *testing.T) {
+	store := testOperational(t)
+	canonical := &fakeCanonical{
+		pools:         []Pool{{Name: "gpu0", NativeGroup: "gpu", LabelPrefix: "exp:test:", Capacity: 1, ExploitWeight: 1}},
+		ready:         map[string][]Selection{"gpu0:exploit": {{ID: "source-missing", Units: 1}}},
+		revalidateErr: ErrSubmissionBlocked,
+	}
+	scheduler := &fakeScheduler{}
+	control := Controller{
+		ProjectID: "test", Scope: testCanonicalScope, Holder: "daemon", Canonical: canonical,
+		Operational: store, Scheduler: scheduler, NewID: func(prefix string) string { return prefix + "-blocked" },
+	}
+	result, err := control.Tick(t.Context())
+	if err != nil || len(scheduler.submits) != 0 || len(result.Dispatched) != 0 || len(result.Recovered) != 1 || len(canonical.blocked) != 1 {
+		t.Fatalf("blocked result=%#v submits=%#v canonical=%#v err=%v", result, scheduler.submits, canonical.blocked, err)
+	}
+	jobs, err := store.ListJobs(t.Context())
+	if err != nil || len(jobs) != 1 || jobs[0].State != operation.JobUnknown || jobs[0].PueueTaskID != nil {
+		t.Fatalf("blocked jobs=%#v err=%v", jobs, err)
+	}
+	if due, err := store.DueOutboxForScope(t.Context(), testCanonicalScope, 10); err != nil || len(due) != 0 {
+		t.Fatalf("blocked outbox remained due: %#v err=%v", due, err)
 	}
 }
 

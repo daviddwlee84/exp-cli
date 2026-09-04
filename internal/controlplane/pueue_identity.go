@@ -28,13 +28,13 @@ func ResolvePueueTaskIdentity(ctx context.Context, repositoryRoot, configPath st
 	if attempt == nil {
 		return PueueTaskIdentity{}, errors.New("canonical Attempt is required")
 	}
-	if attempt.Schema != research.SchemaAttemptV2 || attempt.Scheduler != "pueue" {
-		return PueueTaskIdentity{}, errors.New("canonical Attempt is not a Pueue v2 dispatch")
+	if !formalDispatchAttempt(attempt) || attempt.Scheduler != "pueue" {
+		return PueueTaskIdentity{}, errors.New("canonical Attempt is not a formal Pueue dispatch")
 	}
 	if attempt.DispatchID == "" || attempt.Pool.IsZero() {
 		return PueueTaskIdentity{}, errors.New("canonical Attempt has no dispatch route")
 	}
-	runtime, err := loadRuntime(ctx, repositoryRoot, configPath)
+	runtime, err := loadRuntimeContract(ctx, repositoryRoot, configPath)
 	if err != nil {
 		return PueueTaskIdentity{}, err
 	}

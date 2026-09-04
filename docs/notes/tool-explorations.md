@@ -22,14 +22,15 @@ Use one of these statuses:
 Each dated exploration should identify the observed tool version or named
 non-secret context, distinguish documented behavior from direct observation,
 and end with the decision or validation needed next. Never infer support merely
-because `exp doctor` finds a binary: default doctor uses local executable
-discovery only, and the current `--live` option performs no provider contact.
+because `exp doctor` finds a binary or `doctor --live` parses a version: default
+doctor only discovers executables, while live uses bounded version/read-only
+local probes and leaves unimplemented capabilities unknown or unsupported.
 
 ## Topic backlog
 
 | Tool | Current `exp` boundary | Reserved exploration topics |
 |---|---|---|
-| MLflow | Implemented read-only `exp provider mlflow verify`. The workload creates and logs the run; verification requires an explicit run ID, requested metrics or expected tags, a `FINISHED` run, and sanitized output. | Safe artifact and registry read surfaces; tracking/artifact URI redaction; proxy versus direct artifact access; Evaluation attachment and Attempt lineage; supported CLI versions and bounded failure output. |
+| MLflow | Implemented trusted named profiles, read-only `provider mlflow verify`, Evaluation attachment with Attempt lineage, and optional worker observation. The workload owns run creation/logging; only selected verified fields cross the boundary. | Safe artifact/registry read surfaces beyond URI identity; proxy versus direct artifact access; supported CLI capability probe; richer bounded comparison diagnostics. |
 | Pueue | Implemented sanitized status, confirmed exact-task cancel, and daemon submission of the private `exp worker run` envelope. Captured environment maps and raw command strings do not cross the adapter boundary. | Bounded log access; richer observation and cancellation reconciliation; group and dependency semantics; submit-ambiguity recovery; Pueue 4.x compatibility and Windows limitations. |
 | DVC | Binary discovery and provider-contract roles only; no DVC operation command is implemented. | Version and capability probes; artifact stat/list without implicit download; DVC queue reads; narrowly scoped writes only after effects and recovery are explicit; repository and remote identity redaction. |
 | Optuna | `exp.search-adapter/v1` is a provider-neutral, Plan-scoped contract. There is no concrete Optuna adapter, Python environment, storage connection, or implicit installation. | Supported Optuna/storage versions; idempotent `open`/`ask`/`tell`/`prune`/`observe`; timeout-after-commit ambiguity; multi-objective and trial-state mapping; secret-reference-only storage; bounded sidecar transport. |

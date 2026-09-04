@@ -42,29 +42,42 @@ The body carries rationale and context that need not be query fields.
 ```text
 exp.project/v1
 exp.policy/v1
+exp.source/v1
 exp.idea/v1
+exp.idea/v2
 exp.resource-pool/v1
 exp.queue/v1
 exp.queue-advice/v1
 exp.battle/v1
 exp.plan/v1
 exp.plan/v2
+exp.try/v1
 exp.experiment/v1
 exp.experiment/v2
 exp.run/v1
 exp.attempt/v1
 exp.attempt/v2
+exp.attempt/v3
 exp.evaluation-spec/v1
 exp.evaluation/v1
+exp.evaluation/v2
 exp.finding/v1
 exp.candidate/v1
+exp.candidate/v2
 exp.release/v1
 exp.promotion-spec/v1
 exp.promotion/v1
 exp.decision/v1
 ```
 
-Plan、Experiment 與 Attempt 的 v1 decoder 維持精確且封閉。其 v2 decoder 分別加入含價格的 Queue 輸入、研究譜系／組合輸入，以及 dispatch／ChangeSet 識別；若 v1 記錄包含僅限 v2 的欄位，便會遭到拒絕。自主控制平面 (autonomous control plane) 的記錄及其擁有權規則，詳見 [autonomous-research-control-plane.md](autonomous-research-control-plane.md)。
+Versioning 是 closed contract，不是 additive decoding shortcut。Idea v1 禁止
+`origin_try`；Attempt v1 禁止 dispatch、Try、retry 與 SourceSnapshot fields；Attempt v2
+允許 legacy dispatch/Git fields，但禁止 Try/retry 與 SourceSnapshots；Evaluation v1 禁止
+`attempt`；Candidate v1 禁止 `attempt`／`sources`；Candidate v2 禁止 legacy
+`git_commit`／`change_set`。即使較新欄位是 zero value，也不會因此自動 upgrade record。
+Plan 與 Experiment 同樣維持精確 v1/v2 分離。自主控制平面 (autonomous control plane)
+的 records 與 ownership rules 詳見
+[autonomous-research-control-plane.md](autonomous-research-control-plane.md)。
 
 已知 schema 會在每個已知 table 層級拒絕未知欄位。唯一開放的容器是 `extensions`。每個 extension 以小寫的反向 DNS namespace 為 key，並在不加以解讀的情況下遞迴保留：
 
@@ -80,12 +93,14 @@ reviewed_by = "synthetic-reviewer"
 新記錄使用小寫、帶型別的 RFC 9562 UUIDv7：
 
 ```text
-plan_<uuidv7>
+src_<uuidv7>
 idea_<uuidv7>
 pool_<uuidv7>
 queue_<uuidv7>
 advice_<uuidv7>
 battle_<uuidv7>
+plan_<uuidv7>
+try_<uuidv7>
 exp_<uuidv7>
 run_<uuidv7>
 att_<uuidv7>
@@ -105,7 +120,7 @@ dec_<uuidv7>
 
 一般的原生建立只接受 UUIDv7，即使記錄帶有 `extensions."io.github.daviddwlee84.exp-cli.harness-v0"` 也是如此；extension 的存在不會授權使用 UUIDv5。明確採用指紋識別的 harness-v0 migrator，只有在重新計算識別碼，並以已提交的來源 archive 驗證經審閱的 provenance 之後，才會使用 deterministic UUIDv5。遷移後的記錄會在可用時保留舊版別名；遷移後的 Project 則使用重新計算的 UUIDv5 作為 `project_id`。隨機 UUIDv4、ULID、hash 與循序 ID 都不是規範 ID。請參閱 [harness-v0-migration.md](harness-v0-migration.md)。
 
-顯示形式為 `<letter>-<prefix>`，使用 UUID 前八個大寫十六進位數字，且不含連字號。字母對應如下：`I` Idea、`O` Pool、`Q` Queue、`V` Advice、`B` Battle、`P` Plan、`E` Experiment、`R` Run、`A` Attempt、`S` EvaluationSpec、`N` Evaluation、`F` Finding、`C` Candidate、`L` Release、`T` PromotionSpec、`M` Promotion，以及 `D` Decision。若候選字串在同種類記錄中不唯一，便逐次多取一個十六進位數字。只有在無歧義時，才接受顯示代碼與唯一的帶型別 ID 前綴；它們絕不會作為關聯 key 持久化，並可能隨著專案成長而加長。
+顯示形式為 `<letter>-<prefix>`，使用 UUID 前八個大寫十六進位數字，且不含連字號。字母對應如下：`U` Source、`I` Idea、`O` Pool、`Q` Queue、`V` Advice、`B` Battle、`P` Plan、`Y` Try、`E` Experiment、`R` Run、`A` Attempt、`S` EvaluationSpec、`N` Evaluation、`F` Finding、`C` Candidate、`L` Release、`T` PromotionSpec、`M` Promotion，以及 `D` Decision。若候選字串在同種類記錄中不唯一，便逐次多取一個十六進位數字。只有在無歧義時，才接受顯示代碼與唯一的帶型別 ID 前綴；它們絕不會作為關聯 key 持久化，並可能隨著專案成長而加長。
 
 `legacy_aliases` 是遷移所使用的 optional array。Harness alias 的精確格式為：Experiment 使用 `#NNN`、Finding 使用 `F-NNN`，其中包含三個以上的十進位數字。別名解析會考慮型別，而且必須唯一。新的原生記錄不會配置循序別名。
 
@@ -128,15 +143,49 @@ dec_<uuidv7>
 
 ## Project
 
-`<git-root>/experiments/PROJECT.md` 標示 v1 唯一會探索的 root。
+`<experiment-git-root>/experiments/PROJECT.md` 標示 Project v1 唯一會探索的 root。
+Experiment Git repository 可以獨立於所有 code Source repositories；但 marker 在該
+repository 內的位置仍然固定。
 
-必填欄位為 `schema`、`project_id`、`name`、`created_at` 與 `experiments_root`。由於 `PROJECT.md` 位於 root 內，`experiments_root` 為 `.`。Optional 欄位只有 `extensions`。V1 不會搜尋其他 marker；它們是範圍外檔案，而不是 active root 或 discovery error。具名或多個 root 延後處理。
+必填欄位為 `schema`、`project_id`、`name`、`created_at` 與 `experiments_root`。
+由於 `PROJECT.md` 位於 root 內，`experiments_root` 為 `.`；optional 欄位只有
+`extensions`。Dedicated initialization 不會引入 Project v2，也不會在 Project 中儲存
+Source checkout path。既有 embedded Project 維持相同 bytes 與 discovery behavior。
+
+## Source
+
+`exp.source/v1` 是位於 `sources/src_<full-uuid>-<slug>.md` 的一般 typed record：
+
+| 欄位 | 要求 |
+|---|---|
+| `key` | Project-unique normalized lower-case ASCII slug，上限 64 bytes |
+| `kind` | 必須是 `git` |
+| `subdir` | Immutable normalized Git-root-relative POSIX directory；`.` 代表 root |
+| `locator_hints` | 必須存在，即使是空 array；最多 64 個 unique normalized remote Git locators |
+| `state` | `active` 或 `retired` |
+| `retired_at` | 只有 `retired` 時必填，且必須位於 record lifetime 內 |
+
+Locator hint 會保留與 identity 有關的 SSH username 及 SCP／URI path form，但拒絕
+password、query/fragment data、local path 與 credential-bearing component。它可以協助
+佐證 clone，但不是 clone path，也不是 Source 的唯一 identity。Host checkout path 與
+Git-common filesystem identity 只存在 local association store。Retired Source 仍是
+canonical history，只能為 explicit historical cleanup 解析，不能用於 new work。
+
+Source records 的加入沒有變更 Project v1。為了 compatibility，`sources/` 下只有符合
+exact canonical Source grammar 的 filename 會被保留；既有 nonmatching content 仍屬 unrelated。
+系統不會重寫這類 legacy file/tree；但若 `sources` 是衝突的 non-directory path，人類必須先
+處理，才能發布新的 Source record。
 
 ## Policy、Idea、ResourcePool 與 Queue
 
 `POLICY.md` 是固定且不含 ID 的 `exp.policy/v1` singleton。它擁有 autonomy、exploit/explore share、score formula、tie policy、強制的人類 Promotion gate、受控 classification taxonomy、cluster saturation 預設值，以及 optional per-cluster state。原生 policy 初始化預設為 `manual` 與 0.8/0.2 share。
 
-Idea 擁有 proposal state、summary、proposer、primary cluster、classification、parent Idea edge、resulting Plan edge，以及 optional merge target。有效 state 為 `proposed`、`developing`、`qualified`、`queued`、`dismissed` 與 `merged`。
+Idea 擁有 proposal state、summary、proposer、primary cluster、classification、parent Idea
+edge、resulting Plan edge，以及 optional merge target。有效 state 為 `proposed`、
+`developing`、`qualified`、`queued`、`dismissed` 與 `merged`。`exp.idea/v2` 新增
+optional `origin_try`；設定時 referenced Try 必須為 `adopted`，其 `adopted_idea` 必須
+反向指到此 Idea，而且一個 Try 只能由一個 Idea claim。Idea v1 維持原 byte shape，並拒絕
+`origin_try`。
 
 ResourcePool 擁有 bottleneck 是否啟用、其整數 concurrent capacity、unit、bottleneck slug，以及 optional hourly cost。它不儲存 Pueue group；該 host/runtime binding 屬於 `.exp/runtime.json`。
 
@@ -173,7 +222,33 @@ Plan 擁有 `resulting_experiment` 與 `assumptions`。Experiment 與 Finding �
 | `resources` | 一個以上的 ResourcePool、unit 與正 estimated hours |
 | `utility` | Probability、impact、information gain、unblock value 與 risk penalty |
 
-Belief digest 涵蓋被參照的 Finding revision，以及所有傳入的 `weakens`／`overturns` edge（包括來源 revision）。過期的 dependency 或已進入 Queue 的 Plan revision 會阻擋 dispatch。
+Belief digest 涵蓋被參照的 Finding revision，以及所有 incoming `weakens`／
+`overturns` edge（包括 source revision）。Stale dependency 或 queued Plan revision 會阻擋
+dispatch。
+
+## Try
+
+`exp.try/v1` 記錄與 formal Experiment 不同的短期 evidence-gathering lifecycle。必填欄位是
+`state`、non-empty bounded `goal`，以及 sorted non-empty canonical Source ID `sources`
+set。Immutable directory path `t-<full-uuid-hex>-<slug>/TRY.md` 使用完整 UUID；owned
+Attempt files 位於該 directory 的 `attempts/`。
+
+| State | 必填 | 禁止 |
+|---|---|---|
+| `open` | `created_at == updated_at` | conclusion、abandonment、adopted Idea |
+| `concluded` | 位於 `updated_at` 的 human `conclusion` | abandonment、adopted Idea |
+| `abandoned` | 位於 `updated_at` 的 human `abandonment` | conclusion、adopted Idea |
+| `adopted` | 既有 conclusion 與 `adopted_idea` | abandonment |
+
+Conclusion 保存 bounded human summary、optional sorted `sha256:` result digests 與 optional
+sanitized ExternalRefs。每個 selected digest 都必須由此 Try 擁有的 terminal Attempt 產生；
+只要有 owned Attempt 尚未 terminal，就會拒絕 closure。Abandonment 保存明確且 bounded 的
+human reason。Adoption atomically 建立帶 `origin_try` 的 Idea v2 並設定 reciprocal
+`adopted_idea`；`proposed_by` identity 不得使用 agent/bot/model prefix。Declared Source set
+不會改變，每筆 owned Attempt 的 SourceSnapshots 必須是其 subset。
+
+Try 絕不能直接支持 Candidate 或 Promotion。其 conclusion 可以促成 Idea；能進入 promotion
+的 evidence 必須由 formal Run-owned Attempt 在 clean gate 下重現。
 
 ## Experiment
 
@@ -230,32 +305,75 @@ Experiment 只會透過 `closure_detail.superseded_by` 擁有 supersession edge�
 
 Run 不含 process state、Attempt list、evidence disposition 或 scientific verdict。一個 Run 可以有多個 Attempt；由 tracker 擁有的 sweep trial 可以只存在於 ExternalRef 之後。
 
-## Attempt
+## Attempt v1、v2 與 v3
 
-額外欄位：
+所有版本共用 `state`、optional commit-safe `state_reason`、provider slugs `runner`／
+`scheduler`、safe relative `cwd`、non-empty argv array、optional ExternalRefs/provenance，
+以及 optional terminal observation。Argv 絕不是 shell text。Known terminal states 是
+`succeeded`、`failed`、`cancelled`、`timed_out`、`preempted` 與 `out_of_memory`，
+並要求 terminal table。Nonterminal states（`planned`、`queued`、`blocked`、`starting`、
+`running`、`unknown`）禁止 terminal table。`unknown` 絕不授權 automatic retry。
 
-| 欄位 | 要求 |
-|---|---|
-| `run` | 必填 canonical Run ID；此 edge 由 Attempt 擁有 |
-| `state` | 必填 operational state |
-| `state_reason` | Optional sanitized provider/native reason |
-| `runner` | 必填 provider name |
-| `scheduler` | 必填 provider name；恰由一個 scheduler 擁有 Attempt |
-| `cwd` | 必填安全的 repository-relative POSIX path；允許 `.` |
-| `argv` | 必填非空白 argument array；不得使用 shell string |
-| `external_refs` | Optional ExternalRef table array |
-| `provenance` | Optional structured provenance table |
-| `terminal` | 已知 terminal state 時必填；nonterminal state 時禁止 |
+Terminal table 包含 `source`、`observed_at`、optional `started_at`、required `ended_at`，
+以及 optional `exit_code`／`signal`，所有 UTC timestamps 必須依序排列。禁止從 state 推論
+exit code。Provenance 包含 `captured_at`、full `git_commit`、`git_dirty`、optional digests，
+以及 `reproducibility`（`exact`、`bounded`、`partial` 或 `unknown`）。
 
-Operational state 定義於 [architecture.md](architecture.md)。已知 terminal state 為 `succeeded`、`failed`、`cancelled`、`timed_out`、`preempted` 與 `out_of_memory`。`unknown` 可以沒有 terminal record，而且絕不會授權自動重試。
+精確 version split 如下：
 
-Terminal table 包含 `source`、`observed_at`、optional `started_at`、必填 `ended_at`，以及 optional `exit_code` 與 `signal`。Timestamp 必須依序排列。禁止根據特定 state 推斷 exit code；provider evidence 必須明確證實如 `out_of_memory` 等 classification。
+| Schema | Owner 與 Git identity | Dispatch fields |
+|---|---|---|
+| `exp.attempt/v1` | Required `run`；禁止 Try、retry、execution Source、SourceSnapshots 與 top-level Git identity | 禁止 |
+| `exp.attempt/v2` | Required `run`；full top-level `base_commit`、`head_commit` 與 non-empty exact `change_set` | `pool`、`queue`、positive `queue_revision`、`lane`、`dispatch_id` 全部必填 |
+| `exp.attempt/v3` | `run`／`try` 恰好一個；required `execution_source` 與 non-empty sorted `source_snapshots`；optional Try-only `retry_of` | 全部存在或全部缺省；禁止 top-level `base_commit`、`head_commit`、`change_set` |
 
-建議的 provenance key 為 `captured_at`、完整 `git_commit`、`git_dirty`、optional `dirty_digest`、`config_digest`、`data_digest`、`environment_digest`，以及 `reproducibility`（`exact`、`bounded`、`partial` 或 `unknown`）。Provenance value 必須能安全提交。
+Attempt v3 path 依 typed owner 決定：Run-owned Attempt 位於其 Experiment 的 `attempts/`；
+Try-owned Attempt 位於其 Try 的 `attempts/`。每個 referenced Source 必須 canonically 存在，
+snapshot `subdir` 必須等於 Source immutable subdir，`execution_source` 必須在 snapshot set
+恰好出現一次。Try owner 的每個 snapshot Source 都必須在 Try declared Source set 中。
+已在 capture 前 retired 的 Source 不能用於該 capture。
 
-每個經明確註冊且已遮蔽敏感資訊的 Attempt 都是已提交的規範記錄，包括失敗的 Attempt。Git common directory 下的 local start/terminal marker 是 operational input，會匯入此記錄；它們不能取代此記錄。
+每個 `[[source_snapshots]]` 包含：
 
-`exp.attempt/v2` 額外固定 dispatch context：ResourcePool、Queue、Queue semantic revision、lane、stable dispatch ID、完整 Git base/head commit，以及精確 ChangeSet。這些欄位將 scientific Attempt 連接到一個已准入的 Queue frontier 與一個已審閱的 code candidate；Pueue task ID 與 live status 仍是 external observation。
+```text
+source                 canonical Source ID
+subdir                 canonical Source subdir
+policy_version         capture policy slug（目前 producer：capture-v1）
+captured_at            Attempt lifetime 內的 UTC time
+git_object_format      sha1 | sha256
+base_commit            符合 object format 的 full object ID
+head_commit            符合 object format 的 full object ID
+change_set             必須存在且 sorted 的 Git-root-relative array，即使為空
+state                  clean | dirty
+dirty_digest           只有 dirty 時必填
+dirty_summary          只有 dirty 時需要 bounded summary
+digest                 除自身外所有 snapshot fields 的 sha256 identity
+reproducibility        clean 必須 exact；完整 dirty capture 可為 exact 或 bounded
+```
+
+Clean snapshot 禁止 dirty fields。Dirty snapshot 只有在 Try-owned Attempt 才符合 schema；
+direct capture 目前產生 `bounded`，並把 exact tracked patch、untracked file 與 submodule
+identity 保存於 private `exp.source-seed/v1` bundle，且拒絕 unsupported/unbounded state。
+Formal runtime 只接受 clean snapshots。V3 若帶 legacy provenance，其 Git commit、dirty
+flag/digest 與 reproducibility 必須符合 execution Source snapshot。
+
+`retry_of` 只供 Try-owned Attempt v3 使用。Predecessor 必須是相同 Try 中較早的 terminal
+Attempt，且 cwd、argv、execution Source 相同。一筆 Attempt 最多只能有一個 retry successor。
+Direct retry path 也會重新 capture 完整 prior Source state（只忽略 capture time 與 derived
+snapshot digest）；只要 drift 就 block retry，不會暗中改變 experiment。
+
+Direct Try policy 與 cleanup state 使用 open
+`extensions."io.github.daviddwlee84.exp-cli.tryflow"` table，而不是新增 core fields。
+Producer 記錄 `schema = "exp.tryflow-direct/v1"`、實際
+`workspace_backend = "native_git"`、allowed globs、timeout、optional selected MLflow
+profile/context、optional dirty seed-bundle digest、terminal result digests，以及最後的
+`cleanup_completed`／`cleanup_completed_at`。只有 terminal Attempt 與 verified
+manager-owned state 才可 cleanup。Cleanup 可以移除 managed worktree 與 private seed bundle，
+但絕不移除 canonical Attempt、branch、commit、operation row 或 durable terminal marker。
+
+每筆 registered Attempt（包括 failed Attempt）都是 canonical。Private job、Pueue task、
+worktree、seed bundle 與 terminal marker 都只是 operational input。Final marker 可以經
+revision-checked transaction 匯入；它不能取代 Attempt，本身也不是 scientific evidence。
 
 ## ExternalRef
 
@@ -290,9 +408,26 @@ Finding 擁有全部三類 relation。它不儲存 `active`、`weakened` 或 `ov
 
 EvaluationSpec 擁有 purpose（`scientific` 或 `promotion`）、凍結的 dataset 或 split identifier、protocol、一個以上的 metric contract、ResourcePool budget、有限 budget hours，以及 optional seal time。每個 metric 宣告 name、unit、direction 與 optional threshold。Promotion-purpose spec 必須 sealed，且每個 promotion metric 都要有 threshold，使 `passed`／`failed` 的結果具 deterministic 性質。
 
-Evaluation 不可變更，並擁有其 EvaluationSpec 與 subject edge。Subject 為 Experiment、Candidate 或 Release。它記錄 `passed`、`failed` 或 `invalid`、evaluation time、完全依宣告的 metric value、summary，以及 optional sanitized external reference。Tracker state 不會整批複製。
+Evaluation 不可變更，並擁有 EvaluationSpec 與 subject edges。兩個版本都記錄 `passed`、
+`failed` 或 `invalid`、evaluation time、spec 宣告的所有且僅那些 metrics、summary 與
+optional sanitized ExternalRefs。`exp.evaluation/v1` 允許 Experiment、Candidate 或 Release
+subject，沒有 typed Attempt field。`exp.evaluation/v2` 額外要求 `attempt`，只允許
+Experiment subject；Attempt 必須是 successful terminal formal Attempt v3，其 Run 屬於該
+subject，而且 evaluation time 不得早於 terminal observation。MLflow metadata owner 本身不會
+implicit upgrade v1：creator 必須明確選擇 `--attempt`，任何 verified MLflow owner 也必須相符。
 
-Candidate 擁有其 concluded Experiment、通過的 scientific Evaluation、parent Candidate edge、完整 Git commit、精確 ChangeSet，以及 optional external reference。對 included Run 執行成功的 direct Attempt，必須符合該 Git identity 與 ChangeSet。Candidate 是可重複使用、經評估的結果，而不只是一個成功的 process。
+Candidate 是 reusable evaluated result，不只是 successful process。兩個版本都擁有 concluded
+supported Experiment、passing scientific Evaluation 與 parent Candidate edges：
+
+- `exp.candidate/v1` 保存 required full `git_commit` 與 non-empty exact `change_set`。
+  只有 included Run 的 successful direct Attempt v2 符合這些 fields 時才有效。CLI 透過
+  explicit `--legacy` 保留此路徑，也會從既有 `--git-commit`／`--change` flag shape 推定。
+- `exp.candidate/v2` 禁止上述 top-level legacy fields，並要求 exact `attempt` 與 sorted
+  non-empty `sources` array。Attempt 必須是 clean、successful、terminal、Run-owned Attempt v3，
+  在 Experiment conclusion 前完成，且其 Run 必須被 included。Evaluation 必須是 v2 並綁定
+  同一 Attempt。每個 Candidate Source 都從 clean SourceSnapshot 精確複製 `source`、
+  `head_commit` 與 required sorted `change_set`（可為空）。若有 verified MLflow ownership，
+  也必須指向同一 Attempt。
 
 Release 擁有 target、version、state（`draft`、`validated` 或 `retired`），以及對應至 Candidate 的 unique named slot（依 slot name 正規化）。它也可以擁有 combination Experiment、與之不同的 `combination_evaluation`，以及 Release-level Evaluation。若包含一個以上不同的 Candidate，就必須有 supported combination evidence；slot name 是專案慣例，可以表示 logic、strategy parameter、code 或 model。
 
@@ -301,7 +436,24 @@ Release 擁有 target、version、state（`draft`、`validated` 或 `retired`）
 PromotionSpec 擁有一個 target、一個 sealed promotion-purpose EvaluationSpec、有限 holdout hours、seal time，以及 human-approval requirement。
 
 Promotion 僅能附加。它擁有 target、spec、challenger Release、optional incumbent Release、holdout Evaluation、outcome（`accepted`、`rejected` 或 `rolled_back`）、applied time、previous Promotion edge，以及具名 human approver。Holdout Evaluation 必須在 PromotionSpec seal 之後建立，而且不得由另一個 Promotion 重複使用。Accepted 與 rollback outcome 需要通過的 holdout；rollback 只能恢復由目前設定 champion 的 Promotion 所取代之 incumbent。EvaluationSpec、Run、Finding、Decision、QueueAdvice、Battle、Evaluation、Candidate、PromotionSpec、Promotion，以及 validated/retired Release 發布後均不可變更；後續知識應建立新的 linked record，而不是重寫 evidence。
-每個 target 的目前 Champion 都由其有效 chain 推導；生成的 champion manifest 絕不是 canonical。
+每個 target 的目前 Champion 都由其 valid chain 推導；generated champion manifest 絕不是
+canonical。
+
+### Champion manifest v1 與 v3
+
+`exp champion manifest` 是 output，不是 canonical input schema。若每個 selected Release slot
+都使用 Candidate v1，command 會輸出 `exp.champion-manifest/v1`；每個 slot 包含 name、
+Candidate、Experiment、Evaluation、legacy `git_commit` 與 `change_set`。因此既有 v1 output
+保持完全相同的 meaning。
+
+只要任何 selected slot 使用 Candidate v2，完整 manifest 就標為
+`exp.champion-manifest/v3`。每個 v2 slot 省略 legacy Git fields，改含 `attempt`、
+`execution_source` 與 `sources`；每個 Source entry 包含 canonical Source ID、目前 sanitized
+locator hints、immutable subdir，以及從 Candidate 複製的 `head_commit` 與 required
+`change_set`。Mixed v3 manifest 的 v1 slots 可保留 legacy fields。輸出不含 absolute
+checkout path、association、credential、artifact byte 或 trust receipt。目前不會輸出 v2
+shape，也沒有能授予 authority 的 manifest decoder；downstream consumer 必須依
+`schema_version` 分支，並自行驗證 Git/provider state。
 
 ## Decision
 
@@ -317,6 +469,9 @@ Decision 擁有這些 relation。Active/superseded presentation 由 incoming `su
 
 | 關聯 | 唯一擁有者 |
 |---|---|
+| Source 識別 Git repository meaning/subdir | Source |
+| Try 宣告 available Sources | Try |
+| Try adopts Idea／Idea originates from Try | Try 與 Idea v2，atomically reciprocal |
 | Idea 衍生自 Idea | Child Idea |
 | Idea qualified 為 Plan | Idea |
 | Idea merge 進 Idea | Merged Idea |
@@ -329,13 +484,17 @@ Decision 擁有這些 relation。Active/superseded presentation 由 incoming `su
 | Experiment 衍生自 Experiment | Child Experiment v2 |
 | Combination Experiment 消耗 Candidate | Experiment v2 |
 | Run 屬於 Experiment | Run |
-| Attempt 執行 Run | Attempt |
-| Attempt 從 Queue/Pool/lane 獲准執行 | Attempt v2 |
+| Attempt 執行 Run 或屬於 Try | Attempt v3（v1/v2 永遠屬於 Run） |
+| Attempt retry 較早 Attempt | Retry successor Attempt v3 |
+| Attempt capture Source identities／選擇 execution Source | Attempt v3 |
+| Attempt 從 Queue/Pool/lane 獲准執行 | Attempt v2 或 dispatched v3 |
 | Experiment 將 Run 納入／排除為 conclusion evidence | Experiment conclusion |
 | Evaluation 遵循 EvaluationSpec 並評估 subject | Evaluation |
+| Evaluation 由 formal Attempt 支持 | Evaluation v2 |
 | Finding 引用 Run（或粗粒度遷移的 Experiment） | Finding |
 | Finding 削弱／推翻 Finding | New Finding |
 | Candidate 封裝 Experiment/Evaluation 與 parent Candidate | Candidate |
+| Candidate 固定 formal Attempt 與 Source commits/paths | Candidate v2 |
 | Release 以 Candidate 填入 named slot | Release |
 | Release 引用 combination Experiment/Evaluation | Release |
 | PromotionSpec 使用 sealed EvaluationSpec | PromotionSpec |
@@ -385,6 +544,7 @@ Canonical path 為：
 ```text
 PROJECT.md
 POLICY.md
+sources/src_<full-uuid>-<slug>.md
 ideas/idea_<full-uuid>-<slug>.md
 plans/plan_<full-uuid>-<slug>.md
 resource-pools/pool_<full-uuid>-<slug>.md
@@ -399,6 +559,8 @@ releases/rel_<full-uuid>-<slug>.md
 promotion-specs/promspec_<full-uuid>-<slug>.md
 promotions/prom_<full-uuid>-<slug>.md
 decisions/dec_<full-uuid>-<slug>.md
+t-<full-try-uuid-hex>-<slug>/TRY.md
+t-<full-try-uuid-hex>-<slug>/attempts/att_<full-uuid>.md
 e-<allocated-short-prefix>-<slug>/REPORT.md
 e-<allocated-short-prefix>-<slug>/runs/run_<full-uuid>-<slug>.md
 e-<allocated-short-prefix>-<slug>/attempts/att_<full-uuid>.md
@@ -413,3 +575,26 @@ Slug 由小寫 ASCII 字母／數字組成，並以單一連字號分隔。Path 
 ```
 
 Rendering 不包含目前時間、hostname、absolute path 或 cache data。Record 先依 view 的明確 key，再依完整 canonical ID 排序：Plan 依 state、priority、ID；Experiment 依 lifecycle、ID；Finding 與 Decision 依 creation time、ID。Table cell 會將 `|` 跳脫為 `\|`，並將內嵌 newline 表示為 `<br>`。Link 使用 relative POSIX path。輸出使用 LF，並保留一個最終 newline。`exp render --check` 會比較精確位元組，絕不寫入檔案。
+
+## 精確 record compatibility 與 migration
+
+系統不會 implicit in-place schema migration。Decoder 只依 persisted `schema` 選擇 exact
+version、拒絕 unknown core field，並驗證該版本 required fields。Encoder 刻意使用 legacy wire
+struct，避免較新版本的 zero values 洩漏進 v1/v2 output。
+
+| Existing data | 目前行為 | 如何選擇新 semantics |
+|---|---|---|
+| `exp.project/v1` embedded Project | 在既有 fixed `experiments/` root 保持 valid/discoverable；從其內部 invocation 不需要 association | Register 以供 cross-repository selection，或初始化另一個 dedicated Project；兩者都不改舊 Project schema |
+| 既有 noncanonical `sources` content 或任意 `t-*` path | 除非符合 exact new Source filename／Try directory grammar，否則忽略；initialization 不會重寫 | 發布 Source/Try 前由人類明確處理 filesystem collision |
+| Idea v1 | 讀寫時不含 `origin_try` | 只有 `try adopt` 會建立具 reciprocal Try ownership 的 Idea v2 |
+| Attempt v1 | 保留 Run-only、non-dispatch shape | 不自動轉換；用適用的 current runtime 建立新 work |
+| Attempt v2 | 保留 formal legacy dispatch 與 top-level Git fields | Runtime v2 或 direct Try 建立新 Attempt v3；history 不重寫 |
+| Evaluation v1 | 依原 subject 與 optional MLflow metadata 維持有效 | 為 formal Experiment 明確提供 `--attempt` 以建立 Evaluation v2 |
+| Candidate v1 | 以 legacy Git commit/ChangeSet 與 matching Attempt v2 維持有效 | 使用 explicit clean formal Attempt v3 建立 Candidate v2；legacy CLI flags 仍受支援 |
+| Champion manifest v1 | 所有 slots 都是 Candidate v1 時原樣輸出 | 任何 Candidate v2 都會選擇完整 manifest v3 |
+
+Harness-v0 是另一種 unversioned source layout，必須使用 explicit fingerprinted plan/apply
+migrator；valid v1 records 不得送入該 semantic migration。Runtime、worker、journal 與
+association compatibility 請見
+[Harness-v0 compatibility and migration](harness-v0-migration.md)與
+[Workflow migration](../workflows/migration.md)。

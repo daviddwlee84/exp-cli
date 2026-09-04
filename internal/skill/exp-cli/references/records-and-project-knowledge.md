@@ -7,6 +7,9 @@ Use one owner for each fact and derive reverse links rather than duplicating the
 | Concept | Store here when | Do not use it for |
 |---|---|---|
 | Policy | autonomy, taxonomy, queue allocation, tie, and human Promotion rules are project-wide | a one-off agent instruction or hidden daemon setting |
+| Source | a Project needs canonical identity for a Git repository or immutable governed subdir | a host-local clone path, submodule convenience, or provider catalog entry |
+| Try | a bounded exploratory question, human conclusion, and adoption provenance need review | a priced formal Experiment or Candidate evidence |
+| SourceSnapshot | an Attempt must pin clean/dirty mode, exact commits/ChangeSet, paths, and digests | raw dirty seed bytes, checkout paths, datasets, models, artifacts, or logs |
 | Idea | a human/agent direction, branch, or merge needs durable qualification state | a priced queue entry or generic TODO |
 | Plan | proposed research has priority, effort, measurable expected payoff, assumptions, and a state | a generic task or an unpriced idea |
 | ResourcePool | a named bottleneck has finite concurrent capacity and cost | a provider-native Pueue task/group snapshot |
@@ -17,7 +20,7 @@ Use one owner for each fact and derive reverse links rather than duplicating the
 | Attempt | one redacted execution/submission of a Run has operational state and provenance | a scientific verdict |
 | EvaluationSpec/Evaluation | a comparable protocol and immutable measured outcome are required | raw telemetry or mutable provider dashboards |
 | Finding | a durable, scoped belief is supported by explicit evidence | an unsupported hunch, action item, or raw metric dump |
-| Candidate | a supported evaluated result is pinned to exact Git code/ChangeSet | any process that happened to succeed |
+| Candidate | a supported evaluated result is pinned to its exact successful clean formal Attempt; v2 copies Source IDs/head commits/ChangeSets | any Try, dirty snapshot, provider run, or process that happened to succeed |
 | Release | named downstream slots compose validated Candidates for one target | assuming independent gains are additive |
 | Promotion | a sealed holdout and named human decision changes one target's incumbent | autonomous experiment dispatch |
 | Decision | an interpretation selects an action based on Findings | the preregistered decision rule itself |

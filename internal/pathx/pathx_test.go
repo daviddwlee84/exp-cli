@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -113,6 +114,53 @@ func TestEnsureRootAtNoSymlinksSyncsAndRejectsSymlinkComponents(t *testing.T) {
 	}
 	if _, _, err := EnsureRootAtNoSymlinks(root, "link/child", 0o700); !errors.Is(err, ErrSymlink) {
 		t.Fatalf("symlinked component error = %v", err)
+	}
+}
+
+func TestEnsureRootAtNoSymlinksAcceptsConcurrentSafeCreator(t *testing.T) {
+	rootPath, err := Canonical(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 16
+	start := make(chan struct{})
+	results := make([]error, workers)
+	created := make([]bool, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			root, err := OpenCanonicalRootNoSymlinks(rootPath)
+			if err != nil {
+				results[index] = err
+				return
+			}
+			defer root.Close()
+			<-start
+			nested, wasCreated, err := EnsureRootAtNoSymlinks(root, "shared/nested", 0o700)
+			if nested != nil {
+				err = errors.Join(err, nested.Close())
+			}
+			created[index] = wasCreated
+			results[index] = err
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	createdAny := false
+	for index, err := range results {
+		if err != nil {
+			t.Fatalf("worker %d: %v", index, err)
+		}
+		createdAny = createdAny || created[index]
+	}
+	if !createdAny {
+		t.Fatal("no concurrent writer reported creating the directory")
+	}
+	info, err := os.Stat(filepath.Join(rootPath, "shared", "nested"))
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("concurrent directory = %#v, %v", info, err)
 	}
 }
 

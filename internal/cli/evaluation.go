@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daviddwlee84/exp-cli/internal/execx"
 	"github.com/daviddwlee84/exp-cli/internal/lifecycle"
 	"github.com/daviddwlee84/exp-cli/internal/mlflow"
 	"github.com/daviddwlee84/exp-cli/internal/record"
@@ -28,6 +27,7 @@ type evaluationOptions struct {
 	sealed      bool
 	spec        string
 	subject     string
+	attempt     string
 	outcome     string
 	summary     string
 	tags        []string
@@ -65,6 +65,7 @@ func newEvaluationSpecCommand(app *App, root *rootOptions) *cobra.Command {
 	flags.BoolVar(&options.sealed, "sealed", false, "seal the spec now; required for promotion purpose")
 	flags.StringSliceVar(&options.tags, "tags", nil, "set free tags")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
+	markRequiredFlags(create, "title")
 	command.AddCommand(create)
 	return command
 }
@@ -80,16 +81,18 @@ func newEvaluationCreateCommand(app *App, root *rootOptions) *cobra.Command {
 	flags.StringVar(&options.body, "body", "", "set optional Markdown detail")
 	flags.StringVar(&options.spec, "spec", "", "reference the EvaluationSpec")
 	flags.StringVar(&options.subject, "subject", "", "reference an Experiment, Candidate, or Release")
+	flags.StringVar(&options.attempt, "attempt", "", "bind an Experiment Evaluation to its exact successful formal Attempt")
 	flags.StringVar(&options.outcome, "outcome", "", "set passed, failed, or invalid")
 	flags.StringSliceVar(&options.metrics, "metric", nil, "record NAME=VALUE:UNIT for every declared metric")
 	flags.StringVar(&options.summary, "summary", "", "summarize the result without overstating evidence")
 	flags.StringSliceVar(&options.tags, "tags", nil, "set free tags")
 	flags.StringVar(&options.mlflowRunID, "mlflow-run-id", "", "verify and attach a workload-owned MLflow run ID")
-	flags.StringVar(&options.mlflowCtx, "mlflow-context", "default", "set a non-secret MLflow context name")
+	flags.StringVar(&options.mlflowCtx, "mlflow-context", "", "override the non-secret MLflow context in compatibility mode")
 	flags.StringSliceVar(&options.mlflowTags, "mlflow-tag", nil, "require an MLflow NAME=VALUE tag (attachments require exp.attempt_id)")
 	flags.StringSliceVar(&options.allowEnv, "allow-env", nil, "inherit a non-secret variable for MLflow verification")
 	flags.StringSliceVar(&options.secretEnv, "secret-env", nil, "bind a required MLflow secret by environment name")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
+	markRequiredFlags(command, "title", "summary")
 	return command
 }
 
@@ -132,7 +135,7 @@ func runEvaluationSpecCreate(command *cobra.Command, app *App, root *rootOptions
 	}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "evaluation-spec.create", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{Record: spec, Body: body}}}})
 	if err != nil {
-		return commandFailure(app, options.json, "evaluation spec create", struct{}{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "evaluation spec create", result, err)
 	}
 	published := transactionDocument(result, research.KindEvaluationSpec)
 	data := struct {
@@ -142,7 +145,15 @@ func runEvaluationSpecCreate(command *cobra.Command, app *App, root *rootOptions
 }
 
 func runEvaluationCreate(command *cobra.Command, app *App, root *rootOptions, options *evaluationOptions) error {
-	info, store, err := openTransactionalStore(command, app, root)
+	resolved, err := resolveWorkspaceContext(command, app, root)
+	if err != nil || resolved == nil || resolved.Project == nil {
+		if err == nil {
+			err = errors.New("workspace resolver returned no canonical Project")
+		}
+		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
+	}
+	info := resolved.Project
+	store, err := app.NewTransactionalStore(info)
 	if err != nil {
 		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
 	}
@@ -164,6 +175,14 @@ func runEvaluationCreate(command *cobra.Command, app *App, root *rootOptions, op
 		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, errors.New("evaluation subject must be an Experiment, Candidate, or Release"))
 	}
 	subjectID, _ := subjectDocument.ID()
+	var attemptDocument *record.Document
+	mlflowOwnerAttempt := research.ID{}
+	if strings.TrimSpace(options.attempt) != "" {
+		attemptDocument, err = inventory.Resolve(options.attempt, research.KindAttempt)
+		if err != nil {
+			return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
+		}
+	}
 	metrics, err := parseMetricValues(options.metrics)
 	if err != nil {
 		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
@@ -185,22 +204,31 @@ func runEvaluationCreate(command *cobra.Command, app *App, root *rootOptions, op
 		if ownershipErr != nil {
 			return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, ownershipErr)
 		}
-		allowed := append(execx.MinimalAllowlist(), options.allowEnv...)
-		bindings := make([]execx.Binding, 0, len(options.secretEnv))
-		for _, name := range options.secretEnv {
-			bindings = append(bindings, execx.BindSecretFromEnv(name, name))
+		mlflowOwnerAttempt = ownerAttempt
+		profile, profileErr := mlflow.ResolveInvocation(resolved.Config, mlflow.InvocationOptions{
+			Profile: root.mlflowProfile, Context: options.mlflowCtx,
+			ContextSet: command.Flags().Changed("mlflow-context"),
+			AllowEnv:   append([]string{}, options.allowEnv...), SecretEnv: append([]string{}, options.secretEnv...),
+		})
+		if profileErr != nil {
+			return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, profileErr)
 		}
-		environment, environmentErr := execx.NewEnvironment(allowed, bindings...)
+		environment, environmentErr := profile.EnvironmentPolicy()
 		if environmentErr != nil {
 			return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, environmentErr)
+		}
+		timeout, timeoutErr := profile.TimeoutDuration()
+		if timeoutErr != nil {
+			return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, timeoutErr)
 		}
 		metricNames := make([]string, 0, len(metrics))
 		for _, metric := range metrics {
 			metricNames = append(metricNames, metric.Name)
 		}
-		verified, verifyErr := (mlflow.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup}).Describe(command.Context(), mlflow.DescribeRequest{
+		verified, verifyErr := (mlflow.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup, Binary: profile.Binary, Timeout: timeout}).Describe(command.Context(), mlflow.DescribeRequest{
 			RunID: options.mlflowRunID, MetricNames: metricNames, ExpectedTags: expectedTags, Environment: environment, CWD: info.Repository.Root,
 		})
+		verified.Profile, verified.Context = profile.Name, profile.Context
 		if verifyErr != nil || !verified.Verified {
 			if verifyErr == nil {
 				verifyErr = fmt.Errorf("MLflow verification failed: %s", strings.Join(verified.Diagnostics, "; "))
@@ -212,28 +240,58 @@ func runEvaluationCreate(command *cobra.Command, app *App, root *rootOptions, op
 				return commandFailure(app, options.json, "evaluation create", verified, false, nil, fmt.Errorf("metric %s does not equal the verified MLflow value", metric.Name))
 			}
 		}
+		selectedMetrics := make(map[string]any, len(verified.Metrics))
+		for name, value := range verified.Metrics {
+			selectedMetrics[name] = value
+		}
 		observed := app.clock()
 		externalRefs = append(externalRefs, research.ExternalRef{
-			Role: research.ExternalTracker, Provider: "mlflow", Context: options.mlflowCtx, NativeKind: "run", NativeID: options.mlflowRunID,
+			Role: research.ExternalTracker, Provider: "mlflow", Context: verified.Context, NativeKind: "run", NativeID: options.mlflowRunID,
 			URI: verified.ArtifactURI, ObservedAt: &observed,
-			Metadata: map[string]any{"mlflow.status": verified.Status, "mlflow.experiment_id": verified.ExperimentID, "mlflow.verified": true, "mlflow.owner_attempt": ownerAttempt.String(), "mlflow.owner_subject": subjectID.String()},
+			Metadata: map[string]any{
+				"mlflow.profile": verified.Profile, "mlflow.status": verified.Status, "mlflow.experiment_id": verified.ExperimentID,
+				"mlflow.verified": true, "mlflow.owner_attempt": ownerAttempt.String(), "mlflow.owner_subject": subjectID.String(),
+				"mlflow.metrics": selectedMetrics,
+			},
 		})
 	}
 	specID, _ := specDocument.ID()
+	attemptReference, err := explicitEvaluationAttemptReference(attemptDocument, mlflowOwnerAttempt)
+	if err != nil {
+		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
+	}
 	service := lifecycle.New(store, lifecycle.WithClock(app.clock), lifecycle.WithUUIDGenerator(app.GenerateUUID))
 	result, err := service.CreateEvaluation(command.Context(), lifecycle.CreateEvaluationRequest{
 		Spec:    lifecycle.RevisionRef{ID: specID, Revision: specDocument.Revision},
 		Subject: lifecycle.RevisionRef{ID: subjectID, Revision: subjectDocument.Revision},
+		Attempt: attemptReference,
 		Data:    lifecycle.EvaluationData{Title: options.title, Body: options.body, Outcome: research.EvaluationOutcome(options.outcome), Metrics: metrics, ExternalRefs: externalRefs, Summary: options.summary, Tags: options.tags},
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "evaluation create", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "evaluation create", err)
 	}
 	data := struct {
 		Evaluation  canonicalRecordView `json:"evaluation"`
 		Transaction string              `json:"transaction_id"`
 	}{Evaluation: canonicalView(result.Evaluation), Transaction: result.TransactionID}
 	return commandSuccess(app, options.json, "evaluation create", data, false, refreshAfterTransaction(command, app, info, store), fmt.Sprintf("Created Evaluation %s.\n", data.Evaluation.ID))
+}
+
+// explicitEvaluationAttemptReference preserves the v1 attachment contract:
+// provider ownership alone never opts a record into Evaluation v2. The caller
+// supplies a document only when the user explicitly provided --attempt.
+func explicitEvaluationAttemptReference(document *record.Document, mlflowOwner research.ID) (lifecycle.RevisionRef, error) {
+	if document == nil {
+		return lifecycle.RevisionRef{}, nil
+	}
+	id, ok := document.ID()
+	if !ok || document.Kind() != research.KindAttempt {
+		return lifecycle.RevisionRef{}, errors.New("--attempt does not identify a canonical Attempt")
+	}
+	if !mlflowOwner.IsZero() && id != mlflowOwner {
+		return lifecycle.RevisionRef{}, errors.New("--attempt does not match the verified MLflow owner Attempt")
+	}
+	return lifecycle.RevisionRef{ID: id, Revision: document.Revision}, nil
 }
 
 const mlflowAttemptOwnershipTag = "exp.attempt_id"

@@ -13,14 +13,18 @@ exp doctor --live
 ```
 
 The compiled provider registry knows candidate binary names, roles, and
-capability names. `doctor` uses local `LookPath`-style discovery only. It does
-not invoke `--version`, contact a provider, authenticate, install anything, or
-confirm capability support. `--live` currently adds an informational diagnostic
-but performs no additional probe.
+capability names. Default `doctor` uses local `LookPath`-style discovery only;
+it does not invoke a tool or confirm capability support. Explicit
+`doctor --live` runs each discovered provider's bounded `--version` probe and,
+where implemented, a read-only local service probe (currently Pueue status),
+plus workspace-backend readiness. It performs no login, installation, config
+write, service start, workload, or canonical mutation.
 
-Consequently, a provider may be reported as `found` while every capability is
-still `unknown`. Only a dedicated, reviewed operation may establish
-`supported` or `unsupported` for the contract it exercises.
+For planned DVC, Slurm, Marimo, and Jupyter entries, even a parseable version does
+not authorize an operation; capability support remains `unknown`. `dev_cli`
+workspace lifecycle support is statically `unsupported` because the required
+exact-path machine receipt does not exist. Only a dedicated reviewed operation
+contract may establish support for the capability it actually exercises.
 
 ## Current planned inventory
 

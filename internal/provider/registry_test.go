@@ -118,8 +118,8 @@ func TestLocalDiscoveryUsesOnlyInjectedLookupAndSafeProbe(t *testing.T) {
 	}
 
 	pueue := findProbe(t, results, provider.ProviderPueue)
-	if pueue.ProviderVersion != "pueue 4.0.4" {
-		t.Fatalf("Pueue version = %q", pueue.ProviderVersion)
+	if pueue.ProviderVersion != "pueue 4.0.4" || pueue.Readiness != provider.ReadinessReady || !pueue.Probed {
+		t.Fatalf("Pueue readiness/version = %+v", pueue)
 	}
 	if got := pueue.SupportFor(provider.CapabilitySchedulerObserve); got != provider.SupportSupported {
 		t.Fatalf("Pueue observe support = %q", got)
@@ -135,15 +135,15 @@ func TestLocalDiscoveryUsesOnlyInjectedLookupAndSafeProbe(t *testing.T) {
 	}
 
 	mlflow := findProbe(t, results, provider.ProviderMLflow)
-	if mlflow.ProviderVersion != "" || mlflow.SupportFor(provider.CapabilityTrackerList) != provider.SupportUnknown {
+	if mlflow.ProviderVersion != "" || mlflow.Readiness != provider.ReadinessUnknown || !mlflow.Probed || mlflow.SupportFor(provider.CapabilityTrackerList) != provider.SupportUnknown {
 		t.Fatalf("MLflow failure promoted support: %+v", mlflow)
 	}
 	encoded, err := json.Marshal(results)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), canary) {
-		t.Fatalf("discovery leaked version-probe canary: %s", encoded)
+	if strings.Contains(string(encoded), canary) || strings.Contains(string(encoded), "/synthetic/") {
+		t.Fatalf("discovery leaked a canary or local binary path: %s", encoded)
 	}
 	if !strings.Contains(string(encoded), "[REDACTED]") {
 		t.Fatalf("discovery did not retain a redaction marker: %s", encoded)
@@ -167,6 +167,15 @@ func TestFoundBinaryWithoutVersionProbeRemainsUnknown(t *testing.T) {
 		t.Fatalf("lookup calls = %d, want 6", calls)
 	}
 	for _, result := range results {
+		if result.Provider == provider.ProviderDirect {
+			if result.Readiness != provider.ReadinessBuiltIn || result.Probed {
+				t.Fatalf("built-in readiness = %+v", result)
+			}
+			continue
+		}
+		if result.Readiness != provider.ReadinessInstalledNotProbed || result.Probed {
+			t.Fatalf("lookup-only readiness = %+v", result)
+		}
 		for _, capability := range result.Capabilities {
 			if capability.Support != provider.SupportUnknown {
 				t.Fatalf("binary presence promoted %s/%s to %s", result.Provider, capability.Capability, capability.Support)

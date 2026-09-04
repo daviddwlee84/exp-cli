@@ -377,6 +377,79 @@ func OpenRegularFileNoFollow(root *os.Root, relative string) (*os.File, fs.FileI
 	return file, opened, nil
 }
 
+// ProtectPrivateOpenFile applies exact owner-only platform protection through an
+// already-open handle. On Windows this installs a protected DACL; Unix relies on
+// the exact mode applied through the same handle.
+func ProtectPrivateOpenFile(file *os.File, want fs.FileMode) error {
+	if file == nil {
+		return errors.New("nil private file")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(want); err != nil {
+		return err
+	}
+	return protectPrivateOpenFile(file, want, info.IsDir())
+}
+
+// ProtectPrivateRoot applies private directory protection through an open root.
+func ProtectPrivateRoot(root *os.Root, want fs.FileMode) error {
+	if root == nil {
+		return errors.New("nil private filesystem root")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	return errors.Join(ProtectPrivateOpenFile(directory, want), directory.Close())
+}
+
+// CheckPrivateRoot validates a private directory through its already-open root.
+// Unix enforces exact owner-only mode bits; Windows validates owner/DACL and
+// reparse-point identity without relying on synthesized os.FileMode permissions.
+func CheckPrivateRoot(root *os.Root, want fs.FileMode, description string) (fs.FileInfo, error) {
+	if root == nil {
+		return nil, errors.New("nil private filesystem root")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := directory.Stat()
+	if statErr == nil && !info.IsDir() {
+		statErr = fmt.Errorf("%s is not a directory", description)
+	}
+	checkErr := error(nil)
+	if statErr == nil {
+		checkErr = checkPrivateOpenFile(directory, want, description, false)
+	}
+	closeErr := directory.Close()
+	if statErr != nil || checkErr != nil || closeErr != nil {
+		return nil, errors.Join(statErr, checkErr, closeErr)
+	}
+	return info, nil
+}
+
+// CheckPrivateFile validates one rooted regular file's permissions, ownership,
+// link count, and no-follow identity using platform-native handle metadata.
+func CheckPrivateFile(root *os.Root, relative string, want fs.FileMode, description string) (fs.FileInfo, error) {
+	file, info, err := OpenRegularFileNoFollow(root, relative)
+	if err != nil {
+		return nil, err
+	}
+	checkErr := checkPrivateOpenFile(file, want, description, true)
+	after, statErr := file.Stat()
+	pathInfo, pathErr := root.Lstat(relative)
+	closeErr := file.Close()
+	if checkErr != nil || statErr != nil || pathErr != nil || closeErr != nil ||
+		!os.SameFile(info, after) || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+		return nil, errors.Join(checkErr, statErr, pathErr, closeErr, ErrNotRegular)
+	}
+	return info, nil
+}
+
 // ReadBoundedRegularFile reads at most maxBytes from one identity-safe,
 // non-symlink regular file. It rejects an oversized file before allocation when
 // its metadata permits and always uses a maxBytes+1 sentinel read.
@@ -438,12 +511,16 @@ func walkRootComponents(base *os.Root, components []string, create bool, mode fs
 		info, statErr := current.Lstat(component)
 		created := false
 		if errors.Is(statErr, fs.ErrNotExist) && create {
-			if mkdirErr := current.Mkdir(component, mode); mkdirErr != nil {
+			if mkdirErr := current.Mkdir(component, mode); mkdirErr != nil && !errors.Is(mkdirErr, fs.ErrExist) {
 				_ = current.Close()
 				return nil, createdAny, mkdirErr
+			} else if mkdirErr == nil {
+				created = true
+				createdAny = true
 			}
-			created = true
-			createdAny = true
+			// Another safe writer may win the first-create race. Re-inspect the
+			// winning entry below; symlinks, non-directories, and identity swaps
+			// still fail closed through the ordinary rooted checks.
 			info, statErr = current.Lstat(component)
 		}
 		if statErr != nil {
@@ -484,7 +561,7 @@ func walkRootComponents(base *os.Root, components []string, create bool, mode fs
 		if created {
 			directory, chmodErr := next.Open(".")
 			if chmodErr == nil {
-				chmodErr = directory.Chmod(mode)
+				chmodErr = ProtectPrivateOpenFile(directory, mode)
 				chmodErr = errors.Join(chmodErr, directory.Close())
 			}
 			if chmodErr != nil {

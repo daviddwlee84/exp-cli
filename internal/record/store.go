@@ -67,6 +67,10 @@ func WithAtomicHook(hook AtomicHook) StoreOption {
 	return func(store *Store) { store.atomicHook = hook }
 }
 
+func WithGitRunner(runner gitx.Runner) StoreOption {
+	return func(store *Store) { store.git = runner }
+}
+
 func WithCollisionLimit(limit int) StoreOption {
 	return func(store *Store) { store.collisionLimit = limit }
 }
@@ -78,12 +82,15 @@ type Store struct {
 
 	clock            func() time.Time
 	generate         research.UUIDGenerator
+	git              gitx.Runner
 	atomicHook       AtomicHook
 	transactionHook  TransactionHook
 	collisionLimit   int
 	coordinationRoot *os.Root
 	canonicalRoot    *os.Root
 	rootIdentity     fs.FileInfo
+	worktreeID       string
+	worktreeIDErr    error
 	missingWorktrees []gitx.Worktree
 	mu               sync.Mutex
 }
@@ -100,11 +107,13 @@ func NewStore(root, gitCommonDir string, options ...StoreOption) *Store {
 		GitCommonDir:   gitCommonDir,
 		clock:          time.Now,
 		generate:       research.DefaultUUIDGenerator,
+		git:            gitx.ExecRunner{},
 		collisionLimit: 128,
 	}
 	if info, err := os.Lstat(root); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		store.rootIdentity = info
 	}
+	store.worktreeID, store.worktreeIDErr = transactionWorktreeID(root, gitCommonDir)
 	for _, option := range options {
 		if option != nil {
 			option(store)
@@ -115,6 +124,9 @@ func NewStore(root, gitCommonDir string, options ...StoreOption) *Store {
 	}
 	if store.generate == nil {
 		store.generate = research.DefaultUUIDGenerator
+	}
+	if store.git == nil {
+		store.git = gitx.ExecRunner{}
 	}
 	if store.collisionLimit <= 0 {
 		store.collisionLimit = 128
@@ -190,7 +202,7 @@ func (store *Store) WithInventorySnapshot(ctx context.Context, operation func(*I
 			inventory.boundVerify = nil
 		}()
 		operationErr := operation(inventory)
-		verificationErr := errors.Join(inventory.VerifySnapshot(ctx), store.verifyMutationRoots(), inspectTransactionJournalsReadOnly(ctx, store.coordinationRoot, store.canonicalRoot))
+		verificationErr := errors.Join(inventory.VerifySnapshot(ctx), store.verifyMutationRoots(), store.inspectLockedTransactionJournals(ctx))
 		if verificationErr != nil {
 			verificationErr = fmt.Errorf("canonical inventory changed during snapshot operation: %w", verificationErr)
 		}
@@ -483,6 +495,15 @@ func validateImmutableUpdate(current, replacement *Document) error {
 			return err
 		}
 	}
+	if currentTry, ok := current.Record.(*research.Try); ok {
+		replacementTry, replacementOK := replacement.Record.(*research.Try)
+		if !replacementOK {
+			return errors.New("Try replacement has the wrong record type")
+		}
+		if err := validateTryUpdate(currentTry, replacementTry, current.Body, replacement.Body); err != nil {
+			return err
+		}
+	}
 	if currentIdea, ok := current.Record.(*research.Idea); ok {
 		replacementIdea, replacementOK := replacement.Record.(*research.Idea)
 		if !replacementOK {
@@ -504,10 +525,117 @@ func validateImmutableUpdate(current, replacement *Document) error {
 			return err
 		}
 	}
+	if currentSource, ok := current.Record.(*research.Source); ok {
+		replacementSource, replacementOK := replacement.Record.(*research.Source)
+		if !replacementOK {
+			return errors.New("Source replacement has the wrong record type")
+		}
+		if err := validateSourceUpdate(currentSource, replacementSource, current.Body, replacement.Body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSourceUpdate(current, replacement *research.Source, currentBody, replacementBody string) error {
+	if current.Key != replacement.Key {
+		return errors.New("Source key is immutable")
+	}
+	if current.Kind != replacement.Kind {
+		return errors.New("Source kind is immutable")
+	}
+	if current.Subdir != replacement.Subdir {
+		return errors.New("Source subdir is immutable")
+	}
+	leftCommon, rightCommon := current.Common, replacement.Common
+	leftCommon.UpdatedAt, rightCommon.UpdatedAt = time.Time{}, time.Time{}
+	if !reflect.DeepEqual(leftCommon, rightCommon) {
+		return errors.New("Source title, tags, aliases, and registration fields are immutable")
+	}
+	if currentBody != replacementBody {
+		return errors.New("Source body is immutable")
+	}
+	if !reflect.DeepEqual(current.Extensions, replacement.Extensions) {
+		return errors.New("Source extensions are immutable")
+	}
+	if len(replacement.LocatorHints) < len(current.LocatorHints) {
+		return errors.New("Source locator hints are append-only")
+	}
+	for index := range current.LocatorHints {
+		if current.LocatorHints[index] != replacement.LocatorHints[index] {
+			return fmt.Errorf("Source locator hint %d is immutable", index)
+		}
+	}
+	appendedLocator := len(replacement.LocatorHints) > len(current.LocatorHints)
+	retired := false
+	switch {
+	case current.State == replacement.State:
+		if !reflect.DeepEqual(current.RetiredAt, replacement.RetiredAt) {
+			return errors.New("Source retired_at is immutable once recorded")
+		}
+	case current.State == research.SourceActive && replacement.State == research.SourceRetired:
+		retired = true
+		if current.RetiredAt != nil || replacement.RetiredAt == nil || !replacement.RetiredAt.Equal(replacement.UpdatedAt) || replacement.RetiredAt.Before(current.UpdatedAt) {
+			return errors.New("retiring a Source requires retired_at equal to the replacement updated_at")
+		}
+	default:
+		return fmt.Errorf("Source state cannot transition from %s to %s", current.State, replacement.State)
+	}
+	if appendedLocator && retired {
+		return errors.New("Source locator append and retirement must be separate exact-revision updates")
+	}
+	if !appendedLocator && !retired && !reflect.DeepEqual(current, replacement) {
+		return errors.New("Source updates may only append locator hints or retire an active Source")
+	}
+	return nil
+}
+
+func validateTryUpdate(current, replacement *research.Try, currentBody, replacementBody string) error {
+	if current.Title != replacement.Title || !reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) ||
+		!reflect.DeepEqual(current.Tags, replacement.Tags) || current.Goal != replacement.Goal ||
+		!reflect.DeepEqual(current.Sources, replacement.Sources) || currentBody != replacementBody ||
+		!reflect.DeepEqual(current.Extensions, replacement.Extensions) {
+		return errors.New("Try registration, goal, Sources, body, and extensions are immutable")
+	}
+	if current.State == replacement.State {
+		if !reflect.DeepEqual(current, replacement) {
+			return errors.New("Try records may change only through a lifecycle transition")
+		}
+		return nil
+	}
+	if !replacement.UpdatedAt.After(current.UpdatedAt) {
+		return errors.New("Try lifecycle transitions require a strictly later updated_at")
+	}
+	switch current.State {
+	case research.TryOpen:
+		if replacement.State != research.TryConcluded && replacement.State != research.TryAbandoned {
+			return fmt.Errorf("Try state cannot transition from %s to %s", current.State, replacement.State)
+		}
+		if current.Conclusion != nil || current.Abandonment != nil || !current.AdoptedIdea.IsZero() {
+			return errors.New("open Try already contains terminal lifecycle data")
+		}
+	case research.TryConcluded:
+		if replacement.State != research.TryAdopted {
+			return fmt.Errorf("Try state cannot transition from %s to %s", current.State, replacement.State)
+		}
+		if !reflect.DeepEqual(current.Conclusion, replacement.Conclusion) {
+			return errors.New("Try conclusion is immutable during adoption")
+		}
+		if current.Abandonment != nil || !current.AdoptedIdea.IsZero() {
+			return errors.New("concluded Try already contains incompatible lifecycle data")
+		}
+	case research.TryAbandoned, research.TryAdopted:
+		return fmt.Errorf("%s Try records are immutable", current.State)
+	default:
+		return fmt.Errorf("Try state cannot transition from %s to %s", current.State, replacement.State)
+	}
 	return nil
 }
 
 func validateIdeaUpdate(current, replacement *research.Idea) error {
+	if current.OriginTry != replacement.OriginTry {
+		return errors.New("Idea origin_try is immutable")
+	}
 	if !current.ResultingPlan.IsZero() && current.ResultingPlan != replacement.ResultingPlan {
 		return errors.New("Idea resulting_plan is immutable once set")
 	}
@@ -578,8 +706,9 @@ func validatePlanUpdate(current, replacement *research.Plan) error {
 func validateAttemptUpdate(current, replacement *research.Attempt) error {
 	terminalRefinement := current.Terminal != nil && current.Terminal.Source == "pueue" && replacement.Terminal != nil && replacement.Terminal.Source == "direct" && terminalAttemptState(current.State) && terminalAttemptState(replacement.State)
 	immutableEqual := current.Title == replacement.Title && reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) && reflect.DeepEqual(current.Tags, replacement.Tags) &&
-		current.Run == replacement.Run && current.Runner == replacement.Runner && current.Scheduler == replacement.Scheduler && current.CWD == replacement.CWD &&
-		reflect.DeepEqual(current.Argv, replacement.Argv) && reflect.DeepEqual(current.Provenance, replacement.Provenance) && current.Pool == replacement.Pool &&
+		current.Run == replacement.Run && current.Try == replacement.Try && current.RetryOf == replacement.RetryOf && current.Runner == replacement.Runner && current.Scheduler == replacement.Scheduler && current.CWD == replacement.CWD &&
+		reflect.DeepEqual(current.Argv, replacement.Argv) && current.ExecutionSource == replacement.ExecutionSource && reflect.DeepEqual(current.SourceSnapshots, replacement.SourceSnapshots) &&
+		reflect.DeepEqual(current.Provenance, replacement.Provenance) && current.Pool == replacement.Pool &&
 		current.Queue == replacement.Queue && current.QueueRevision == replacement.QueueRevision && current.Lane == replacement.Lane && current.DispatchID == replacement.DispatchID &&
 		current.BaseCommit == replacement.BaseCommit && current.HeadCommit == replacement.HeadCommit && reflect.DeepEqual(current.ChangeSet, replacement.ChangeSet)
 	if !immutableEqual {

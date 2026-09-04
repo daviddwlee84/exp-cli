@@ -33,6 +33,22 @@ func Normalize(record Record) {
 		sort.Strings(value.Taxonomy.Methods)
 		sort.Strings(value.Taxonomy.Components)
 		sort.SliceStable(value.Clusters, func(i, j int) bool { return value.Clusters[i].Name < value.Clusters[j].Name })
+	case *Source:
+		if key, err := NormalizeSourceKey(value.Key); err == nil {
+			value.Key = key
+		}
+		if subdir, err := NormalizeSourceSubdir(value.Subdir); err == nil {
+			value.Subdir = subdir
+		}
+		for index := range value.LocatorHints {
+			if locator, err := NormalizeSourceLocator(value.LocatorHints[index]); err == nil {
+				value.LocatorHints[index] = locator
+			}
+		}
+		if value.RetiredAt != nil {
+			retiredAt := utc(*value.RetiredAt)
+			value.RetiredAt = &retiredAt
+		}
 	case *Idea:
 		sortIDs(value.Parents)
 		value.Parents = nilIDsIfEmpty(value.Parents)
@@ -65,6 +81,20 @@ func Normalize(record Record) {
 			value.Dependencies[i].BeliefDigest = strings.ToLower(value.Dependencies[i].BeliefDigest)
 		}
 		sort.SliceStable(value.Resources, func(i, j int) bool { return value.Resources[i].Pool.String() < value.Resources[j].Pool.String() })
+	case *Try:
+		sortIDs(value.Sources)
+		if value.Conclusion != nil {
+			value.Conclusion.ConcludedAt = utc(value.Conclusion.ConcludedAt)
+			sort.Strings(value.Conclusion.ResultDigests)
+			value.Conclusion.ResultDigests = nilIfEmpty(value.Conclusion.ResultDigests)
+			normalizeExternalRefs(value.Conclusion.ExternalRefs)
+			if len(value.Conclusion.ExternalRefs) == 0 {
+				value.Conclusion.ExternalRefs = nil
+			}
+		}
+		if value.Abandonment != nil {
+			value.Abandonment.AbandonedAt = utc(value.Abandonment.AbandonedAt)
+		}
 	case *Experiment:
 		if value.Design.DesignLockedAt != nil {
 			t := utc(*value.Design.DesignLockedAt)
@@ -95,6 +125,21 @@ func Normalize(record Record) {
 			value.Seeds = nil
 		}
 	case *Attempt:
+		sort.SliceStable(value.SourceSnapshots, func(i, j int) bool {
+			return value.SourceSnapshots[i].Source.String() < value.SourceSnapshots[j].Source.String()
+		})
+		for i := range value.SourceSnapshots {
+			snapshot := &value.SourceSnapshots[i]
+			snapshot.CapturedAt = utc(snapshot.CapturedAt)
+			snapshot.BaseCommit = strings.ToLower(snapshot.BaseCommit)
+			snapshot.HeadCommit = strings.ToLower(snapshot.HeadCommit)
+			snapshot.DirtyDigest = strings.ToLower(snapshot.DirtyDigest)
+			snapshot.Digest = strings.ToLower(snapshot.Digest)
+			sort.Strings(snapshot.ChangeSet)
+			if snapshot.ChangeSet == nil {
+				snapshot.ChangeSet = []string{}
+			}
+		}
 		for i := range value.ExternalRefs {
 			if value.ExternalRefs[i].ObservedAt != nil {
 				t := utc(*value.ExternalRefs[i].ObservedAt)
@@ -137,6 +182,16 @@ func Normalize(record Record) {
 		sortIDs(value.Parents)
 		value.Parents = nilIDsIfEmpty(value.Parents)
 		sort.Strings(value.ChangeSet)
+		sort.SliceStable(value.Sources, func(i, j int) bool {
+			return value.Sources[i].Source.String() < value.Sources[j].Source.String()
+		})
+		for index := range value.Sources {
+			value.Sources[index].HeadCommit = strings.ToLower(value.Sources[index].HeadCommit)
+			sort.Strings(value.Sources[index].ChangeSet)
+			if value.Sources[index].ChangeSet == nil {
+				value.Sources[index].ChangeSet = []string{}
+			}
+		}
 		normalizeExternalRefs(value.ExternalRefs)
 	case *Release:
 		sort.SliceStable(value.Slots, func(i, j int) bool { return value.Slots[i].Name < value.Slots[j].Name })
@@ -206,6 +261,19 @@ func Clone(record Record) Record {
 		out.Taxonomy.Methods = cloneStrings(source.Taxonomy.Methods)
 		out.Taxonomy.Components = cloneStrings(source.Taxonomy.Components)
 		out.Clusters = append([]ClusterPolicy(nil), source.Clusters...)
+		out.Extensions = cloneExtensions(source.Extensions)
+		return &out
+	case *Source:
+		if source == nil {
+			return (*Source)(nil)
+		}
+		out := *source
+		cloneCommon(&out.Common, &source.Common)
+		out.LocatorHints = cloneStrings(source.LocatorHints)
+		if source.RetiredAt != nil {
+			retiredAt := *source.RetiredAt
+			out.RetiredAt = &retiredAt
+		}
 		out.Extensions = cloneExtensions(source.Extensions)
 		return &out
 	case *Idea:
@@ -287,6 +355,25 @@ func Clone(record Record) Record {
 			out.ExpectedPayoff.Estimate = &estimate
 		}
 		return &out
+	case *Try:
+		if source == nil {
+			return (*Try)(nil)
+		}
+		out := *source
+		cloneCommon(&out.Common, &source.Common)
+		out.Sources = append([]ID(nil), source.Sources...)
+		if source.Conclusion != nil {
+			conclusion := *source.Conclusion
+			conclusion.ResultDigests = cloneStrings(source.Conclusion.ResultDigests)
+			conclusion.ExternalRefs = cloneExternalRefs(source.Conclusion.ExternalRefs)
+			out.Conclusion = &conclusion
+		}
+		if source.Abandonment != nil {
+			abandonment := *source.Abandonment
+			out.Abandonment = &abandonment
+		}
+		out.Extensions = cloneExtensions(source.Extensions)
+		return &out
 	case *Experiment:
 		if source == nil {
 			return (*Experiment)(nil)
@@ -334,6 +421,10 @@ func Clone(record Record) Record {
 		cloneCommon(&out.Common, &source.Common)
 		out.Argv = append([]string(nil), source.Argv...)
 		out.ChangeSet = append([]string(nil), source.ChangeSet...)
+		out.SourceSnapshots = append([]SourceSnapshot(nil), source.SourceSnapshots...)
+		for index := range out.SourceSnapshots {
+			out.SourceSnapshots[index].ChangeSet = cloneStrings(source.SourceSnapshots[index].ChangeSet)
+		}
 		out.ExternalRefs = append([]ExternalRef(nil), source.ExternalRefs...)
 		for i := range out.ExternalRefs {
 			if source.ExternalRefs[i].ObservedAt != nil {
@@ -408,6 +499,10 @@ func Clone(record Record) Record {
 		cloneCommon(&out.Common, &source.Common)
 		out.Parents = append([]ID(nil), source.Parents...)
 		out.ChangeSet = append([]string(nil), source.ChangeSet...)
+		out.Sources = append([]CandidateSource(nil), source.Sources...)
+		for index := range out.Sources {
+			out.Sources[index].ChangeSet = cloneStrings(source.Sources[index].ChangeSet)
+		}
 		out.ExternalRefs = cloneExternalRefs(source.ExternalRefs)
 		out.Extensions = cloneExtensions(source.Extensions)
 		return &out

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/gitx"
 	"github.com/daviddwlee84/exp-cli/internal/harnessv0"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 )
@@ -58,6 +60,43 @@ func TestMigratePlanAndApplyCommands(t *testing.T) {
 	requireCommandSuccess(t, again)
 	if !strings.Contains(again.stdout, `"already_applied":true`) {
 		t.Fatalf("idempotent apply output = %s", again.stdout)
+	}
+}
+
+func TestMigrateSelectorsAreExplicitAndSourceAliasDoesNotShadow(t *testing.T) {
+	repository := writeCLILegacyFixture(t)
+	app := NewApp(t.Context(), nil, nil, nil)
+	app.Getwd = func() (string, error) { return repository, nil }
+	delegate := app.GitRunner
+	gitCalls := 0
+	app.GitRunner = gitx.RunnerFunc(func(ctx context.Context, directory string, arguments []string) (string, string, error) {
+		gitCalls++
+		return delegate.Run(ctx, directory, arguments)
+	})
+
+	for _, args := range [][]string{
+		{"--source", "experiments", "migrate", "plan", "--json"},
+		{"migrate", "plan", "--source", "experiments", "--json"},
+		{"migrate", "plan", "--legacy-source", "experiments", "--json"},
+	} {
+		invocation := invokeCommand(t, app, "", args...)
+		requireCommandSuccess(t, invocation)
+	}
+	if gitCalls == 0 {
+		t.Fatal("migrate plan bypassed the injected Git runner")
+	}
+
+	output := filepath.Join(repository, "must-not-exist.json")
+	selected := invokeCommand(t, app, "", "--workspace", repository, "migrate", "plan", "--output", output, "--json")
+	if selected.err == nil {
+		t.Fatal("migrate plan silently accepted --workspace")
+	}
+	if _, err := os.Lstat(output); !os.IsNotExist(err) {
+		t.Fatalf("rejected migrate plan wrote output: %v", err)
+	}
+	apply := invokeCommand(t, app, "", "--workspace", repository, "migrate", "apply", "--plan", filepath.Join(repository, "missing.json"), "--json")
+	if apply.err == nil || !strings.Contains(apply.err.Error(), "does not accept --workspace") {
+		t.Fatalf("migrate apply selector rejection = %v", apply.err)
 	}
 }
 

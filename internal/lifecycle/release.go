@@ -128,7 +128,7 @@ func (service *Service) CreateRelease(ctx context.Context, request CreateRelease
 		if err != nil {
 			return nil, err
 		}
-		evaluation = newEvaluation(evaluationID, spec.ID, releaseID, now, request.Evaluation.Data)
+		evaluation = newEvaluation(evaluationID, spec.ID, releaseID, research.ID{}, now, request.Evaluation.Data)
 	}
 
 	release := &research.Release{
@@ -144,22 +144,25 @@ func (service *Service) CreateRelease(ctx context.Context, request CreateRelease
 	if evaluation != nil {
 		changes.create(&record.Document{Record: evaluation, Body: request.Evaluation.Data.Body})
 	}
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "release.create", Changes: changes.changes,
 	})
-	if err != nil {
-		return nil, err
-	}
-	releaseDocument, err := resultDocument(transaction, releaseID)
-	if err != nil {
-		return nil, err
-	}
-	result := &CreateReleaseResult{TransactionID: transaction.TransactionID, Release: releaseDocument}
-	if !evaluationID.IsZero() {
-		result.Evaluation, err = resultDocument(transaction, evaluationID)
-		if err != nil {
-			return nil, err
+	result := &CreateReleaseResult{}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Release, _ = resultDocument(transaction, releaseID)
+		if !evaluationID.IsZero() {
+			result.Evaluation, _ = resultDocument(transaction, evaluationID)
 		}
+	}
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
+	}
+	if result.Release == nil || !evaluationID.IsZero() && result.Evaluation == nil {
+		return nil, fmt.Errorf("canonical transaction omitted Release or coupled Evaluation")
 	}
 	return result, nil
 }

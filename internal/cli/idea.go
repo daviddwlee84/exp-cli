@@ -153,7 +153,7 @@ func runIdeaAdd(command *cobra.Command, app *App, root *rootOptions, options *id
 	}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "idea.add", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: &record.Document{Record: idea, Body: body}}}})
 	if err != nil {
-		return commandFailure(app, options.json, "idea add", ideaData{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "idea add", result, err)
 	}
 	published := transactionDocument(result, research.KindIdea)
 	data := ideaData{Idea: canonicalView(published)}
@@ -247,7 +247,7 @@ func runIdeaQualify(command *cobra.Command, app *App, root *rootOptions, options
 		{Operation: record.TransactionReplace, Document: updatedIdeaDocument, ExpectedRevision: ideaDocument.Revision},
 	}})
 	if err != nil {
-		return commandFailure(app, options.json, "idea qualify", ideaData{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "idea qualify", result, err)
 	}
 	publishedIdea := transactionDocument(result, research.KindIdea)
 	publishedPlan := transactionDocument(result, research.KindPlan)

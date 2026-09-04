@@ -52,7 +52,7 @@ func readProjectReceipt(root *os.Root) (*receiptState, error) {
 	if err := validateReceiptFile(file); err != nil {
 		return state, err
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err := pathx.ProtectPrivateOpenFile(file, 0o600); err != nil {
 		return state, fmt.Errorf("protect project initialization receipt: %w", err)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxProjectReceipt+1))
@@ -64,8 +64,11 @@ func readProjectReceipt(root *os.Root) (*receiptState, error) {
 	}
 	state.raw = append([]byte(nil), raw...)
 	finalInfo, err := root.Lstat(projectReceiptFile)
-	if err != nil || finalInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, finalInfo) {
-		return state, fmt.Errorf("project initialization receipt changed while reading: %w", err)
+	if err != nil {
+		return state, fmt.Errorf("inspect project initialization receipt after reading: %w", err)
+	}
+	if finalInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, finalInfo) {
+		return state, errors.New("project initialization receipt changed while reading")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

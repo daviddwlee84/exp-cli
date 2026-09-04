@@ -137,7 +137,7 @@ func runPolicyInit(command *cobra.Command, app *App, root *rootOptions, options 
 	document := &record.Document{Record: policy, Body: "\n# Research policy\n\nAutonomy and constrained-resource allocation policy.\n"}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "policy.init", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: document}}})
 	if err != nil {
-		return commandFailure(app, options.json, "policy init", policyData{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "policy init", result, err)
 	}
 	published := transactionDocument(result, research.KindPolicy)
 	data := policyData{Policy: canonicalView(published), Value: published.Record.(*research.Policy)}
@@ -188,7 +188,7 @@ func runPolicyAutonomy(command *cobra.Command, app *App, root *rootOptions, opti
 	policy.UpdatedAt = app.clock()
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "policy.autonomy", Changes: []record.TransactionChange{{Operation: record.TransactionReplace, Document: replacement, ExpectedRevision: inventory.Policy.Revision}}})
 	if err != nil {
-		return commandFailure(app, options.json, "policy autonomy", policyData{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "policy autonomy", result, err)
 	}
 	published := transactionDocument(result, research.KindPolicy)
 	data := policyData{Policy: canonicalView(published), Value: published.Record.(*research.Policy)}
@@ -260,7 +260,7 @@ func runPolicyClusterSet(command *cobra.Command, app *App, root *rootOptions, op
 	policy.UpdatedAt = app.clock()
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: "policy.cluster-set", Changes: []record.TransactionChange{{Operation: record.TransactionReplace, Document: replacement, ExpectedRevision: inventory.Policy.Revision}}})
 	if err != nil {
-		return commandFailure(app, options.json, "policy cluster-set", policyData{}, false, nil, err)
+		return transactionCommandFailure(app, options.json, "policy cluster-set", result, err)
 	}
 	published := transactionDocument(result, research.KindPolicy)
 	data := policyData{Policy: canonicalView(published), Value: published.Record.(*research.Policy)}

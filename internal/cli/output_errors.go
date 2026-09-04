@@ -32,5 +32,9 @@ func outputWasAbandoned(err error) bool {
 		}
 		return true
 	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		return cause != nil && outputWasAbandoned(cause)
+	}
 	return errors.Is(err, io.ErrClosedPipe) || isBrokenPipeError(err)
 }

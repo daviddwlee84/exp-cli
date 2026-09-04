@@ -2,77 +2,118 @@
 
 ## Product boundary
 
-`exp` is a Git-native research control plane. It chooses and records research
-work; it does not replace the systems that execute code, store telemetry, or
-serve production artifacts.
+`exp` is a Git-native research control plane. It chooses, records, dispatches,
+and preserves research work; it does not replace Git, schedulers, telemetry
+systems, artifact stores, or production deployment systems.
+
+A Project's canonical records and the code they study do not have to share a Git
+repository. The canonical **experiment repository** is an ordinary Git
+repository containing `experiments/PROJECT.md`. Each canonical `Source` record
+names a project-local Git source identity; private host-local associations map
+that identity to a checkout. A `Try` is bounded exploratory work. Formal
+`Experiment`/`Run` execution is the promotion-bearing path.
 
 ```mermaid
 flowchart TB
-  subgraph Canonical[Git-backed scientific authority]
-    I[Ideas and Plans]
+  subgraph Canonical[Independent Git-backed experiment repository]
+    P[Project, Policy, Sources]
+    I[Ideas, Plans, Tries]
     Q[Pool/lane Queues]
     X[Experiments, Runs, Attempts]
     K[Evaluations, Findings, Decisions]
     R[Candidates, Releases, Promotions]
   end
 
-  subgraph Operational[Private operational state]
-    D[Daemon lease and fairness]
-    O[Jobs, outbox, fencing tokens]
-    T[Terminal markers and observations]
+  subgraph Local[Host-local non-canonical state]
+    A[Project and Source associations]
+    C[Layered config and exact-digest trust]
+    D[Jobs, leases, outbox, fencing]
+    T[Durable worker markers and dirty seed bundles]
   end
 
   subgraph Upstream[Upstream owners]
-    G[Git branches and worktrees]
-    P[Pueue tasks and groups]
-    M[MLflow runs and artifacts]
-    S[Plan-scoped Study backend]
+    G[Source Git repositories and worktrees]
+    U[Pueue tasks and groups]
+    M[Workload-owned MLflow runs and artifacts]
+    W[Optional workspace and Study providers]
   end
 
-  I --> Q --> X --> K --> R
-  D --> O --> P
-  Q --> D
-  G --> X
-  P --> T --> X
-  M -. sanitized reference .-> K
-  S -. sanitized observation .-> X
+  P --> I --> Q --> X --> K --> R
+  A --> G
+  C --> D
+  Q --> D --> U
+  G --> T --> X
+  M -. selected sanitized observation .-> X
+  W -. bounded capability .-> D
 ```
 
 Process success is an operational fact, never a scientific verdict. Invalid
-evidence is not a refuted hypothesis.
+evidence is not a refuted hypothesis. A provider artifact URI is an observation,
+not canonical content or deployment authority.
 
 ## Authority matrix
 
 | Information | Authority | `exp` treatment |
 |---|---|---|
-| Autonomy, taxonomy, queue formula, lane allocation, promotion gate | canonical `POLICY.md` | Mutate with revision checks |
-| Human/agent proposal and parent Ideas | canonical Idea | Preserve origin and qualification state |
-| Expected utility, constrained resources, assumptions | canonical Plan | Queue only a fully qualified Plan |
-| Pool capacity and queue order | canonical ResourcePool and Queue | Dispatch from exact pool/lane frontier |
-| Listwise advice and pairwise comparisons | canonical QueueAdvice and Battle | Immutable audit input; never hidden authority |
-| Scientific protocol and conclusion | canonical Experiment | Lock design; close only through explicit transaction |
-| Intended evidence unit | canonical Run | Keep separate from retries/process invocations |
-| Redacted execution identity and operational state | canonical Attempt | Reconcile explicitly from durable observations |
-| Metric protocol and measured result | canonical EvaluationSpec and Evaluation | Immutable, comparable evidence |
-| Belief and belief-changing relation | canonical Finding | Derive weakened/overturned status from incoming edges |
-| Reusable evaluated result | canonical Candidate | Pin Experiment, Evaluation, Git commit, and ChangeSet |
-| Downstream composition | canonical typed Release | Require combination evidence for multiple Candidates |
-| Production decision | append-only Promotion chain | Require sealed holdout and named human approval |
-| Current production selection | derived Champion | Render; never read manifest back as authority |
-| Code history and integration | Git | Agent may create exact experiment commit; human merges |
-| Live local task/group state | Pueue | Observe/reconcile through adapter; never copy raw envs |
-| Metrics, traces, artifacts, registry | workload-owned MLflow or other provider | Verify selected fields; retain sanitized references |
-| Leases, jobs, outbox, fairness, provider observations | private SQLite | Durable local coordination, never scientific authority |
-| Search trials and pruning inside one Plan | configured Study backend | Provider-neutral adapter boundary; no global priority |
-| Generated README/roadmap/ledger/decision/champion views | canonical records | Deterministic projections only |
+| Project identity and canonical research graph | `PROJECT.md` and typed records in the selected experiment repository | Resolve one Project first; validate exact schemas/revisions and mutate under its Git-common lock. |
+| Source identity, immutable semantic subdirectory, lifecycle, and sanitized locator hints | canonical `Source` | Keep it path-free and host-independent. A Source is an ordinary record, not a second root or repository mount. |
+| Local Project/Source checkout mapping | `$XDG_STATE_HOME/exp/associations/v1.json` | Validate Project UUID, Source ID, Git-common path/filesystem identity, subdir, and locator intersection on every use. Never establish canonical identity from this file. |
+| Config selection and execution-bearing preferences | layered `exp.config/v1` files plus `$XDG_STATE_HOME/exp/trust/v1.json` | Resolve only after authority; retain leaf provenance; require exact file digest, capability, Project/Source scope, and Git-common filesystem identity. |
+| Autonomy, taxonomy, queue formula, lane allocation, promotion gate | canonical `POLICY.md` | Mutate with revision checks. |
+| Proposal, exploratory question, and formal qualification | canonical Idea, Try, and Plan | Keep Try separate from formal evidence; atomically adopt a concluded Try as Idea v2 only with a named human. |
+| Pool capacity and queue order | canonical ResourcePool and Queue | Dispatch from the exact pool/lane frontier. |
+| Listwise advice and pairwise comparisons | canonical QueueAdvice and Battle | Immutable audit input; never hidden mutation authority. |
+| Scientific protocol and conclusion | canonical Experiment | Lock design before Attempts; close only through an explicit transaction. |
+| Intended evidence unit | canonical Run | Keep separate from retries and process invocations. |
+| Redacted execution identity and state | canonical Attempt | V3 owns exactly one Run or Try and carries SourceSnapshots; import terminal observations explicitly. |
+| Metric protocol and measured result | canonical EvaluationSpec and Evaluation | Evaluation v2 binds formal evidence to an exact successful Attempt. |
+| Belief and belief-changing relation | canonical Finding | Derive weakened/overturned state from incoming edges. |
+| Reusable evaluated result | canonical Candidate | Candidate v2 copies clean Source identities from its formal Attempt and requires an Evaluation v2 bound to the same Attempt. |
+| Downstream composition and production decision | Release and append-only Promotion chain | Require combination evidence, sealed holdout, and named human approval. |
+| Current production selection | derived Champion | Render a manifest; never read it back as authority. |
+| Commits, branches, worktrees, and integration | native Git | Pin full object IDs and exact changed paths. `exp` never automatically merges or pushes. |
+| Live task/group state | Pueue | Observe and reconcile through the bounded adapter; never copy raw environments. |
+| Runs, metrics, traces, artifacts, and registry state | workload-owned MLflow or another provider | Read selected fields and retain only a verified sanitized reference. Artifact bytes remain outside `exp`. |
+| Leases, jobs, outbox, fairness, provider observations | private SQLite | Coordinate local execution; never establish scientific meaning. |
+| Generated pages, manifests, and TUI rows | canonical records plus bounded local observations | Treat as read-only projections. The TUI has no mutation, login, install, service-start, editor, or handoff key. |
 
-## Research DAG
+## Recommended repository arrangement { #recommended-repository-arrangement }
+
+The default recommendation is a **dedicated private experiment repository**. It
+keeps canonical research history, trust review, and access policy independent
+from any one code repository, while one Project can declare several Sources.
+Interactive `exp init` offers this layout first; non-interactive dedicated setup
+uses `--dedicated-repo`, `--source-repo`, `--source-key`, and `--confirm`.
+Initialization can adopt an exact Git root or, with explicit `--create`, initialize
+a reviewed missing/empty target. It creates no remote, commit, submodule, or push.
+The dedicated repository and initial Source must have different Git-common
+identities.
+
+A Git submodule is optional checkout convenience only. It can make an experiment
+repository and a code checkout visible in one parent tree, but submodule placement
+is not Source identity, association state, or execution authority. The ordinary
+Source record and validated local association remain required.
+
+A monorepo or embedded `experiments/` directory remains supported when code and
+research share governance, and preserves backward compatibility with existing
+v1 projects. Each Source's immutable `subdir` selects its semantic root inside
+its Git repository; `.` selects the repository root. Multiple Source records can
+represent several repositories or several governed subdirectories, and each Try
+or formal runtime explicitly declares the Source set it uses.
+
+Every canonical Project still has exactly one discovered root at
+`<experiment-git-root>/experiments/PROJECT.md`; “independent” means that this Git
+repository may differ from the Source repositories, not that Project v1 searches
+arbitrary marker paths.
+
+## Research DAG and policy
 
 The linear evidence chain remains valid inside a larger DAG:
 
 ```mermaid
 flowchart LR
-  I0[Idea] --> I1[Follow-up Idea]
+  T[Try] --> I0[Adopted Idea]
+  I0 --> I1[Follow-up Idea]
   I0 --> I2[Alternative Idea]
   I1 --> P1[Plan]
   I2 --> P2[Plan]
@@ -87,222 +128,217 @@ flowchart LR
   EC --> RC[Validated Release]
 ```
 
-Forward edges have one canonical owner. Reverse edges and consolidated trees
-are projections. History is not rewritten when a branch fails, is superseded,
-or becomes an input to a later combination.
+Forward edges have one canonical owner. Reverse edges and consolidated trees are
+projections. History is not rewritten when a branch fails or is superseded.
+Plan v2 dependencies pin both a Finding revision and a belief digest that also
+covers incoming `weakens`/`overturns` edges. New belief-changing evidence can
+therefore stale a Plan and Queue entry without editing the referenced Finding.
 
-Finding dependencies in Plan v2 pin both the Finding revision and a belief
-digest. That digest includes incoming `weakens` and `overturns` edges, so new
-belief-changing evidence makes dependent Plans and Queue entries stale even if
-the target Finding file itself did not change.
+`POLICY.md` defaults to `manual` with an 80/20 exploit/explore allocation.
+`manual` and `shadow` expose frontiers but do not admit work. `assisted` and
+`limited` permit dispatch only after the explicit policy confirmation; the
+current dispatcher otherwise treats them alike. Production Promotion is outside
+this autonomy axis and remains human-only.
 
-Exactly one canonical Queue may own a given ResourcePool/lane partition. This
-keeps each constrained frontier globally ordered instead of letting Queue ID
-ordering starve a higher-value Plan in another Queue.
+A Queue owns ordered `(ResourcePool, lane)` partitions. Exactly one Queue may own
+a given partition, and a Plan occurs at most once project-wide. Ranking combines
+expected utility, information gain, unblock value, risk, pool-hours, and bounded
+aging. Agent listwise advice and order-swapped adjacent battles are recorded;
+abstention, disagreement, low confidence, or a policy tie leaves the incumbent
+order unchanged.
 
-## Policy and autonomy
+## Execution paths
 
-`POLICY.md` is an ID-less singleton. Its default is `manual` and an 80/20
-exploit/explore allocation.
+### Direct Try
 
-| Mode | Frontier visibility | Automatic experiment dispatch |
-|---|---:|---:|
-| `manual` | yes | no |
-| `shadow` | yes | no |
-| `assisted` | yes | yes, after explicit confirmation |
-| `limited` | yes | yes, after explicit confirmation |
+`exp try run` resolves one active Source, captures its exact current state, and
+publishes a Try plus planned Attempt v3 before creating a job or worktree. It
+passes argv directly, never a shell string. The managed workspace is read-only
+unless `--allow` globs authorize Source-subdir-relative changes.
 
-The current dispatcher treats `assisted` and `limited` as dispatch-enabled
-policy modes; downstream deployments may use the distinction for additional
-review conventions. Changing either mode requires
-`--confirm-auto-experiment`. Production Promotion is outside this autonomy
-axis and always remains human-only.
+Clean mode rejects any tracked, untracked, or submodule dirt. Dirty work is never
+implicit: `--dirty=capture` is Try-only and records a bounded SourceSnapshot plus
+a private authenticated seed bundle under the XDG cache. Capture rejects paths
+outside the Source subdir, ambiguous rename/copy state, unsupported index flags,
+dirty or nested submodules, symlinks/non-regular nodes, and hard size/count
+limits. The managed worktree must round-trip to the exact seed before execution
+and before destructive cleanup.
 
-Policy also owns controlled `domain`, `work`, `method`, and `component`
-vocabularies; lane, risk, horizon, origin, cluster saturation thresholds, score
-formula version, and tie behavior. Free discovery labels remain in `tags`.
+The direct job runs locally through the private operational store, not Pueue. A
+lease heartbeat and durable worker-terminal marker make resume conservative:
+`resume` reuses only a provably unstarted Attempt or imports a verified marker;
+it never reruns an uncertain execution. `retry` creates one new Attempt v3 only
+after the latest Attempt is terminal and preserves Source state, cwd, argv, and
+execution Source through `retry_of`. Explicit reconciliation is required to
+abandon an unknown Attempt without terminal evidence.
 
-## Queue admission
+A Try can be concluded or abandoned only after all owned Attempts are terminal.
+Selected result digests must belong to those Attempts. Adoption creates Idea v2
+and the reciprocal Try state in one transaction. Neither clean nor dirty Try
+evidence can directly back a Candidate; a promising dirty Try must be rerun
+through the clean formal path.
 
-A Queue contains ordered partitions identified by `(ResourcePool, lane)`. A
-Plan appears at most once across all Queues and pins the exact normalized Plan
-revision used for ranking.
+### Formal runtime v1 and v2
 
-Transparent scoring estimates:
+`.exp/runtime.json` remains a strict, non-secret, project-local execution
+contract with two separate closed decoders:
 
-```text
-(probability × impact + information gain + unblock value - downside)
---------------------------------------------------------------------- + aging
-                         pool-hours
-```
+- `exp.runtime/v1` is the embedded-repository compatibility contract. It binds a
+  Plan to one repository's `main` or `registered_worktree`, top-level Git
+  base/head/ChangeSet, executable, argv, cwd, environment-name allowlist, and
+  expected outputs; it creates Attempt v2.
+- `exp.runtime/v2` is Source-aware. It names one writable `execution_source` and
+  zero or more `read_only_sources`, each with `main`, `registered_worktree`, or
+  `managed_worktree` checkout, full base/head IDs, exact ChangeSet, and explicit
+  no-change observation when applicable. Cwd and expected outputs are relative
+  to the execution Source's canonical subdir; ChangeSets remain Git-root-relative.
+  It creates Attempt v3.
 
-The ranking layer supports bounded intervals; Plan v2 point estimates enter as
-degenerate intervals. The calculation also uses a small cost floor and a capped
-aging bonus. The score is visible and does not grant an agent mutation
-authority.
+Runtime v2 dispatch requires an exact `runtime.dispatch` trust receipt for the
+raw runtime-file digest. It resolves every canonical Source through its local
+association, loads the execution Source's layered config, captures only clean
+SourceSnapshots, and optionally prepares deterministic managed worktrees. A
+missing, stale, dirty, mismatched, or untrusted Source blocks before scheduler
+submission; recovered outbox work is revalidated and becomes `blocked` rather
+than being optimistically submitted.
 
-Agent-backed insertion has two stages:
+The controller atomically creates Experiment, Run, and Attempt, starts the Plan,
+and removes the exact Queue frontier before private job/outbox creation. It then
+submits an argv-only worker command to Pueue. Runtime v2 supplies the hidden
+worker with explicit `--canonical-root`, `--project`, and checkout-local `--scope`.
+The worker first re-discovers that exact Project, verifies scope and metadata-only
+job authority/fencing, and only then reads the job payload. The v2 payload binds
+Project, canonical scope, execution Source, all private checkout paths, and all
+canonical snapshot digests; non-execution Sources are read-only and are
+reverified after a successful process.
 
-1. one fresh agent ranks the complete partition plus challenger (listwise);
-2. the challenger battles adjacent incumbents twice, with presentation order
-   swapped.
+The worker uses a minimal environment, hashes declared outputs, freezes bounded
+result JSON, and durably publishes its terminal marker before SQLite completion.
+A valid final marker or recoverable `.tmp` marker plus matching frozen result can
+repair interrupted SQLite state without running the workload twice. No missing
+marker, expired lease, or ambiguous scheduler observation proves retry safety.
+The daemon may reconcile Attempt operational state; it never closes an
+Experiment, selects evidence, writes a Finding, creates an Evaluation/Candidate,
+or approves Promotion.
 
-Both judgments must agree above the configured confidence threshold. An
-abstention, disagreement, low confidence, or policy-required tie review records
-the Advice/Battle audit but leaves the Queue unchanged. Stable ties otherwise
-keep the incumbent first.
+## Git workspace and provider boundary
 
-## Execution control plane
+Native Git is the byte and lifecycle authority. Identity-aware branches and XDG
+worktree paths include the complete Project, Source, and owner IDs. Preparation
+pins an exact full commit, revalidates Source Git-common identity, keeps worktrees
+outside registered checkouts, and rejects canonical metadata and paths outside
+the allowlist. Formal agent commit creation is limited to an Experiment owner,
+stages exactly observed allowed paths, and creates one single-parent commit.
 
-`.exp/runtime.json` (`exp.runtime/v1`) is a strict project-local, non-secret
-runtime contract. It binds:
+Native inspection always verifies repository, branch, ancestry, path, metadata,
+and allowlist state. Normal cleanup removes only a clean worktree still at base.
+Dirty Try cleanup may use Git's force removal only after two exact private-seed
+verifications. Cleanup removes the worktree and private seed but deliberately
+retains the branch, commits, operation rows, and terminal markers. Preparation
+markers allow cleanup of only an authenticated incomplete prepare.
 
-- a canonical ResourcePool to a Pueue group and label prefix;
-- a canonical Plan to an absolute executable, exact argument vector, main or
-  registered-worktree checkout selection, repository-relative cwd, timeout,
-  explicitly allowed non-secret environment-variable names, full Git
-  base/head commits, ChangeSet, and expected outputs.
+The workspace registry exposes `native_git` and optional `dev_cli`. Current
+`dev_cli` releases provide no schema-versioned exact-path machine lifecycle
+receipt, so prepare, inspect, cleanup, open, handoff, and retire all fail closed as
+unsupported. A trusted selection may explicitly fall back to `native_git` where
+policy permits. Regardless of the requested provider, native Git owns verification,
+inspection, and cleanup; provider-local catalog/task IDs are never canonical.
 
-The daemon reads canonical frontiers and that runtime contract. `frontier` is a
-local read; `tick` and `run` contact Pueue. The controller:
+## Evaluation, artifacts, and Promotion
 
-1. acquires a project lease with a fencing token;
-2. snapshots Pueue and reconciles known operational Attempts;
-3. recovers due outbox submissions by stable task label without submitting
-   while paused;
-4. stops admission when paused or when policy is manual/shadow;
-5. fills enabled pool capacity in declared units with weighted
-   exploit/explore fairness;
-6. atomically creates Experiment, Run, and Attempt, starts the Plan, and removes
-   the exact Queue frontier;
-7. atomically enqueues and exact-ID claims the private job together with its
-   submission outbox entry, then asks Pueue to enqueue the worker envelope.
+An EvaluationSpec defines the comparable dataset/protocol, metrics, thresholds,
+budget, and purpose. Evaluation v2 is available only for an Experiment subject
+and requires a successful terminal formal Attempt v3 whose Run belongs to that
+Experiment. Candidate v2 requires that Evaluation to bind the same Attempt,
+requires the Experiment conclusion to include the Attempt's Run, rejects every
+dirty snapshot, and copies each Source ID, head commit, and exact ChangeSet.
+Candidate v1 remains a closed legacy path backed by a matching successful Attempt
+v2.
 
-The fairness counter targets Policy shares over time and can borrow unused
-capacity when only one lane is eligible. Named ResourcePools are the hard
-capacity boundary; Queue score does not bypass them.
+MLflow profiles contain a binary name, non-secret context, timeout, environment
+**names and policy only**, and default metric names. Workloads own run creation
+and logging. `exp` performs bounded read-only description; provider absence or an
+unverified optional worker observation does not turn a successful workload into
+a failure. Only exact verified Attempt ownership becomes an ExternalRef. Artifact
+URIs are sanitized identity hints; artifact bytes are never downloaded into
+canonical records or treated as promotion authority.
 
-Before dispatch, the controller verifies the exact Git HEAD, base ancestry,
-committed ChangeSet, and clean executable tree. A registered-worktree runtime
-selects the unique linked worktree at `head_commit` without persisting its host
-path. The private worker checks its fencing token, runs the exact workload argv
-in a minimal environment, verifies and hashes expected outputs, and publishes a
-durable terminal marker before updating SQLite. Replay repairs an interrupted
-SQLite finalize without executing the workload twice. A missing marker or
-ambiguous scheduler state is `unknown`, not proof that retry is safe.
+A Release fills typed slots with Candidates. Multiple distinct Candidates require
+a supported combination Experiment and Evaluation. Promotion uses a separately
+sealed promotion-purpose EvaluationSpec, fresh finite holdout, append-only chain,
+and named human approval. The current Champion and `exp.champion-manifest/v1` or
+Source-aware v3 output are derived views only.
 
-The daemon may reconcile Attempt operational state. It never closes an
-Experiment, chooses evidence disposition, writes a Finding, evaluates a
-Candidate, composes a Release, or approves a Promotion.
+## Storage and recovery boundary
 
-## Git workspace boundary
-
-Experiment code changes use an XDG-managed linked worktree and a branch named
-`exp/<short-id>-<slug>`. Preparation requires a clean source checkout and an
-exact full base commit. Commit validates every changed path against explicit
-allowlist globs, excludes `experiments/` and Git metadata, stages exactly those
-paths, and creates one commit whose parent is the requested base.
-
-The returned ChangeSet includes the base, head, branch, exact paths, and binary
-diff digest. `exp` never merges that branch, removes the worktree, or changes
-the human-owned integration branch.
-
-## Evaluation, Release, and Promotion
-
-EvaluationSpec defines dataset/split identity, protocol, metric directions and
-thresholds, ResourcePool budget, and purpose (`scientific` or `promotion`). An
-Evaluation is an immutable measured outcome for an Experiment, Candidate, or
-Release. Workload-owned MLflow identity can be attached only as a sanitized
-external reference.
-
-A Candidate is eligible only from a supported, concluded Experiment, a passing
-scientific Evaluation, and a successful direct Attempt for an included Run that
-matches the Candidate Git identity and ChangeSet. A Release fills
-target-specific named slots with Candidates. Slot names are project conventions
-rather than model-only types: quantitative work can compose `signal`, `risk`,
-`portfolio`, and `execution`; other projects may use `main` or domain-specific
-names.
-
-More than one Candidate requires an evaluated combination Experiment, because
-independent gains are not assumed additive. A validated Release can challenge
-the incumbent only through a sealed promotion-purpose EvaluationSpec, a bounded
-holdout, and an append-only Promotion with a named human approver. Champion is
-derived independently for each target.
-
-## Storage boundary
-
-Canonical records live at the fixed `<git-root>/experiments` root. IDs in front
-matter are identity; paths are navigation.
+Canonical records live in the selected experiment repository:
 
 ```text
 experiments/
-├── PROJECT.md
-├── POLICY.md
-├── README.md, ROADMAP.md, LEDGER.md, DECISIONS.md
-├── ideas/, plans/, resource-pools/, queues/, queue-advice/, battles/
-├── evaluation-specs/, evaluations/, findings/, decisions/
+├── PROJECT.md, POLICY.md
+├── sources/, ideas/, plans/, resource-pools/, queues/
+├── queue-advice/, battles/, evaluations/, findings/, decisions/
 ├── candidates/, releases/, promotion-specs/, promotions/
-└── e-<short-id>-<slug>/
+├── t-<full-try-uuid>-<slug>/
+│   ├── TRY.md
+│   └── attempts/
+└── e-<prefix>-<slug>/
     ├── REPORT.md
     ├── runs/
     └── attempts/
 ```
 
-All linked worktrees coordinate through the Git common directory:
+All linked worktrees of that experiment clone coordinate through its Git common
+directory. New compound writes use worktree-scoped
+`<git-common-dir>/exp/v1/transactions-v2/` journals with
+`exp.transaction/v2`; the old `transactions/` namespace remains readable under
+strict compatibility rules. V2 includes a path-free worktree identity, so a
+prepared journal is recovered only by its owning worktree. Exact old/new byte
+hashes make recovery roll forward or stop on a third value. Projections are
+regenerated only after canonical commit.
+
+Separate local state includes:
 
 ```text
-<git-common-dir>/exp/
-├── v1/
-│   ├── lock
-│   ├── project-receipt.json
-│   ├── reservations/
-│   ├── transactions/
-│   └── attempts/
-└── runtime/v1/control.sqlite
+$XDG_STATE_HOME/exp/associations/v1.json
+$XDG_STATE_HOME/exp/trust/v1.json
+$XDG_CACHE_HOME/exp/source-seeds/
+$XDG_DATA_HOME/exp/worktrees/
+<experiment-git-common-dir>/exp/runtime/v1/control.sqlite
+<experiment-git-common-dir>/exp/v1/attempts/
 ```
 
-The coordination tree and SQLite database are private local state. They are not
-Git-tracked and cannot establish scientific truth.
+None is Git-backed scientific authority. See
+[Storage and transactions](transactions.md) and
+[Configuration and paths](../reference/configuration.md).
 
-## Transactions and recovery
+## Read-only TUI
 
-Compound canonical changes use `exp.transaction/v1` prepared journals. Under
-the common lock, `exp` validates the complete candidate inventory, reserves new
-IDs, writes and fsyncs exact staged bytes, and publishes the journal before the
-first canonical mutation. Publication is deterministic by path.
+`exp ui` renders Workflow, Workspace, Tries, Queue, Attempts, Candidates, and
+Readiness tabs from immutable sanitized snapshots. Startup reads canonical
+records, associations, config provenance, and an existing operation database in
+read-only mode; it does not create that database. Readiness probing occurs only
+when that tab is explicitly entered/refreshed and performs bounded local probes
+without install, login, service start, workload execution, or canonical writes.
+Generation/identity fences discard stale asynchronous responses. Machine callers
+use the ordinary `--json` commands; `exp ui` itself requires terminal stdin/stdout
+and has no JSON mode.
 
-Recovery rolls forward from exact old/new hashes. A destination already at the
-new hash is accepted; one at the old hash is advanced; any third value stops
-without overwriting the unrelated edit. Mutating operations recover prepared
-journals before building new candidate state, and `exp record recover` exposes
-explicit recovery. Projections are regenerated only after canonical commit.
-See [transactions.md](transactions.md).
-
-## Provider and search boundaries
-
-Pueue and MLflow are the implemented external adapters. Pueue snapshots remove
-captured environment maps recursively before data crosses the adapter boundary.
-Submission accepts only the audited private worker envelope. Explicit cancel
-requires confirmation. MLflow verification is read-only and returns only
-requested metrics/tags from a workload-created run.
-
-The provider-neutral Study contract is implemented as an integration boundary,
-not a concrete Optuna runtime. Search remains inside one exact Plan revision;
-it cannot own queue ordering, scheduling, Findings, Releases, or Promotions.
-See [provider-contract.md](provider-contract.md) and
-[search-adapter-contract.md](search-adapter-contract.md).
-
-## Non-goals
+## Non-goals and remaining limits
 
 The current implementation does not:
 
-- replace Pueue, MLflow, an artifact store, registry, or notebook runtime;
-- infer a scientific verdict from process/scheduler/tracker state;
-- merge experiment branches or deploy a Champion;
-- allow an agent or autonomy mode to approve production Promotion;
-- implement a concrete Optuna adapter, install Python packages, or start a
-  search service;
-- persist raw environments, unbounded logs, secrets, or artifact bytes;
-- provide multiple experiment roots, a cross-repository graph, or a dynamic Go
-  plugin ABI;
+- automatically merge, push, deploy, or roll back a Git branch or Champion;
+- infer scientific validity from process, scheduler, MLflow, or artifact state;
+- permit an agent, autonomy mode, TUI, or provider to approve Promotion;
+- use `dev_cli` lifecycle operations until an exact schema-versioned machine
+  receipt exists; native Git remains prepare/inspect/cleanup authority;
+- provide a large-artifact store, mirror raw telemetry/logs, or persist artifact
+  bytes and raw environments;
+- promote a dirty Try directly—a clean formal rerun and typed Evaluation are
+  required;
+- discover multiple canonical Project roots in one Git repository or create
+  canonical relationships across different Project UUIDs;
+- provide a concrete Optuna runtime, universal cloud scheduler/registry, or
+  dynamic Go plugin ABI;
 - execute legacy harness scripts during migration.

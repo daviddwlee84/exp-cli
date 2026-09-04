@@ -81,8 +81,9 @@ func TestCommandSuccessTreatsClosedResultPipeAsConsumerAbandonment(t *testing.T)
 func TestCommandSuccessPreservesRealWriterErrors(t *testing.T) {
 	sentinel := errors.New("result writer failed")
 	for name, writerErr := range map[string]error{
-		"ordinary error":          sentinel,
-		"joined with closed pipe": errors.Join(io.ErrClosedPipe, sentinel),
+		"ordinary error":                sentinel,
+		"joined with closed pipe":       errors.Join(io.ErrClosedPipe, sentinel),
+		"wrapped join with closed pipe": safeCLIError(errors.Join(io.ErrClosedPipe, sentinel)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			app := NewApp(t.Context(), nil, writerFunc(func([]byte) (int, error) {

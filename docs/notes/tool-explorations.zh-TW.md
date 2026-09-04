@@ -23,16 +23,16 @@ non-canonical。
 | `validated` | 有限結論已重現並連至 evidence；它本身仍不會改變 `exp` 行為。 |
 | `deferred` | 工作已刻意延後，並明確記錄 prerequisite。 |
 
-每份 dated exploration 都應標明觀察到的 tool version 或具名 non-secret context，
-區分 documented behavior 與 direct observation，並以接下來所需的 decision 或
-validation 作結。不可只因 `exp doctor` 找到 binary 就推定已支援該工具：預設的
-doctor 只做本機 executable discovery，目前的 `--live` 也不會接觸 provider。
+每份 dated exploration 應標明 observed tool version 或 named non-secret context，區分 documented
+behavior/direct observation，並以接下來所需 decision/validation 作結。不可只因 `exp doctor` 找到
+binary，或 `doctor --live` parse version，就推定支援工具：default doctor 只 discover executable；
+live 使用 bounded version/read-only local probe，未實作 capability 仍是 unknown/unsupported。
 
 ## Topic backlog
 
 | 工具 | 目前的 `exp` 邊界 | 保留的探索主題 |
 |---|---|---|
-| MLflow | 已實作唯讀的 `exp provider mlflow verify`。Workload 建立並記錄 run；驗證需要明確 run ID、requested metric 或 expected tag、`FINISHED` run，以及 sanitized output。 | 安全的 artifact／registry read surface；tracking/artifact URI redaction；proxy 與 direct artifact access 的區分；Evaluation attachment 與 Attempt lineage；支援的 CLI version 與 bounded failure output。 |
+| MLflow | 已實作 trusted named profile、read-only `provider mlflow verify`、帶 Attempt lineage 的 Evaluation attachment，以及 optional worker observation。Workload 擁有 run creation/logging；只有 selected verified field 跨 boundary。 | URI identity 以外的 safe artifact/registry read surface；proxy/direct artifact access；supported CLI capability probe；更完整 bounded comparison diagnostic。 |
 | Pueue | 已實作 sanitized status、經確認的 exact-task cancel，以及 daemon 提交 private `exp worker run` envelope。Captured environment map 與 raw command string 不會越過 adapter boundary。 | Bounded log access；更完整的 observation/cancellation reconciliation；group 與 dependency semantics；submit-ambiguity recovery；Pueue 4.x compatibility 與 Windows limitation。 |
 | DVC | 只有 binary discovery 與 provider-contract role；尚未實作 DVC operation command。 | Version/capability probe；不 implicit download 的 artifact stat/list；DVC queue read；只有在 effect 與 recovery 都明確後才加入 narrowly scoped write；repository/remote identity redaction。 |
 | Optuna | `exp.search-adapter/v1` 是 provider-neutral、Plan-scoped contract。目前沒有 concrete Optuna adapter、Python environment、storage connection 或 implicit installation。 | 支援的 Optuna/storage version；冪等 (idempotent) `open`/`ask`/`tell`/`prune`/`observe`；timeout-after-commit ambiguity；multi-objective 與 trial-state mapping；secret-reference-only storage；bounded sidecar transport。 |

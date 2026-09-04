@@ -1,124 +1,189 @@
-# Implementation roadmap
+# Implementation Roadmap
 
-The current release is the local research control-plane foundation. Milestones
-below separate delivered behavior from deliberate future integrations. Commands
-are added only when their behavior is functional.
+The current release delivers a Git-native research control plane whose canonical
+experiment repository can be independent from its Source repositories. This page
+separates implemented behavior from remaining integrations and explicit
+non-goals. A command is listed as delivered only when its current code path is
+functional and tested.
 
-## Delivered: canonical research foundation
+## Delivered: canonical research and recovery
 
-- fixed `<git-root>/experiments` discovery and idempotent initialization;
-- strict, versioned Markdown/TOML records with UUID identity, privacy checks,
-  graph validation, deterministic projections, and stable JSON envelopes;
+- fixed `experiments/PROJECT.md` discovery with idempotent Project v1
+  initialization and cross-linked-worktree Project receipt reconciliation;
+- strict Markdown/TOML records, UUID identity, privacy/path checks, graph and
+  lifecycle validation, deterministic revisions/projections, and stable JSON
+  envelopes;
+- Source v1, Try v1, Idea v2, Attempt v3 SourceSnapshots/retry ownership,
+  Evaluation v2 typed Attempt ownership, and Candidate v2 Source identity;
 - linked-worktree ID reservations and Git-common locking;
-- prepared multi-record create/replace/delete transactions with exact-byte
-  journals, hash-checked roll-forward recovery, failure injection, and explicit
-  `record recover`;
-- local `record list/show/transaction`, `validate`, `render`, and `context`.
+- worktree-scoped `exp.transaction/v2` journals in `transactions-v2/`, exact-byte
+  roll-forward recovery, and conditional backward reading of v1 journals;
+- local `record list/show/transaction/recover`, `validate`, `render`, `context`,
+  and exact harness-v0 plan/apply migration.
 
-## Delivered: research queue and agent collaboration
+## Delivered: independent experiment repository and Sources
 
-- explicit `POLICY.md`, default-manual autonomy, controlled classification,
-  cluster saturation data, and 80/20 exploit/explore shares;
-- human or agent Ideas, parent Idea lineage, and atomic qualification into
-  resource-priced Plan v2 records;
-- named ResourcePools and ordered pool/lane Queue partitions;
-- transparent expected-value scoring, global listwise advice, order-swapped
-  adjacent pairwise battles, immutable audit records, and human-review fallback;
-- fresh single-shot agent CLI profiles with strict JSON Schema output,
-  environment allowlists, secret references, bounded output, and no SDK session.
+- dedicated private experiment repository as the guided initialization default,
+  including safe adoption or explicit creation of a missing/empty Git target;
+- no implicit remote, commit, submodule, or push during dedicated initialization;
+- embedded/monorepo initialization retained for shared governance and legacy v1
+  compatibility;
+- ordinary canonical Git Source records with project-unique key, immutable
+  subdir, sanitized locator history, active/retired lifecycle, and exact CAS
+  updates;
+- multiple Sources per Project and Source-aware Experiment workspace commands;
+- private `exp.associations/v1` Project/Source mappings with clone/Git-common
+  filesystem identity and locator revalidation;
+- deterministic explicit/current-Project/most-specific-Source resolution with
+  ambiguity and staleness reported rather than guessed;
+- XDG user/state/cache/data paths with no host paths in canonical Source records.
 
-## Delivered: local execution control plane
+## Delivered: layered config, trust, and profiles
 
-- strict `.exp/runtime.json` bindings from Pools/Plans to Pueue groups and exact
-  workload argv/Git identity;
-- local frontier inspection, one-shot daemon tick, continuous daemon loop,
-  pause/resume, lease fencing, weighted fairness, and outbox recovery;
-- SQLite operational state under the Git common directory, never canonical;
-- sanitized Pueue status, audited private-worker submission, explicit cancel;
-- durable worker terminal markers and replay-safe completion;
-- isolated XDG Git worktrees and exact allowlisted experiment auto-commits,
-  without merge or cleanup authority;
-- read-only MLflow run verification; workloads own run creation and logging.
+- strict `exp.config/v1` hierarchy: built-ins, XDG user, canonical repository,
+  Source root, then Source-subdir root-to-leaf files;
+- documented scalar/array/backend/profile merge rules, combined digest, per-leaf
+  provenance, and applied-layer audit;
+- private `exp.trust/v1` receipts bound to exact bytes, capability, Project/
+  Source/config scope, Git-common path, and filesystem identity;
+- `config path/show/explain/trust/revoke/list`, including historical revocation
+  and sanitized output;
+- workspace backend profiles with `native_git` as mandatory correctness baseline;
+- named MLflow profiles with binary/context/timeout/default metrics and
+  environment names/policy only; explicit compatibility flags remain available;
+- exact `runtime.dispatch` trust for runtime v2, separate from layered config.
 
-## Delivered: scientific closure and production boundary
+## Delivered: bounded Try workflow
 
-- atomic Experiment closure, Plan completion, evidence dispositions, and
-  Finding publication;
-- revision-aware belief dependencies and stale-queue detection;
-- immutable EvaluationSpecs and Evaluations;
-- Candidate creation from supported evidence with full Git commit/ChangeSet;
-- typed Release slots and mandatory evaluated combination evidence for
-  multi-Candidate Releases;
-- sealed promotion-purpose evaluation, append-only human Promotion chains, and
-  derived Champion manifests.
+- `try run` publishes Try plus planned Attempt v3 before operational execution;
+- direct argv execution in deterministic native Git worktrees with empty-by-default
+  change allowlist and bounded timeout;
+- clean capture or explicit Try-only `--dirty=capture` with full tracked patch,
+  bounded untracked bytes, clean direct submodules, canonical dirty/snapshot
+  digests, and private authenticated `exp.source-seed/v1` bundle;
+- workspace preparation marker recovery and byte-exact seed round-trip checks;
+- private lease/fencing job execution, heartbeat, bounded result file, redacted
+  v2 streams, and durable terminal/result markers;
+- conservative resume, marker/SQLite repair, explicit unknown reconciliation,
+  one-successor retry lineage with unchanged Source/config/argv identity;
+- human conclusion/abandonment, result ownership checks, atomic adoption as Idea
+  v2, status, and partial-safe cleanup;
+- native cleanup of verified clean or exactly seeded worktrees plus private seed,
+  while retaining branch, commit, markers, operation rows, and canonical records.
 
-## Delivered: compatibility and extension contracts
+## Delivered: Source-aware formal runtime
 
-- explicit harness-v0 migration plan/apply with exact-byte archive,
-  deterministic UUIDv5 identities, reviewed ambiguity resolutions, fingerprint
-  revalidation, and recoverable root swap;
-- provider-neutral `exp.search-adapter/v1` contract for idempotent Plan-scoped
-  Study open/ask/tell/prune/observe;
-- version-matched embedded skill and generated command reference;
-- repository-local Go 1.26.4 pin through `mise.toml`.
+- closed `exp.runtime/v1` retained for embedded Attempt v2/worker v1 dispatch;
+- separate strict `exp.runtime/v2` with one writable execution Source, multiple
+  read-only Sources, `main`/`registered_worktree`/`managed_worktree` selection,
+  explicit observational no-change, and Source-subdir-relative cwd/outputs;
+- exact clean SourceSnapshot capture for every Source and formal Attempt v3;
+- cross-repository canonical-before-operational creation of Experiment, Run,
+  Attempt, Plan transition, and Queue removal;
+- outbox submission revalidation that marks an unstarted job/Attempt blocked if
+  Source authority disappears instead of submitting optimistically;
+- worker-job/terminal/result v2 with explicit canonical root, Project UUID,
+  checkout-local scope, metadata-only pre-payload authorization, fencing, private
+  checkout identity, and post-success read-only Source verification;
+- durable marker temporary promotion and database-independent replay without
+  rerunning the workload;
+- clean formal Candidate gate through Evaluation v2 and Candidate v2.
 
-## Next: harden unattended operation
+## Delivered: research queue, closure, and promotion
 
-Priority work should improve recovery and observability without weakening the
-authority model:
+- default-manual Policy, controlled classification, cluster saturation, and
+  80/20 exploit/explore allocation;
+- Ideas, qualified resource-priced Plan v2 records, named ResourcePools, and
+  globally unique ordered pool/lane Queue partitions;
+- transparent scoring, listwise advice, order-swapped pairwise battles,
+  immutable audit records, and human-review fallback;
+- daemon frontier/tick/run/pause/resume, project lease fencing, weighted
+  fairness, Pueue outbox recovery, sanitized status, and ownership-checked cancel;
+- Experiment design locking/amendments/closure, explicit Run evidence
+  dispositions, Findings and belief-staleness propagation;
+- EvaluationSpecs/Evaluations, Candidate v1 compatibility and Candidate v2,
+  typed Release slots, mandatory combination evidence, sealed promotion holdout,
+  append-only human Promotion chains, and Champion manifest v1/v3.
 
-- long-running daemon soak and crash tests around Pueue submit ambiguity,
-  expired job leases, worker interruption, and provider restart;
-- clearer bounded event/audit inspection for SQLite operations and outbox state;
-- policy-level semantic distinction between `assisted` and `limited` beyond the
-  shared explicit dispatch gate;
-- richer queue saturation and budget-consumption feedback from completed work;
-- first-class follow-up and combination Experiment creation, including a
-  supported path from an agent-prepared exact commit into a new executable
-  Plan/Attempt instead of hand-authored canonical records;
-- explicit holdout-budget consumption accounting and immutable Release
-  supersession ergonomics;
-- migration fixtures from more real harness-v0 layouts;
-- runtime Windows support only after process-tree and SQLite behavior is tested;
-  AIX remains an explicit operational-store non-support target.
+## Delivered: provider and UI boundaries
 
-## Next: concrete Plan-scoped search
+- provider registry/discovery with bounded local probes and sanitized readiness;
+- Pueue scheduling/control within its declared capabilities;
+- read-only MLflow verification, exact Attempt ownership, selected metrics/tags,
+  sanitized artifact URI, and optional worker observation that does not change
+  workload success when unavailable;
+- provider-neutral `exp.search-adapter/v1` interface contract (no concrete search
+  backend yet);
+- workspace-provider registry with requested/actual/fallback reporting;
+- `exp ui` read-only Workflow, Workspace, Tries, Queue, Attempts, Candidates, and
+  Readiness tabs; cancellable generation-fenced reads, read-only SQLite open, and
+  explicit bounded probes only;
+- version-matched embedded skill and generated command reference.
 
-Implement an Optuna adapter only after the integration can prove:
+## Remaining: unattended-operation hardening
 
-1. supported Optuna/storage versions and safe capability probes;
-2. durable idempotency for `open`, `ask`, `tell`, and `prune`;
-3. recovery for timeout-after-provider-commit ambiguity;
-4. secret-reference-only storage configuration;
-5. multi-objective and trial-state mapping;
-6. bounded, structurally sanitized observations.
+Priority hardening can improve observability without expanding authority:
 
-Optuna remains subordinate to one Plan revision. It will not replace the global
-Queue or allocate ResourcePools.
+- longer daemon/worker soak and crash tests around Pueue submit ambiguity,
+  expired leases, provider restart, marker/result publication, and outbox repair;
+- clearer bounded event/audit inspection and budget-consumption reporting;
+- policy semantics that distinguish `assisted` from `limited` beyond the shared
+  explicit dispatch gate;
+- first-class ergonomic creation of follow-up/combination Experiments without
+  weakening the existing typed gates;
+- explicit holdout-budget consumption accounting and Release supersession
+  ergonomics;
+- additional real harness-v0 migration fixtures;
+- broader runtime/process-tree verification on Windows; AIX deliberately keeps
+  only canonical Git operations and reports the operational store unsupported.
 
-## Later provider capabilities
+## Remaining: optional workspace provider
 
-Add external operations one verified capability at a time:
+`dev_cli` is discoverable but **all lifecycle capabilities fail closed** today:
+prepare, inspect, cleanup, open, handoff, and retire are compiled unsupported.
+There is no public schema-versioned, content-free capability response or exact
+native-path machine receipt with verifiable occupancy. Human help/version/catalog
+output is not authorization.
 
-- richer Pueue observation/cancellation reconciliation and bounded logs;
-- MLflow artifact/registry reads only where the CLI has a stable safe surface;
-- DVC artifact and queue reads, then narrowly scoped writes;
-- named-site Slurm probes and scheduling with explicit environment export;
-- notebook runners as workload entrypoints, not durable schedulers.
+Until such a contract exists:
 
-Every new mutation must declare effects, preserve argument boundaries, expose
-reviewable identity, and avoid implicit installation, authentication, daemon
-startup, or artifact download.
+- no lifecycle `dev` subprocess is invoked;
+- trusted selection may report an explicit fallback to `native_git`;
+- native Git owns prepare, byte verification, inspect, cleanup, and retire;
+- provider-local task/catalog/worktree IDs are never canonical authority.
 
-## Explicitly deferred
+A future capability can be enabled only after it returns an exact machine receipt
+and native postconditions prove that the requested worktree was acted upon.
 
-- automatic production deployment or rollback execution;
-- agent-approved Promotion;
-- a universal cloud scheduler or model registry abstraction;
-- W&B, Kaggle, Ray, Kubernetes, Azure ML, Databricks, Modal, RunPod, or generic
-  browser-session control;
-- multiple `experiments/` roots in one repository or cross-repository graphs;
-- dynamic Go plugins, a mandatory FTS index, or a TUI;
-- raw telemetry/log mirroring and artifact-byte storage;
-- assuming gains from independent Candidates combine without a dedicated
-  Experiment and Evaluation.
+## Remaining: concrete Plan-scoped search and providers
+
+The provider-neutral Study contract exists, but no concrete Optuna runtime does.
+A future adapter must prove version/capability support, durable idempotency,
+timeout-after-provider-commit recovery, secret-reference-only storage config,
+trial-state mapping, and bounded sanitized observation. It remains subordinate
+to one exact Plan revision and cannot replace Queue/ResourcePool authority.
+
+Additional Pueue observations, MLflow registry/artifact reads, DVC, Slurm, and
+notebook entrypoints remain capability-by-capability work. Each must declare
+effects, preserve argv boundaries, avoid implicit installation/login/service
+start/download, and keep provider state non-canonical unless explicitly imported.
+
+## Explicit non-goals and true limits
+
+The current scope does not provide:
+
+- automatic Git merge, push, rebase, branch deletion, production deploy, or
+  rollback execution;
+- agent-, provider-, autonomy-, manifest-, or TUI-approved Promotion;
+- a large artifact store, raw telemetry/log mirror, artifact-byte persistence,
+  or automatic artifact/model download;
+- direct Candidate/Promotion from a Try—especially a dirty Try; a clean formal
+  rerun, typed Evaluation v2, and Candidate v2 are required;
+- multiple canonical Project roots in one Git repository or canonical relations
+  across different Project UUIDs (multiple external Sources inside one Project
+  are delivered);
+- a universal cloud scheduler/model registry, generic browser-session control,
+  or dynamic Go plugin ABI;
+- automatic scientific verdicts from process, scheduler, tracker, commit, or
+  artifact state;
+- execution of legacy harness scripts during migration.

@@ -54,16 +54,78 @@ func (view *inventoryView) readme() string {
 	fmt.Fprintf(&output, "\n# %s\n\n", project.Name)
 	fmt.Fprintf(&output, "Project `%s`\n\n", project.ProjectID)
 	output.WriteString("## Inventory\n\n")
-	output.WriteString("| Plans | Experiments | Runs | Attempts | Findings | Decisions |\n")
-	output.WriteString("|---:|---:|---:|---:|---:|---:|\n")
-	fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d |\n",
-		len(view.inventory.OfKind(research.KindPlan)),
-		len(view.inventory.OfKind(research.KindExperiment)),
-		len(view.inventory.OfKind(research.KindRun)),
-		len(view.inventory.OfKind(research.KindAttempt)),
-		len(view.inventory.OfKind(research.KindFinding)),
-		len(view.inventory.OfKind(research.KindDecision)),
-	)
+	sourceCount := len(view.inventory.OfKind(research.KindSource))
+	tryCount := len(view.inventory.OfKind(research.KindTry))
+	switch {
+	case sourceCount == 0 && tryCount == 0:
+		output.WriteString("| Plans | Experiments | Runs | Attempts | Findings | Decisions |\n")
+		output.WriteString("|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d |\n",
+			len(view.inventory.OfKind(research.KindPlan)),
+			len(view.inventory.OfKind(research.KindExperiment)),
+			len(view.inventory.OfKind(research.KindRun)),
+			len(view.inventory.OfKind(research.KindAttempt)),
+			len(view.inventory.OfKind(research.KindFinding)),
+			len(view.inventory.OfKind(research.KindDecision)),
+		)
+	case sourceCount > 0 && tryCount == 0:
+		output.WriteString("| Sources | Plans | Experiments | Runs | Attempts | Findings | Decisions |\n")
+		output.WriteString("|---:|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d | %d |\n",
+			sourceCount,
+			len(view.inventory.OfKind(research.KindPlan)),
+			len(view.inventory.OfKind(research.KindExperiment)),
+			len(view.inventory.OfKind(research.KindRun)),
+			len(view.inventory.OfKind(research.KindAttempt)),
+			len(view.inventory.OfKind(research.KindFinding)),
+			len(view.inventory.OfKind(research.KindDecision)),
+		)
+	case sourceCount == 0:
+		output.WriteString("| Tries | Plans | Experiments | Runs | Attempts | Findings | Decisions |\n")
+		output.WriteString("|---:|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d | %d |\n",
+			tryCount,
+			len(view.inventory.OfKind(research.KindPlan)),
+			len(view.inventory.OfKind(research.KindExperiment)),
+			len(view.inventory.OfKind(research.KindRun)),
+			len(view.inventory.OfKind(research.KindAttempt)),
+			len(view.inventory.OfKind(research.KindFinding)),
+			len(view.inventory.OfKind(research.KindDecision)),
+		)
+	default:
+		output.WriteString("| Sources | Tries | Plans | Experiments | Runs | Attempts | Findings | Decisions |\n")
+		output.WriteString("|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&output, "| %d | %d | %d | %d | %d | %d | %d | %d |\n",
+			sourceCount, tryCount,
+			len(view.inventory.OfKind(research.KindPlan)),
+			len(view.inventory.OfKind(research.KindExperiment)),
+			len(view.inventory.OfKind(research.KindRun)),
+			len(view.inventory.OfKind(research.KindAttempt)),
+			len(view.inventory.OfKind(research.KindFinding)),
+			len(view.inventory.OfKind(research.KindDecision)),
+		)
+	}
+	if sourceCount > 0 {
+		output.WriteString("\n## Sources\n\n")
+		output.WriteString("| Source | Key | State | Subdir | Title |\n")
+		output.WriteString("|---|---|---|---|---|\n")
+		for _, document := range view.documents(research.KindSource) {
+			source := document.Record.(*research.Source)
+			fmt.Fprintf(&output, "| [%s](%s) | %s | %s | %s | %s |\n",
+				view.codes[source.ID], document.Path, tableCell(source.Key), tableCell(string(source.State)),
+				tableCell(source.Subdir), tableCell(source.Title))
+		}
+	}
+	if tryCount > 0 {
+		output.WriteString("\n## Tries\n\n")
+		output.WriteString("| Try | State | Goal | Title |\n")
+		output.WriteString("|---|---|---|---|\n")
+		for _, document := range view.documents(research.KindTry) {
+			try := document.Record.(*research.Try)
+			fmt.Fprintf(&output, "| [%s](%s) | %s | %s | %s |\n",
+				view.codes[try.ID], document.Path, tableCell(string(try.State)), tableCell(try.Goal), tableCell(try.Title))
+		}
+	}
 	controlKinds := []research.Kind{
 		research.KindIdea, research.KindResourcePool, research.KindQueue,
 		research.KindQueueAdvice, research.KindBattle, research.KindEvaluationSpec,
@@ -126,6 +188,8 @@ func (view *inventoryView) readme() string {
 	output.WriteString("\n## Research graph\n\n")
 	output.WriteString("```mermaid\nflowchart LR\n")
 	for _, kind := range []research.Kind{
+		research.KindSource,
+		research.KindTry,
 		research.KindIdea,
 		research.KindResourcePool,
 		research.KindQueue,
@@ -335,6 +399,13 @@ func (view *inventoryView) graphEdges() []graphEdge {
 		seen[key] = struct{}{}
 		edges = append(edges, graphEdge{from: from, to: to})
 	}
+	for _, document := range view.documents(research.KindTry) {
+		try := document.Record.(*research.Try)
+		for _, source := range sortedIDs(try.Sources) {
+			add(source, try.ID)
+		}
+		add(try.ID, try.AdoptedIdea)
+	}
 	for _, document := range view.documents(research.KindIdea) {
 		idea := document.Record.(*research.Idea)
 		for _, parent := range sortedIDs(idea.Parents) {
@@ -384,6 +455,7 @@ func (view *inventoryView) graphEdges() []graphEdge {
 	for _, document := range view.documents(research.KindAttempt) {
 		attempt := document.Record.(*research.Attempt)
 		add(attempt.Run, attempt.ID)
+		add(attempt.Try, attempt.ID)
 	}
 	for _, document := range view.documents(research.KindExperiment) {
 		experiment := document.Record.(*research.Experiment)
@@ -576,6 +648,10 @@ func planStateHeading(value research.PlanState) string {
 
 func graphKind(kind research.Kind) string {
 	switch kind {
+	case research.KindSource:
+		return "Source"
+	case research.KindTry:
+		return "Try"
 	case research.KindIdea:
 		return "Idea"
 	case research.KindResourcePool:

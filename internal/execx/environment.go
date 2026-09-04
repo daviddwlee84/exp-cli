@@ -21,6 +21,7 @@ type Binding struct {
 	source     string
 	sensitive  bool
 	fromSource bool
+	required   bool
 }
 
 // Bind adds a non-secret literal environment value. Names that look
@@ -36,17 +37,25 @@ func BindSecret(name, value string) Binding {
 	return Binding{name: name, value: value, sensitive: true}
 }
 
-// BindSecretFromEnv resolves source at invoke time and binds it to name in the
-// child. Neither the source value nor its name is exposed by plan rendering.
+// BindFromEnv resolves source at invoke time and binds it to name in the child.
+// Neither the source value nor its name is exposed by plan rendering. Sensitive
+// bindings contribute their resolved values to subprocess-output redaction.
+func BindFromEnv(name, source string, sensitive, required bool) Binding {
+	return Binding{name: name, source: source, sensitive: sensitive, fromSource: true, required: required}
+}
+
+// BindSecretFromEnv retains the original required-secret compatibility contract.
 func BindSecretFromEnv(name, source string) Binding {
-	return Binding{name: name, source: source, sensitive: true, fromSource: true}
+	return BindFromEnv(name, source, true, true)
 }
 
 // Name returns the child-process environment variable name.
 func (b Binding) Name() string { return b.name }
 
 // Sensitive reports whether the binding value must never be rendered.
-func (b Binding) Sensitive() bool { return b.sensitive || SensitiveName(b.name) }
+func (b Binding) Sensitive() bool {
+	return b.sensitive || SensitiveName(b.name) || b.fromSource && SensitiveName(b.source)
+}
 
 // String intentionally omits the value and secret source.
 func (b Binding) String() string {
@@ -143,6 +152,41 @@ func (e Environment) Variables() []EnvironmentVariable {
 // MarshalJSON emits only variable names and sensitivity metadata.
 func (e Environment) MarshalJSON() ([]byte, error) { return json.Marshal(e.Variables()) }
 
+// Freeze resolves the environment exactly once and returns an equivalent
+// literal-backed Environment plus its matching redactor. Values remain private
+// fields, so neither result can expose them through formatting or JSON.
+func (e Environment) Freeze(lookup LookupEnv) (Environment, Redactor, error) {
+	entries, secrets, err := e.resolve(lookup)
+	if err != nil {
+		return Environment{}, NewRedactor(), err
+	}
+	sensitive := make(map[string]bool, len(e.Variables()))
+	for _, variable := range e.Variables() {
+		sensitive[variable.Name] = variable.Sensitive
+	}
+	bindings := make([]Binding, 0, len(entries))
+	for _, entry := range entries {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			return Environment{}, NewRedactor(), fmt.Errorf("resolved environment entry is invalid")
+		}
+		bindings = append(bindings, Binding{name: name, value: value, sensitive: sensitive[name]})
+	}
+	frozen, err := NewEnvironment([]string{}, bindings...)
+	if err != nil {
+		return Environment{}, NewRedactor(), err
+	}
+	return frozen, NewRedactor(secrets...), nil
+}
+
+// Redactor resolves the environment through lookup and returns only a redactor
+// carrying sensitive values. Prefer Freeze when the environment will also be
+// invoked, so resolution and redaction use one snapshot.
+func (e Environment) Redactor(lookup LookupEnv) (Redactor, error) {
+	_, redactor, err := e.Freeze(lookup)
+	return redactor, err
+}
+
 // String emits only stable metadata.
 func (e Environment) String() string {
 	parts := make([]string, 0, len(e.Variables()))
@@ -182,11 +226,13 @@ func (e Environment) validate() error {
 		seenBindings[binding.name] = struct{}{}
 		if binding.fromSource {
 			if !validEnvironmentName(binding.source) {
-				return fmt.Errorf("invalid secret environment source name")
+				return fmt.Errorf("invalid environment source name")
 			}
 			if binding.value != "" {
-				return fmt.Errorf("secret environment reference also contains a literal value")
+				return fmt.Errorf("environment reference also contains a literal value")
 			}
+		} else if binding.required {
+			return fmt.Errorf("literal environment binding cannot be conditionally required")
 		} else if !utf8.ValidString(binding.value) {
 			return fmt.Errorf("environment value is not valid UTF-8")
 		} else if strings.IndexByte(binding.value, 0) >= 0 {
@@ -236,7 +282,10 @@ func (e Environment) resolve(lookup LookupEnv) ([]string, []string, error) {
 			var ok bool
 			value, ok = lookup(binding.source)
 			if !ok {
-				return nil, nil, fmt.Errorf("required secret environment source is not set")
+				if binding.required {
+					return nil, nil, fmt.Errorf("required environment source is not set")
+				}
+				continue
 			}
 		}
 		if !utf8.ValidString(value) {

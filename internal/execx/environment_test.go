@@ -45,6 +45,37 @@ func TestEnvironmentMetadataIsStableAndValueFree(t *testing.T) {
 	}
 }
 
+func TestEnvironmentFreezeUsesOneValueSnapshotForInvocationAndRedaction(t *testing.T) {
+	const first = "freeze-secret-first-52ac"
+	const second = "freeze-secret-second-11bf"
+	environment, err := execx.MinimalEnvironment(execx.BindFromEnv("CHILD_VALUE", "PARENT_VALUE", true, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookups := 0
+	frozen, redactor, err := environment.Freeze(func(name string) (string, bool) {
+		if name != "PARENT_VALUE" {
+			return "", false
+		}
+		lookups++
+		if lookups == 1 {
+			return first, true
+		}
+		return second, true
+	})
+	if err != nil || lookups != 1 {
+		t.Fatalf("Freeze() lookups=%d err=%v", lookups, err)
+	}
+	for _, rendered := range []string{frozen.String(), fmt.Sprintf("%#v", frozen), mustJSON(t, frozen)} {
+		if strings.Contains(rendered, first) || strings.Contains(rendered, second) || strings.Contains(rendered, "PARENT_VALUE") {
+			t.Fatalf("frozen environment exposed private material: %q", rendered)
+		}
+	}
+	if safe := redactor.Text("before=" + first + " after=" + second); strings.Contains(safe, first) || !strings.Contains(safe, second) {
+		t.Fatalf("redactor did not bind exactly the frozen snapshot: %q", safe)
+	}
+}
+
 func TestEnvironmentValidationRejectsAmbiguousPolicy(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string

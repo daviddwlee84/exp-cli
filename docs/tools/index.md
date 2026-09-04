@@ -13,11 +13,13 @@ operation is implemented.
 
 | Tool or component | Status | What works today | Authority boundary |
 |---|---|---|---|
-| [Git and linked worktrees](git-worktrees.md) | Implemented integration | Prepare an isolated experiment branch/worktree and commit an exact allowlisted change set | Git owns code history and integration |
+| [Git and linked worktrees](git-worktrees.md) | Implemented integration | Source-aware isolated worktrees, exact allowlisted formal commits, clean runtime snapshots, bounded dirty Try seeding, native inspection, and verified Try cleanup | Native Git owns bytes and lifecycle; humans own integration/merge/push |
+| Workspace backends | Native implemented; `dev_cli` fail-closed | Requested/actual/fallback reporting and bounded discovery; native prepare/inspect/cleanup/retire | No optional lifecycle action is authorized without an exact machine receipt |
 | [Pueue](pueue.md) | Implemented integration | Sanitized status, identity-checked cancellation, and daemon submission through the private worker envelope | Pueue owns live task and group state |
-| [MLflow](mlflow.md) | Implemented read-only integration | Verify requested metrics and tags on one workload-created run, then attach a sanitized identity to an Evaluation | The workload and MLflow own run creation, telemetry, artifacts, and registry state |
-| [Agent CLI profiles](agent-cli-profiles.md) | Implemented integration | Validate local profiles and run a fresh schema-constrained CLI process | The configured executable owns any external provider interaction; `exp` persists no session and agent output remains advisory |
-| Direct worker and SQLite control state | Internal implementation | Execute an exact workload envelope; coordinate leases, jobs, fencing, outbox recovery, and fairness | Private operational state is never scientific authority |
+| [MLflow](mlflow.md) | Implemented read-only integration | Trusted named profiles, selected metric/tag verification, exact Attempt ownership, Evaluation attachment, and optional worker observation | The workload and MLflow own run creation, telemetry, artifacts, and registry state |
+| [Agent CLI profiles](agent-cli-profiles.md) | Implemented integration | Validate separate `exp.agents/v1` profiles and run a fresh schema-constrained CLI process | The configured executable owns external interaction; `exp` persists no session and agent output remains advisory |
+| Direct worker and SQLite control state | Internal implementation | V1/v2 exact workload envelopes, explicit v2 Project/scope authority, durable marker replay, leases, jobs, fencing, outbox, and fairness | Private operational state is never scientific authority |
+| `exp ui` | Implemented read-only TUI | Immutable local research views, read-only operation database, and explicit bounded readiness probes | No key mutates, trusts, executes, installs, logs in, starts a service, opens an editor, or hands off |
 | [DVC and Slurm](planned-integrations.md) | Discovery/contract only | Local executable discovery and compiled capability metadata | No DVC or Slurm operation is integrated |
 | [Marimo and Jupyter](planned-integrations.md) | Discovery/contract only | Local executable discovery and Runner descriptor metadata | No notebook inspection or execution is integrated |
 | [Optuna-like search](planned-integrations.md) | Contract only | Provider-neutral `exp.search-adapter/v1` types and invariants | No concrete Optuna runtime, package installation, or service contact is included |
@@ -29,12 +31,13 @@ exp doctor
 exp doctor --json
 ```
 
-`doctor` performs executable lookup only. It does not run third-party
-`--version` commands, contact a daemon or network, authenticate, install a
-package, or start a service. Versions and capability support therefore remain
-`unknown` unless a specific operation verifies them. The current `--live` flag
-reports that live probing is not implemented and still performs only local
-discovery.
+By default, `doctor` performs executable lookup only. It does not run
+third-party commands, contact a daemon or network, authenticate, install a
+package, or start a service, so versions/capabilities remain unverified.
+`doctor --live` is an explicit exception: it runs bounded provider-specific
+version and read-only local service probes plus workspace-backend probes. It
+still performs no login, installation, config write, service start, workload,
+or canonical mutation; unsupported capabilities remain unsupported.
 
 Provider contact is always operation-specific. Today that means Pueue
 status/cancel, MLflow verify, or daemon `tick`/`run`; local record commands and

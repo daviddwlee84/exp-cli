@@ -82,8 +82,17 @@ func (a *App) WriteJSON(envelope Envelope) error {
 	return encoder.Encode(envelope)
 }
 
-// WriteHuman renders only human-oriented text to stdout.
+// WriteHuman writes exact human or canonical bytes to stdout. It deliberately
+// performs no styling so raw records, manifests, and embedded Markdown remain
+// byte-stable even when --color=always is selected.
 func (a *App) WriteHuman(text string) error {
 	_, err := io.WriteString(a.Out, text)
+	return err
+}
+
+// WriteStyledHuman is the terminal presentation path. The caller supplies text
+// only after safeHumanOutput; semantic ANSI is added here by trusted code.
+func (a *App) WriteStyledHuman(safeText string) error {
+	_, err := io.WriteString(a.Out, renderSemanticHuman(safeText, a.outStyle()))
 	return err
 }

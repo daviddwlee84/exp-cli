@@ -176,7 +176,7 @@ func atomicWriteRoot(rootHandle *os.Root, canonicalRoot, relative string, data [
 	if err := verifyRoots(); err != nil {
 		return publicationError(StageTempCreate, false, err)
 	}
-	if err := temporary.Chmod(mode); err != nil {
+	if err := pathx.ProtectPrivateOpenFile(temporary, mode); err != nil {
 		return publicationError(StageTempCreate, false, err)
 	}
 	if err := runAtomicHook(options.Hook, StageTempWrite, relative); err != nil {

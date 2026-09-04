@@ -12,10 +12,13 @@
 
 ```mermaid
 flowchart LR
-  I[人類或 agent Idea] --> P[已確認資格的 Plan]
+  S[Source] --> T[Bounded Try]
+  T -->|human adoption| I[人類或 agent Idea]
+  S --> A
+  I --> P[已確認資格的 Plan]
   P --> Q[Pool x lane Queue]
-  Q --> A[Attempt]
-  A --> E[Evaluation]
+  Q --> A[Clean formal Attempt]
+  A --> E[Typed Evaluation]
   E --> F[Finding]
   F --> I
   E --> C[Candidate]
@@ -40,21 +43,23 @@ Policy 以 `manual` 模式建立。`manual` 與 `shadow` 會揭露規範前緣
 `--confirm-auto-experiment` 確認後，才會啟用 Experiment 派送。Promotion 是另一道獨立的權限邊界，
 在所有模式中都仍然只能由人類執行。
 
-其餘新增項目使用具型別的 UUIDv7 ID：
+新增項目使用 typed UUIDv7 ID：
 
-| 記錄 | 權威範圍 |
+| Record | Authority |
 |---|---|
-| Idea | 人類／agent 提案、資格狀態、來源、叢集及父級 Ideas |
-| ResourcePool | 有界的瓶頸、容量、單位及選用成本 |
-| Queue | 依 ResourcePool 與 exploit/explore lane 分區並排序的 Plan 項目 |
-| QueueAdvice | 針對某一 Queue revision 的不可變 listwise 排名建議 |
-| Battle | 不可變的順序交換 pairwise 比較與信心程度 |
-| EvaluationSpec | 指標、方向、protocol、資源預算及選用 seal |
-| Evaluation | Experiment、Candidate 或 Release 的不可變量測結果 |
-| Candidate | 已評估的 Experiment 結果、Git identity、ChangeSet 及父級 candidates |
-| Release | 目標，以及由 Candidates 填入的具型別 slots |
-| PromotionSpec | 密封的 holdout protocol 與強制的人類核准政策 |
-| Promotion | 連結至上一筆 Promotion、僅可附加的 challenger/incumbent 決策 |
+| Source | Project-local Git identity、immutable subdir、sanitized locator、lifecycle |
+| Try | Bounded goal、declared Sources、human conclusion/abandonment/adoption |
+| Idea | Human/agent proposal、qualification state、origin、cluster、parent Ideas；v2 可有 `origin_try` |
+| ResourcePool | Bounded bottleneck、capacity、unit、optional cost |
+| Queue | 依 ResourcePool/exploit-explore lane partition 的 ordered Plan entries |
+| QueueAdvice | 針對 exact Queue revision 的 immutable listwise ranking suggestion |
+| Battle | Immutable order-swapped pairwise comparison/confidence |
+| EvaluationSpec | Metric、direction、protocol、resource budget、optional seal |
+| Evaluation | Immutable measured outcome；v2 對 Experiment subject 額外擁有一個 formal Attempt |
+| Candidate | Evaluated Experiment result/parents；v2 pins clean formal Attempt/Source commits/paths |
+| Release | Target 加由 Candidates 填入的 typed slots |
+| PromotionSpec | Sealed holdout protocol 與 mandatory human approval policy |
+| Promotion | Link previous Promotion 的 append-only challenger/incumbent decision |
 
 自由形式的探索標籤仍保留在 `tags` 中。Queue policy 使用受控的 `domain`、`work`、
 `method`、`component`、`lane`、`risk`、`horizon` 與 `origin` 分類欄位，外加一個主要叢集。
@@ -85,23 +90,29 @@ Queue Advice 是 listwise 且暫定的。插入時可再與相鄰的現有項目
 
 ## 執行與評估
 
-Experiment v2 新增 replication、sweep 與 combination 設計、多父級 lineage，以及 combination experiments 的明確
-Candidate inputs。Attempt v2 新增 ResourcePool、Queue revision、lane、dispatch identity、Git base/head commits，
-以及精確的 ChangeSet。V1 Plan、Experiment 與 Attempt 檔案繼續使用其精確的封閉解碼器 (closed decoder)；
-若 v1 schema 宣稱含有任何僅限 v2 的欄位，就會遭拒。
+Experiment v2 新增 replication、sweep、combination design、multi-parent lineage 與 explicit Candidate
+inputs。Attempt v2 是 closed legacy formal dispatch shape，含 Pool/Queue/lane/dispatch identity 與
+top-level Git base/head/ChangeSet。Attempt v3 改為恰好擁有一個 Run 或 Try，並帶 execution Source
+與 sorted SourceSnapshots；formal dispatch fields 全有或全無，只有 Try-owned v3 可 dirty/use
+`retry_of`。每個 older schema 都保留 exact closed decoder。
 
-`.exp/runtime.json` 將規範的 Pool 與 Plan identities 綁定至 Pueue group、穩定的 label namespace、
-精確的 workload argv、環境變數名稱，以及完整的 Git base/head/ChangeSet。它是操作設定，不是規範記錄。
-同一個 Pueue group 內的 Pool label prefixes 彼此無前綴關係 (prefix-free)，且選定的設定路徑會從 Experiment
-ChangeSets 中排除。Git verification 涵蓋已排隊的工作及執行中的 prepared Attempts，而非已過時的 terminal Plan 項目。
-daemon 使用私有 SQLite lease、fencing tokens、jobs、fairness counters 與 outbox；Pueue 仍是即時 task state 的權威來源。
-worker 會凍結一份有界結果，並在更新 SQLite 前發布其 terminal marker，讓 replay 能回傳持久結果，
-而不用重新執行 workload。即使 SQLite 透過 Git-common 共用，dispatch IDs、labels、outbox recovery 與 marker names
-仍包含 canonical-worktree scope。
+`.exp/runtime.json` 是 operational config，不是 canonical record。Runtime v1 保留 embedded
+Pool/Plan/Pueue/Git contract。Runtime v2 要求 exact `runtime.dispatch` trust，透過 host-local
+association 解析 canonical Sources，把一個 writable 與 optional read-only Sources 綁到 explicit
+checkouts，且只 capture clean SourceSnapshots。Pool label prefix 仍 prefix-free，environment array
+只含 names，Pueue secret environment array 必須 empty。
 
-會編輯程式碼的 agents 使用位於精確 base 的專用 linked worktree。`exp` 只提交觀察到且位於 allowlist 中的路徑，
-並回傳 base/head 與 diff digest。它絕不合併 Experiment branch、移除 worktree，或授予 agent 整合權限。
-該 commit 是準備工作，不是證據；Candidate 仍需要 Included Run 有一次成功的 direct Attempt，且 head 與 ChangeSet 完全相同。
+Daemon 使用 private SQLite lease、fencing、job、fairness、outbox；Pueue 擁有 live task。
+Worker-job v2 經 explicit canonical root、Project UUID、checkout-local scope invocation；worker 先
+驗證 metadata authority 再讀 payload，之後驗證 private checkout/snapshot identity。它 freeze
+bounded result，並在 SQLite 前 publish durable v2 terminal marker；valid marker（包括 recoverable
+temporary 加 exact frozen result）可 replay 而不重跑。Missing evidence 保持 unknown/blocked。
+
+Code-editing agent 使用位於 exact clean base 的 Source-aware linked worktree。`exp` 只 commit observed
+allowlisted path，絕不 merge/push 或授予 integration authority。Dirty Try 可使用 private bounded
+seed/native verified cleanup，但不能支持 Candidate。Candidate v2 要求 included Run 的 successful
+clean formal Attempt v3、綁定同一 Attempt 的 Evaluation v2，並從其 snapshots 精確複製 Source
+IDs/head commits/ChangeSets。
 
 Optuna 或其他 search backend 可在單一 Plan 內擁有 ask/tell trials 與 pruning。它不擁有全域 Idea queue、
 跨 Plan 資源分配、Findings、Releases 或 Promotions。
@@ -126,6 +137,7 @@ rollback 只能還原被目前 champion-setting 項目取代的 incumbent。現�
 
 ```text
 POLICY.md
+sources/
 ideas/
 resource-pools/
 queues/
@@ -139,4 +151,6 @@ promotion-specs/
 promotions/
 ```
 
-既有的 Plan、Experiment、Run、Attempt、Finding 與 Decision 路徑維持不變。
+Try record 使用 `t-<full-uuid-hex>-<slug>/TRY.md`，owned Attempts 位於下層 `attempts/`。
+既有 Plan、Experiment、Run、Attempt、Finding、Decision paths 不變。Source recognition 只保留
+exact canonical filename，因此 unrelated legacy `sources` content 不會 reinterpret。

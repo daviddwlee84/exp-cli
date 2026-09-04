@@ -14,10 +14,10 @@ import (
 )
 
 type migratePlanOptions struct {
-	source      string
-	resolutions string
-	output      string
-	json        bool
+	legacySource string
+	resolutions  string
+	output       string
+	json         bool
 }
 
 type migrateApplyOptions struct {
@@ -53,7 +53,7 @@ func newMigratePlanCommand(app *App, rootOptions *rootOptions) *cobra.Command {
 			return runMigratePlan(command, app, rootOptions, options)
 		},
 	}
-	command.Flags().StringVar(&options.source, "source", "experiments", "set the Git-root-relative harness-v0 source directory")
+	command.Flags().StringVar(&options.legacySource, "legacy-source", "", "set the Git-root-relative harness-v0 source directory (--source remains a compatibility alias here)")
 	command.Flags().StringVar(&options.resolutions, "resolutions", "", "read explicit needs_review resolutions from JSON PATH or -")
 	command.Flags().StringVar(&options.output, "output", "", "write the complete no-clobber plan to PATH or - for raw stdout")
 	command.Flags().BoolVar(&options.json, "json", false, jsonFlagUsage)
@@ -77,6 +77,20 @@ func newMigrateApplyCommand(app *App, rootOptions *rootOptions) *cobra.Command {
 }
 
 func runMigratePlan(command *cobra.Command, app *App, rootOptions *rootOptions, options *migratePlanOptions) error {
+	if strings.TrimSpace(rootOptions.workspace) != "" {
+		return commandFailure(app, options.json, "migrate plan", struct{}{}, false, nil, errors.New("migrate plan does not accept --workspace; migration always targets the invocation Git repository"))
+	}
+	legacySource := strings.TrimSpace(options.legacySource)
+	compatibilitySource := strings.TrimSpace(rootOptions.source)
+	if legacySource != "" && compatibilitySource != "" {
+		return commandFailure(app, options.json, "migrate plan", struct{}{}, false, nil, errors.New("use only one of --legacy-source or the migrate-plan compatibility alias --source"))
+	}
+	if legacySource == "" {
+		legacySource = compatibilitySource
+	}
+	if legacySource == "" {
+		legacySource = "experiments"
+	}
 	if options.output == "-" && options.json {
 		return commandFailure(app, true, "migrate plan", struct{}{}, false, nil, fmt.Errorf("--output - and --json cannot be combined"))
 	}
@@ -84,7 +98,7 @@ func runMigratePlan(command *cobra.Command, app *App, rootOptions *rootOptions, 
 	if err != nil {
 		return commandFailure(app, options.json, "migrate plan", struct{}{}, false, nil, err)
 	}
-	repository, err := gitx.Discover(command.Context(), start)
+	repository, err := gitx.DiscoverWithRunner(command.Context(), start, app.GitRunner)
 	if err != nil {
 		return commandFailure(app, options.json, "migrate plan", struct{}{}, false, nil, err)
 	}
@@ -103,7 +117,7 @@ func runMigratePlan(command *cobra.Command, app *App, rootOptions *rootOptions, 
 		}
 	}
 	plan, err := harnessv0.BuildPlan(command.Context(), harnessv0.BuildRequest{
-		RepositoryRoot: repository.Root, SourceRoot: options.source,
+		RepositoryRoot: repository.Root, SourceRoot: legacySource,
 		GeneratedAt: app.clock(), Resolutions: resolutions,
 	})
 	if err != nil {
@@ -135,6 +149,9 @@ func runMigratePlan(command *cobra.Command, app *App, rootOptions *rootOptions, 
 }
 
 func runMigrateApply(command *cobra.Command, app *App, rootOptions *rootOptions, options *migrateApplyOptions) error {
+	if strings.TrimSpace(rootOptions.workspace) != "" || strings.TrimSpace(rootOptions.source) != "" {
+		return commandFailure(app, options.json, "migrate apply", struct{}{}, false, nil, errors.New("migrate apply does not accept --workspace or --source; migration always targets the invocation Git repository"))
+	}
 	reader, closeReader, err := migrationInput(command, options.plan)
 	if err != nil {
 		return commandFailure(app, options.json, "migrate apply", struct{}{}, false, nil, err)
@@ -150,7 +167,7 @@ func runMigrateApply(command *cobra.Command, app *App, rootOptions *rootOptions,
 	if err != nil {
 		return commandFailure(app, options.json, "migrate apply", struct{}{}, false, nil, err)
 	}
-	repository, err := gitx.Discover(command.Context(), start)
+	repository, err := gitx.DiscoverWithRunner(command.Context(), start, app.GitRunner)
 	if err != nil {
 		return commandFailure(app, options.json, "migrate apply", struct{}{}, false, nil, err)
 	}

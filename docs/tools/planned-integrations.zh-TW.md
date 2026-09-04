@@ -16,13 +16,16 @@ exp doctor --json
 exp doctor --live
 ```
 
-Compiled provider registry 知道 candidate binary names、roles 與 capability names。
-`doctor` 只使用類似 `LookPath` 的本機 discovery。它不會叫用 `--version`、聯絡 provider、
-進行 authentication、安裝任何項目，或確認 capability support。目前 `--live` 只會增加
-一則資訊性 diagnostic，不會執行額外 probe。
+Compiled provider registry 知道 candidate binary name、role、capability name。Default `doctor`
+只做 local `LookPath`-style discovery；不 invocation tool，也不確認 capability support。Explicit
+`doctor --live` 對每個 discovered provider 執行 bounded `--version` probe；有實作時再執行
+read-only local service probe（目前為 Pueue status），並檢查 workspace-backend readiness。它不
+login、install、寫 config、start service、執行 workload 或 canonical mutation。
 
-因此，即使 provider 顯示為 `found`，其所有 capabilities 仍可能是 `unknown`。只有專用且
-經過審查的操作，才能針對其實際執行的 contract 判定 `supported` 或 `unsupported`。
+對 planned DVC、Slurm、Marimo、Jupyter entry，即使 version 可 parse，也不授權 operation；
+capability support 維持 `unknown`。`dev_cli` workspace lifecycle 因缺少 required exact-path
+machine receipt，statically `unsupported`。只有 dedicated reviewed operation contract 才能針對實際
+exercise 的 capability 建立 support。
 
 ## 目前的規劃清單
 

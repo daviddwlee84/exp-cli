@@ -12,6 +12,7 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
+	"github.com/daviddwlee84/exp-cli/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -52,8 +53,11 @@ type recordTransactionRequest struct {
 }
 
 type recordTransactionData struct {
-	TransactionID string                `json:"transaction_id"`
-	Records       []canonicalRecordView `json:"records"`
+	TransactionID    string                         `json:"transaction_id"`
+	State            record.TransactionState        `json:"state,omitempty"`
+	RecoveryRequired bool                           `json:"recovery_required"`
+	Paths            []record.TransactionPathResult `json:"paths"`
+	Records          []canonicalRecordView          `json:"records"`
 }
 
 func newRecordCommand(app *App, root *rootOptions) *cobra.Command {
@@ -167,14 +171,14 @@ func runRecordShow(command *cobra.Command, app *App, root *rootOptions, options 
 	if err != nil {
 		return commandFailure(app, options.json, "record show", struct{}{}, false, nil, err)
 	}
-	if options.raw {
-		return app.WriteHuman(string(encoded))
+	if options.raw || !options.json {
+		return successfulOutputError(app.WriteHuman(string(encoded)))
 	}
 	data := struct {
 		Record   canonicalRecordView `json:"record"`
 		Document string              `json:"document"`
 	}{Record: canonicalView(document), Document: string(encoded)}
-	return commandSuccess(app, options.json, "record show", data, false, nil, string(encoded))
+	return commandSuccess(app, true, "record show", data, false, nil, "")
 }
 
 func runRecordTransaction(command *cobra.Command, app *App, root *rootOptions, options *recordOptions) error {
@@ -199,19 +203,31 @@ func runRecordTransaction(command *cobra.Command, app *App, root *rootOptions, o
 		changes = append(changes, converted)
 	}
 	result, err := store.Transact(command.Context(), record.TransactionRequest{Operation: request.Operation, Changes: changes})
+	data := makeRecordTransactionData(result)
 	if err != nil {
-		return commandFailure(app, options.json, "record transaction", recordTransactionData{Records: []canonicalRecordView{}}, false, nil, err)
-	}
-	data := recordTransactionData{TransactionID: result.TransactionID, Records: []canonicalRecordView{}}
-	for _, document := range result.Documents {
-		data.Records = append(data.Records, canonicalView(document))
+		return commandFailure(app, options.json, "record transaction", data, result != nil, transactionFailureDiagnostics(result), err)
 	}
 	human := fmt.Sprintf("Applied canonical transaction %s (%d published record(s)).\n", data.TransactionID, len(data.Records))
 	return commandSuccess(app, options.json, "record transaction", data, false, refreshAfterTransaction(command, app, info, store), human)
 }
 
+func makeRecordTransactionData(result *record.TransactionResult) recordTransactionData {
+	data := recordTransactionData{Paths: []record.TransactionPathResult{}, Records: []canonicalRecordView{}}
+	if result == nil {
+		return data
+	}
+	data.TransactionID = result.TransactionID
+	data.State = result.State
+	data.RecoveryRequired = result.RecoveryRequired
+	data.Paths = append(data.Paths, result.Paths...)
+	for _, document := range result.Documents {
+		data.Records = append(data.Records, canonicalView(document))
+	}
+	return data
+}
+
 func runRecordRecover(command *cobra.Command, app *App, root *rootOptions, options *recordOptions) error {
-	_, store, err := openTransactionalStore(command, app, root)
+	_, store, err := openRecoveryTransactionalStore(command, app, root)
 	if err == nil {
 		err = store.Recover(command.Context())
 	}
@@ -222,16 +238,27 @@ func runRecordRecover(command *cobra.Command, app *App, root *rootOptions, optio
 }
 
 func openTransactionalStore(command *cobra.Command, app *App, root *rootOptions) (*project.Info, TransactionalRecordStore, error) {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	info, err := resolveProjectInfo(command, app, root)
 	if err != nil {
 		return nil, nil, err
 	}
 	store, err := app.NewTransactionalStore(info)
 	return info, store, err
+}
+
+func openRecoveryTransactionalStore(command *cobra.Command, app *App, root *rootOptions) (*project.Info, TransactionalRecordStore, error) {
+	start, err := app.startDir(root.startDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, err := app.ResolveWorkspace.Resolve(command.Context(), workspace.ResolveRequest{
+		InvocationDir: start, Workspace: root.workspace, Source: root.source, SkipConfig: true,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := app.NewTransactionalStore(resolved.Project)
+	return resolved.Project, store, err
 }
 
 func decodeRecordTransactionRequest(content []byte) (recordTransactionRequest, error) {

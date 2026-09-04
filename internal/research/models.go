@@ -44,6 +44,40 @@ func (*Project) GetID() (ID, bool)           { return ID{}, false }
 func (*Project) GetCommon() *Common          { return nil }
 func (p *Project) GetExtensions() Extensions { return p.Extensions }
 
+// SourceKind identifies the authority that owns source bytes. Source v1 is
+// deliberately limited to Git repositories.
+type SourceKind string
+
+const SourceGit SourceKind = "git"
+
+// SourceState records whether a binding may be selected for new work. Retired
+// Sources remain canonical history and may still be resolved by identity.
+type SourceState string
+
+const (
+	SourceActive  SourceState = "active"
+	SourceRetired SourceState = "retired"
+)
+
+// Source binds one project-local name to a Git repository and immutable subdir.
+// LocatorHints are sanitized remote hints, never identity or local checkout paths.
+type Source struct {
+	Common
+	Key          string      `toml:"key"`
+	Kind         SourceKind  `toml:"kind"`
+	Subdir       string      `toml:"subdir"`
+	LocatorHints []string    `toml:"locator_hints"`
+	State        SourceState `toml:"state"`
+	RetiredAt    *time.Time  `toml:"retired_at,omitempty"`
+	Extensions   Extensions  `toml:"extensions,omitempty"`
+}
+
+func (s *Source) GetSchema() Schema         { return s.Schema }
+func (*Source) GetKind() Kind               { return KindSource }
+func (s *Source) GetID() (ID, bool)         { return s.ID, !s.ID.IsZero() }
+func (s *Source) GetCommon() *Common        { return &s.Common }
+func (s *Source) GetExtensions() Extensions { return s.Extensions }
+
 type Priority string
 
 const (
@@ -120,6 +154,60 @@ func (*Plan) GetKind() Kind               { return KindPlan }
 func (p *Plan) GetID() (ID, bool)         { return p.ID, !p.ID.IsZero() }
 func (p *Plan) GetCommon() *Common        { return &p.Common }
 func (p *Plan) GetExtensions() Extensions { return p.Extensions }
+
+// TryState is the short evidence-gathering lifecycle. A Try is intentionally
+// distinct from a formal Experiment and can never directly back a Candidate.
+type TryState string
+
+const (
+	TryOpen      TryState = "open"
+	TryConcluded TryState = "concluded"
+	TryAbandoned TryState = "abandoned"
+	TryAdopted   TryState = "adopted"
+)
+
+const (
+	MaxTryGoalBytes               = 16 << 10
+	MaxTryConclusionSummaryBytes  = 32 << 10
+	MaxTryResultDigests           = 64
+	MaxTryConclusionExternalRefs  = 64
+	MaxTryAbandonmentReasonBytes  = 32 << 10
+	MaxSourceSnapshotSummaryBytes = 32 << 10
+)
+
+// TryConclusion is a human-authored selection of bounded results. Digests are
+// content identities, not paths; ExternalRefs use the ordinary sanitized form.
+type TryConclusion struct {
+	ConcludedAt   time.Time     `toml:"concluded_at"`
+	Summary       string        `toml:"summary"`
+	ResultDigests []string      `toml:"result_digests,omitempty"`
+	ExternalRefs  []ExternalRef `toml:"external_refs,omitempty"`
+}
+
+// TryAbandonment records the explicit human reason for ending an open Try.
+type TryAbandonment struct {
+	AbandonedAt time.Time `toml:"abandoned_at"`
+	Reason      string    `toml:"reason"`
+}
+
+// Try owns exploratory Attempts under its canonical directory. Sources is the
+// complete declared Source set available to those Attempts.
+type Try struct {
+	Common
+	State       TryState        `toml:"state"`
+	Goal        string          `toml:"goal"`
+	Sources     []ID            `toml:"sources"`
+	Conclusion  *TryConclusion  `toml:"conclusion,omitempty"`
+	Abandonment *TryAbandonment `toml:"abandonment,omitempty"`
+	AdoptedIdea ID              `toml:"adopted_idea,omitempty"`
+	Extensions  Extensions      `toml:"extensions,omitempty"`
+}
+
+func (t *Try) GetSchema() Schema         { return t.Schema }
+func (*Try) GetKind() Kind               { return KindTry }
+func (t *Try) GetID() (ID, bool)         { return t.ID, !t.ID.IsZero() }
+func (t *Try) GetCommon() *Common        { return &t.Common }
+func (t *Try) GetExtensions() Extensions { return t.Extensions }
 
 type ExperimentLifecycle string
 
@@ -359,27 +447,66 @@ type Terminal struct {
 	Signal     string     `toml:"signal,omitempty"`
 }
 
+// GitObjectFormat identifies the object-ID algorithm used by one Source.
+type GitObjectFormat string
+
+const (
+	GitObjectSHA1   GitObjectFormat = "sha1"
+	GitObjectSHA256 GitObjectFormat = "sha256"
+)
+
+// SourceSnapshotState distinguishes promotion-eligible committed state from a
+// bounded dirty capture. Dirty snapshots are legal only for Try-owned Attempts.
+type SourceSnapshotState string
+
+const (
+	SourceSnapshotClean SourceSnapshotState = "clean"
+	SourceSnapshotDirty SourceSnapshotState = "dirty"
+)
+
+// SourceSnapshot is the deterministic, host-path-free Git identity captured for
+// one Source at Attempt registration. Digest covers every field except itself.
+type SourceSnapshot struct {
+	Source          ID                  `toml:"source"`
+	Subdir          string              `toml:"subdir"`
+	PolicyVersion   string              `toml:"policy_version"`
+	CapturedAt      time.Time           `toml:"captured_at"`
+	GitObjectFormat GitObjectFormat     `toml:"git_object_format"`
+	BaseCommit      string              `toml:"base_commit"`
+	HeadCommit      string              `toml:"head_commit"`
+	ChangeSet       []string            `toml:"change_set"`
+	State           SourceSnapshotState `toml:"state"`
+	DirtyDigest     string              `toml:"dirty_digest,omitempty"`
+	DirtySummary    string              `toml:"dirty_summary,omitempty"`
+	Digest          string              `toml:"digest"`
+	Reproducibility Reproducibility     `toml:"reproducibility"`
+}
+
 type Attempt struct {
 	Common
-	Run           ID            `toml:"run"`
-	State         AttemptState  `toml:"state"`
-	StateReason   string        `toml:"state_reason,omitempty"`
-	Runner        string        `toml:"runner"`
-	Scheduler     string        `toml:"scheduler"`
-	CWD           string        `toml:"cwd"`
-	Argv          []string      `toml:"argv"`
-	ExternalRefs  []ExternalRef `toml:"external_refs,omitempty"`
-	Provenance    *Provenance   `toml:"provenance,omitempty"`
-	Terminal      *Terminal     `toml:"terminal,omitempty"`
-	Pool          ID            `toml:"pool,omitempty"`
-	Queue         ID            `toml:"queue,omitempty"`
-	QueueRevision uint64        `toml:"queue_revision,omitempty"`
-	Lane          ResearchLane  `toml:"lane,omitempty"`
-	DispatchID    string        `toml:"dispatch_id,omitempty"`
-	BaseCommit    string        `toml:"base_commit,omitempty"`
-	HeadCommit    string        `toml:"head_commit,omitempty"`
-	ChangeSet     []string      `toml:"change_set,omitempty"`
-	Extensions    Extensions    `toml:"extensions,omitempty"`
+	Run             ID               `toml:"run,omitempty"`
+	Try             ID               `toml:"try,omitempty"`
+	RetryOf         ID               `toml:"retry_of,omitempty"`
+	State           AttemptState     `toml:"state"`
+	StateReason     string           `toml:"state_reason,omitempty"`
+	Runner          string           `toml:"runner"`
+	Scheduler       string           `toml:"scheduler"`
+	CWD             string           `toml:"cwd"`
+	Argv            []string         `toml:"argv"`
+	ExecutionSource ID               `toml:"execution_source"`
+	SourceSnapshots []SourceSnapshot `toml:"source_snapshots"`
+	ExternalRefs    []ExternalRef    `toml:"external_refs,omitempty"`
+	Provenance      *Provenance      `toml:"provenance,omitempty"`
+	Terminal        *Terminal        `toml:"terminal,omitempty"`
+	Pool            ID               `toml:"pool,omitempty"`
+	Queue           ID               `toml:"queue,omitempty"`
+	QueueRevision   uint64           `toml:"queue_revision,omitempty"`
+	Lane            ResearchLane     `toml:"lane,omitempty"`
+	DispatchID      string           `toml:"dispatch_id,omitempty"`
+	BaseCommit      string           `toml:"base_commit,omitempty"`
+	HeadCommit      string           `toml:"head_commit,omitempty"`
+	ChangeSet       []string         `toml:"change_set,omitempty"`
+	Extensions      Extensions       `toml:"extensions,omitempty"`
 }
 
 func (a *Attempt) GetSchema() Schema         { return a.Schema }

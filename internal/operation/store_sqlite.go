@@ -85,13 +85,100 @@ func Open(ctx context.Context, gitCommonDir string, opts ...Option) (*Store, err
 		_ = database.Close()
 		return nil, fmt.Errorf("operational database identity changed during open")
 	}
-	if err := os.Chmod(databasePath, 0o600); err != nil {
-		_ = database.Close()
-		return nil, fmt.Errorf("protect operational database: %w", err)
-	}
 	if err := store.migrate(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
+	}
+	return store, nil
+}
+
+// OpenReadOnly opens an existing, current-schema operational database without
+// creating directories, changing permissions, migrating schema, or enabling a
+// writable SQLite transaction. It is intended for status surfaces such as the
+// read-only TUI; callers must treat a missing database as uninitialized state.
+func OpenReadOnly(ctx context.Context, gitCommonDir string, opts ...Option) (*Store, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if gitCommonDir == "" || !filepath.IsAbs(gitCommonDir) {
+		return nil, errors.New("Git common directory must be absolute")
+	}
+	canonical, err := pathx.Canonical(gitCommonDir)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize Git common directory: %w", err)
+	}
+	root, err := pathx.OpenCanonicalRootNoSymlinks(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("open Git common directory: %w", err)
+	}
+	defer root.Close()
+	for _, relative := range []string{"exp", "exp/runtime", "exp/runtime/v1"} {
+		info, statErr := root.Lstat(relative)
+		if statErr != nil {
+			return nil, fmt.Errorf("inspect operational directory %s: %w", relative, statErr)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("operational directory %s is not a real directory", relative)
+		}
+	}
+	identity, err := root.Lstat(operationalRelative)
+	if err != nil {
+		return nil, fmt.Errorf("inspect operational database: %w", err)
+	}
+	if identity.Mode()&os.ModeSymlink != 0 || !identity.Mode().IsRegular() {
+		return nil, errors.New("operational database is not a regular non-symlink file")
+	}
+	runtimeRoot, err := pathx.OpenRootAtNoSymlinks(root, "exp/runtime/v1")
+	if err != nil {
+		return nil, fmt.Errorf("open operational directory read-only: %w", err)
+	}
+	if _, err := pathx.CheckPrivateRoot(runtimeRoot, 0o700, "operational directory"); err != nil {
+		_ = runtimeRoot.Close()
+		return nil, err
+	}
+	checked, err := pathx.CheckPrivateFile(runtimeRoot, "control.sqlite", 0o600, "operational database")
+	_ = runtimeRoot.Close()
+	if err != nil || !os.SameFile(identity, checked) {
+		return nil, fmt.Errorf("operational database is not private: %w", err)
+	}
+
+	config := options{clock: time.Now}
+	for _, option := range opts {
+		if option != nil {
+			option(&config)
+		}
+	}
+	if config.clock == nil {
+		config.clock = time.Now
+	}
+	databasePath := filepath.Join(canonical, filepath.FromSlash(operationalRelative))
+	database, err := sql.Open("sqlite3", readOnlySQLiteDSN(databasePath))
+	if err != nil {
+		return nil, fmt.Errorf("open operational database read-only: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	store := &Store{db: database, path: databasePath, clock: config.clock}
+	if err := database.PingContext(ctx); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("ping operational database read-only: %w", err)
+	}
+	current, statErr := root.Lstat(operationalRelative)
+	if statErr != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(identity, current) {
+		_ = database.Close()
+		return nil, errors.New("operational database identity changed during read-only open")
+	}
+	var version int
+	if err := database.QueryRowContext(ctx, `SELECT version FROM schema_meta WHERE id=1`).Scan(&version); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("read operational schema version: %w", err)
+	}
+	if version != SchemaVersion {
+		_ = database.Close()
+		return nil, fmt.Errorf("operational schema version %d cannot be read without migration; expected %d", version, SchemaVersion)
 	}
 	return store, nil
 }
@@ -122,6 +209,18 @@ func sqliteDSN(path string) string {
 	return value.String()
 }
 
+func readOnlySQLiteDSN(path string) string {
+	value := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	query := value.Query()
+	query.Set("mode", "ro")
+	query.Set("_txlock", "deferred")
+	query.Add("_pragma", "busy_timeout(10000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "query_only(1)")
+	value.RawQuery = query.Encode()
+	return value.String()
+}
+
 func prepareOperationalDatabase(gitCommon string) (string, fs.FileInfo, error) {
 	root, err := pathx.OpenCanonicalRootNoSymlinks(gitCommon)
 	if err != nil {
@@ -133,16 +232,26 @@ func prepareOperationalDatabase(gitCommon string) (string, fs.FileInfo, error) {
 		return "", nil, fmt.Errorf("create operational directory: %w", err)
 	}
 	defer directory.Close()
+	if err := pathx.ProtectPrivateRoot(directory, 0o700); err != nil {
+		return "", nil, fmt.Errorf("protect operational directory: %w", err)
+	}
 	for _, relative := range []string{"exp", "exp/runtime", "exp/runtime/v1"} {
 		info, statErr := root.Lstat(relative)
-		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return "", nil, fmt.Errorf("operational directory %s is not a real directory: %w", relative, statErr)
+		if statErr != nil {
+			return "", nil, fmt.Errorf("inspect operational directory %s: %w", relative, statErr)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", nil, fmt.Errorf("operational directory %s is not a real directory", relative)
 		}
 		if chmodErr := root.Chmod(relative, 0o700); chmodErr != nil {
 			return "", nil, fmt.Errorf("protect operational directory %s: %w", relative, chmodErr)
 		}
 	}
 	if file, openErr := directory.OpenFile("control.sqlite", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); openErr == nil {
+		if protectErr := pathx.ProtectPrivateOpenFile(file, 0o600); protectErr != nil {
+			_ = file.Close()
+			return "", nil, protectErr
+		}
 		if closeErr := file.Close(); closeErr != nil {
 			return "", nil, closeErr
 		}
@@ -153,10 +262,17 @@ func prepareOperationalDatabase(gitCommon string) (string, fs.FileInfo, error) {
 		return "", nil, fmt.Errorf("create operational database: %w", openErr)
 	}
 	identity, err := directory.Lstat("control.sqlite")
-	if err != nil || identity.Mode()&os.ModeSymlink != 0 || !identity.Mode().IsRegular() {
-		return "", nil, fmt.Errorf("operational database is not a regular non-symlink file: %w", err)
+	if err != nil {
+		return "", nil, fmt.Errorf("inspect operational database: %w", err)
 	}
-	if err := os.Chmod(filepath.Join(gitCommon, filepath.FromSlash(operationalRelative)), 0o600); err != nil {
+	if identity.Mode()&os.ModeSymlink != 0 || !identity.Mode().IsRegular() {
+		return "", nil, errors.New("operational database is not a regular non-symlink file")
+	}
+	file, err := directory.OpenFile("control.sqlite", os.O_RDWR, 0)
+	if err != nil {
+		return "", nil, fmt.Errorf("open operational database for protection: %w", err)
+	}
+	if err := errors.Join(pathx.ProtectPrivateOpenFile(file, 0o600), file.Close()); err != nil {
 		return "", nil, fmt.Errorf("protect operational database: %w", err)
 	}
 	return filepath.Join(gitCommon, filepath.FromSlash(operationalRelative)), identity, nil
@@ -690,6 +806,34 @@ func (store *Store) ClaimJobByID(ctx context.Context, id, holder string, ttl tim
 	return job, nil
 }
 
+// RenewJobClaim extends one exact running job claim without changing its fencing
+// token. A stale token, holder, or terminal state is always fenced.
+func (store *Store) RenewJobClaim(ctx context.Context, id string, token int64, holder string, ttl time.Duration) (Job, error) {
+	if err := validateIdentifier("job id", id); err != nil {
+		return Job{}, err
+	}
+	if token <= 0 {
+		return Job{}, errors.New("job fencing token must be positive")
+	}
+	if err := validateIdentifier("holder", holder); err != nil {
+		return Job{}, err
+	}
+	if ttl <= 0 {
+		return Job{}, errors.New("job lease ttl must be positive")
+	}
+	now := utc(store.clock())
+	expires := utc(now.Add(ttl))
+	result, err := store.db.ExecContext(ctx, `UPDATE jobs SET lease_expires_at=?, updated_at=?
+		WHERE id=? AND fencing_token=? AND claimed_by=? AND state=?`, formatTime(expires), formatTime(now), id, token, holder, JobRunning)
+	if err != nil {
+		return Job{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return Job{}, ErrFenced
+	}
+	return jobByIDQuery(ctx, store.db, id)
+}
+
 // PrepareSubmission atomically enqueues and claims one exact job and publishes
 // its outbox intent. There is no durable state in which a claimed job lacks the
 // scheduler intent needed for crash recovery.
@@ -821,12 +965,40 @@ func (store *Store) FinishJob(ctx context.Context, id string, token int64, state
 }
 
 func (store *Store) SetJobExternalRefs(ctx context.Context, id string, token int64, pueueTaskID *int64, mlflowRunID string) error {
-	result, err := store.db.ExecContext(ctx, `UPDATE jobs SET pueue_task_id=?, mlflow_run_id=?, updated_at=? WHERE id=? AND fencing_token=?`,
-		pueueTaskID, mlflowRunID, formatTime(utc(store.clock())), id, token)
+	if err := validateIdentifier("job id", id); err != nil {
+		return err
+	}
+	if pueueTaskID != nil && *pueueTaskID < 0 {
+		return errors.New("Pueue task id cannot be negative")
+	}
+	if err := validateMLflowRunID(mlflowRunID); err != nil {
+		return err
+	}
+	var taskValue any
+	if pueueTaskID != nil {
+		taskValue = *pueueTaskID
+	}
+	// Omitted values preserve the existing binding. A non-empty binding may fill
+	// an empty column or replay the exact value, but can never replace a different
+	// scheduler/worker identity. The predicates and fence are one atomic statement,
+	// so either race ordering converges without a stale writer clearing its peer.
+	result, err := store.db.ExecContext(ctx, `UPDATE jobs SET
+		pueue_task_id=CASE WHEN ? IS NULL THEN pueue_task_id ELSE ? END,
+		mlflow_run_id=CASE WHEN ?='' THEN mlflow_run_id ELSE ? END,
+		updated_at=?
+		WHERE id=? AND fencing_token=?
+		AND (? IS NULL OR pueue_task_id IS NULL OR pueue_task_id=?)
+		AND (?='' OR mlflow_run_id='' OR mlflow_run_id=?)`,
+		taskValue, taskValue, mlflowRunID, mlflowRunID, formatTime(utc(store.clock())), id, token,
+		taskValue, taskValue, mlflowRunID, mlflowRunID)
 	if err != nil {
 		return err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
+		existing, lookupErr := jobByIDQuery(ctx, store.db, id)
+		if lookupErr == nil && existing.FencingToken == token {
+			return ErrConflict
+		}
 		return ErrFenced
 	}
 	return nil
@@ -864,6 +1036,41 @@ func (store *Store) ListJobs(ctx context.Context, states ...JobState) ([]Job, er
 		jobs = []Job{}
 	}
 	return jobs, rows.Err()
+}
+
+// ListJobSummaries reads only payload-free fields needed by local status views.
+func (store *Store) ListJobSummaries(ctx context.Context) ([]JobSummary, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT id,subject_id,state,fencing_token,lease_expires_at,updated_at FROM jobs ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	summaries := make([]JobSummary, 0)
+	for rows.Next() {
+		var summary JobSummary
+		var lease, updated sql.NullString
+		if err := rows.Scan(&summary.ID, &summary.SubjectID, &summary.State, &summary.FencingToken, &lease, &updated); err != nil {
+			return nil, err
+		}
+		if !summary.State.valid() {
+			return nil, fmt.Errorf("invalid stored job state %q", summary.State)
+		}
+		if updated.Valid {
+			summary.UpdatedAt, err = parseTime(updated.String)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if lease.Valid {
+			parsed, parseErr := parseTime(lease.String)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			summary.LeaseExpiresAt = &parsed
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
 }
 
 // ListUnreconciledTerminalJobs pages only terminal results not yet imported to
@@ -933,6 +1140,28 @@ func (store *Store) GetJob(ctx context.Context, id string) (Job, error) {
 		return Job{}, err
 	}
 	return jobByIDQuery(ctx, store.db, id)
+}
+
+// GetJobAuthority reads only claim metadata. Source-aware workers call this
+// after validating canonical Project authority and before selecting payload_json.
+func (store *Store) GetJobAuthority(ctx context.Context, id string) (JobAuthority, error) {
+	if err := validateIdentifier("job id", id); err != nil {
+		return JobAuthority{}, err
+	}
+	var value JobAuthority
+	var taskID sql.NullInt64
+	err := store.db.QueryRowContext(ctx, `SELECT id,kind,role,subject_id,canonical_scope,state,claimed_by,fencing_token,pueue_task_id FROM jobs WHERE id=?`, id).
+		Scan(&value.ID, &value.Kind, &value.Role, &value.SubjectID, &value.CanonicalScope, &value.State, &value.ClaimedBy, &value.FencingToken, &taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobAuthority{}, ErrNotFound
+	}
+	if err != nil {
+		return JobAuthority{}, err
+	}
+	if taskID.Valid {
+		value.PueueTaskID = &taskID.Int64
+	}
+	return value, nil
 }
 
 func (store *Store) AddOutbox(ctx context.Context, input OutboxInput, next time.Time) (OutboxItem, bool, error) {

@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/projection"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
+	"github.com/daviddwlee84/exp-cli/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -85,7 +85,7 @@ func runValidate(command *cobra.Command, app *App, rootOptions *rootOptions, opt
 		if options.json {
 			return commandFailure(app, true, "validate", data, false, diagnostics, inventoryErr)
 		}
-		if err := app.WriteHuman(safeHumanOutput(renderValidationHuman(inventory))); err != nil {
+		if err := app.WriteStyledHuman(safeHumanOutput(renderValidationHuman(inventory))); err != nil {
 			return err
 		}
 		return inventoryErr
@@ -122,7 +122,7 @@ func runRender(command *cobra.Command, app *App, rootOptions *rootOptions, optio
 			return commandFailure(app, true, "render", data, len(result.Written) > 0, diagnostics, err)
 		}
 		if len(result.Drifted) > 0 {
-			if writeErr := app.WriteHuman(safeHumanOutput(renderProjectionDriftHuman(result))); writeErr != nil {
+			if writeErr := app.WriteStyledHuman(safeHumanOutput(renderProjectionDriftHuman(result))); writeErr != nil {
 				return writeErr
 			}
 		}
@@ -137,13 +137,27 @@ func runRender(command *cobra.Command, app *App, rootOptions *rootOptions, optio
 }
 
 func runContext(command *cobra.Command, app *App, rootOptions *rootOptions, options *contextOptions) error {
-	info, inventory, err := loadProjectInventory(command, app, rootOptions)
+	empty := contextData{SchemaVersion: "exp.command.context/v1", QueuedPlans: []planView{}, QueueFrontier: []contextFrontierView{}, Champions: []record.Champion{}}
+	resolved, err := resolveWorkspaceContext(command, app, rootOptions)
 	if err != nil {
-		return commandFailure(app, options.json, "context", contextData{QueuedPlans: []planView{}}, false, nil, err)
+		return commandFailure(app, options.json, "context", empty, false, nil, err)
+	}
+	info := resolved.Project
+	store, err := app.NewStore(info)
+	if err != nil {
+		return commandFailure(app, options.json, "context", empty, false, nil, err)
+	}
+	inventory, err := store.Inventory(command.Context())
+	if err != nil {
+		return commandFailure(app, options.json, "context", empty, false, nil, err)
 	}
 	projectData, err := makeProjectView(info)
 	if err != nil {
-		return commandFailure(app, options.json, "context", contextData{QueuedPlans: []planView{}}, false, nil, err)
+		return commandFailure(app, options.json, "context", empty, false, nil, err)
+	}
+	workspaceView, sourceView, associationView, configView, err := makeWorkspaceContextViews(resolved, inventory)
+	if err != nil {
+		return commandFailure(app, options.json, "context", empty, false, nil, err)
 	}
 	allPlans, err := makePlanViews(info, inventory.OfKind(research.KindPlan))
 	if err != nil {
@@ -177,7 +191,12 @@ func runContext(command *cobra.Command, app *App, rootOptions *rootOptions, opti
 		champions = []record.Champion{}
 	}
 	data := contextData{
+		SchemaVersion:    "exp.command.context/v1",
 		Project:          projectData,
+		Workspace:        workspaceView,
+		Source:           sourceView,
+		Association:      associationView,
+		Config:           configView,
 		Counts:           countsFor(inventory),
 		QueuedPlans:      queued,
 		QueueFrontier:    frontier,
@@ -187,18 +206,19 @@ func runContext(command *cobra.Command, app *App, rootOptions *rootOptions, opti
 		ObservationScope: "local_canonical_records_only",
 	}
 	diagnostics := convertRecordDiagnostics(inventory.Diagnostics)
+	warnUntrustedConfig(app, configView)
 	human := renderContextHuman(data)
 	if !inventory.Valid() {
 		inventoryErr := &record.InventoryError{Diagnostics: append([]record.Diagnostic(nil), inventory.Diagnostics...)}
 		if options.json {
 			return commandFailure(app, true, "context", data, true, diagnostics, inventoryErr)
 		}
-		if writeErr := app.WriteHuman(safeHumanOutput(human + renderValidationHuman(inventory))); writeErr != nil {
+		if writeErr := app.WriteStyledHuman(safeHumanOutput(human + renderValidationHuman(inventory))); writeErr != nil {
 			return writeErr
 		}
 		return inventoryErr
 	}
-	return commandSuccess(app, options.json, "context", data, false, diagnostics, human)
+	return commandSuccess(app, options.json, "context", data, !configView.Trusted, diagnostics, human)
 }
 
 func loadProjectInventory(command *cobra.Command, app *App, rootOptions *rootOptions) (*project.Info, *record.Inventory, error) {
@@ -213,12 +233,43 @@ func loadProjectInventory(command *cobra.Command, app *App, rootOptions *rootOpt
 	return info, inventory, nil
 }
 
-func openProjectStore(command *cobra.Command, app *App, rootOptions *rootOptions) (*project.Info, RecordStore, error) {
+func resolveWorkspaceContext(command *cobra.Command, app *App, rootOptions *rootOptions) (*workspace.Context, error) {
+	if command == nil || app == nil || rootOptions == nil {
+		return nil, errors.New("workspace resolution requires command, application, and root options")
+	}
 	start, err := app.startDir(rootOptions.startDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	resolved, err := app.ResolveWorkspace.Resolve(command.Context(), workspace.ResolveRequest{
+		InvocationDir: start,
+		Workspace:     strings.TrimSpace(rootOptions.workspace),
+		Source:        strings.TrimSpace(rootOptions.source),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resolved != nil {
+		if err := app.applyEffectiveColor(resolved.Config); err != nil {
+			return nil, err
+		}
+	}
+	return resolved, nil
+}
+
+func resolveProjectInfo(command *cobra.Command, app *App, rootOptions *rootOptions) (*project.Info, error) {
+	resolved, err := resolveWorkspaceContext(command, app, rootOptions)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == nil || resolved.Project == nil {
+		return nil, errors.New("workspace resolver returned no canonical Project")
+	}
+	return resolved.Project, nil
+}
+
+func openProjectStore(command *cobra.Command, app *App, rootOptions *rootOptions) (*project.Info, RecordStore, error) {
+	info, err := resolveProjectInfo(command, app, rootOptions)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -255,19 +306,43 @@ func renderContextHuman(data contextData) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "%s (%s)\n", data.Project.Name, data.Project.ID)
 	fmt.Fprintf(&output, "Root: %s\n", data.Project.Root)
-	fmt.Fprintf(&output, "Records: ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
-		data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
-		data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
+	if data.Workspace.ProjectID != "" {
+		fmt.Fprintf(&output, "Workspace: %s (%s); invocation=%s\n", data.Workspace.RepositoryRoot, data.Workspace.Resolution, data.Workspace.InvocationDir)
+		if data.Source != nil {
+			fmt.Fprintf(&output, "Source: %s (%s) subdir=%s root=%s\n", data.Source.Source.Key, data.Source.Source.ID, data.Source.Source.Subdir, data.Source.ResolvedRoot)
+		} else {
+			output.WriteString("Source: none selected\n")
+		}
+		fmt.Fprintf(&output, "Association: project=%t source=%t; config_layers=%d trusted=%t\n", data.Association.ProjectRegistered, data.Association.SourceRegistered, len(data.Config.Layers), data.Config.Trusted)
+	}
+	switch {
+	case data.Counts.Sources == 0 && data.Counts.Tries == 0:
+		fmt.Fprintf(&output, "Records: ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
+			data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
+			data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
+	case data.Counts.Tries == 0:
+		fmt.Fprintf(&output, "Records: sources=%d ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
+			data.Counts.Sources, data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
+			data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
+	case data.Counts.Sources == 0:
+		fmt.Fprintf(&output, "Records: tries=%d ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
+			data.Counts.Tries, data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
+			data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
+	default:
+		fmt.Fprintf(&output, "Records: sources=%d tries=%d ideas=%d queues=%d plans=%d experiments=%d attempts=%d findings=%d candidates=%d releases=%d promotions=%d\n",
+			data.Counts.Sources, data.Counts.Tries, data.Counts.Ideas, data.Counts.Queues, data.Counts.Plans, data.Counts.Experiments, data.Counts.Attempts,
+			data.Counts.Findings, data.Counts.Candidates, data.Counts.Releases, data.Counts.Promotions)
+	}
 	output.WriteString("Provider refresh: false; live observations: false (local canonical records only)\n")
 	if len(data.QueuedPlans) == 0 {
 		output.WriteString("Queued Plans: none\n")
 	} else {
 		output.WriteString("Queued Plans:\n")
-		writer := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
+		table := newHumanRows(5).Indent("  ")
 		for _, plan := range data.QueuedPlans {
-			_, _ = fmt.Fprintf(writer, "  %s\t%s/%s\t%s\t%s\t%s\n", plan.Display, plan.Priority, plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
+			table.Add(plan.Display, plan.Priority+"/"+plan.Effort, singleLineHuman(plan.Title), plan.ID, plan.Revision)
 		}
-		_ = writer.Flush()
+		output.WriteString(mustRenderTable(table))
 	}
 	if len(data.QueueFrontier) > 0 {
 		output.WriteString("Queue frontiers:\n")

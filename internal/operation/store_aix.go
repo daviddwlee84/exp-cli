@@ -12,10 +12,11 @@ import (
 // available, but daemon/orchestration commands must report ErrUnsupported.
 type Store struct{}
 
-func PathFor(string) (string, error)                          { return "", ErrUnsupported }
-func Open(context.Context, string, ...Option) (*Store, error) { return nil, ErrUnsupported }
-func (*Store) Close() error                                   { return nil }
-func (*Store) Path() string                                   { return "" }
+func PathFor(string) (string, error)                                  { return "", ErrUnsupported }
+func Open(context.Context, string, ...Option) (*Store, error)         { return nil, ErrUnsupported }
+func OpenReadOnly(context.Context, string, ...Option) (*Store, error) { return nil, ErrUnsupported }
+func (*Store) Close() error                                           { return nil }
+func (*Store) Path() string                                           { return "" }
 func (*Store) BeginOperation(context.Context, OperationInput) (Operation, bool, error) {
 	return Operation{}, false, ErrUnsupported
 }
@@ -44,6 +45,9 @@ func (*Store) ClaimJob(context.Context, string, string, string, time.Duration) (
 func (*Store) ClaimJobByID(context.Context, string, string, time.Duration) (Job, error) {
 	return Job{}, ErrUnsupported
 }
+func (*Store) RenewJobClaim(context.Context, string, int64, string, time.Duration) (Job, error) {
+	return Job{}, ErrUnsupported
+}
 func (*Store) PrepareSubmission(context.Context, JobInput, string, time.Duration, OutboxFactory) (Job, OutboxItem, bool, error) {
 	return Job{}, OutboxItem{}, false, ErrUnsupported
 }
@@ -53,7 +57,8 @@ func (*Store) FinishJob(context.Context, string, int64, JobState, json.RawMessag
 func (*Store) SetJobExternalRefs(context.Context, string, int64, *int64, string) error {
 	return ErrUnsupported
 }
-func (*Store) ListJobs(context.Context, ...JobState) ([]Job, error) { return nil, ErrUnsupported }
+func (*Store) ListJobs(context.Context, ...JobState) ([]Job, error)   { return nil, ErrUnsupported }
+func (*Store) ListJobSummaries(context.Context) ([]JobSummary, error) { return nil, ErrUnsupported }
 func (*Store) ListUnreconciledTerminalJobs(context.Context, string, int) ([]Job, error) {
 	return nil, ErrUnsupported
 }
@@ -62,6 +67,9 @@ func (*Store) ListActiveAllocations(context.Context) ([]ActiveAllocation, error)
 	return nil, ErrUnsupported
 }
 func (*Store) GetJob(context.Context, string) (Job, error) { return Job{}, ErrUnsupported }
+func (*Store) GetJobAuthority(context.Context, string) (JobAuthority, error) {
+	return JobAuthority{}, ErrUnsupported
+}
 func (*Store) AddOutbox(context.Context, OutboxInput, time.Time) (OutboxItem, bool, error) {
 	return OutboxItem{}, false, ErrUnsupported
 }

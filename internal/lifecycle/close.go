@@ -185,27 +185,28 @@ func (service *Service) CloseExperiment(ctx context.Context, request CloseExperi
 		changes.create(&record.Document{Record: finding, Body: input.Body})
 	}
 
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "experiment.close", Changes: changes.changes, AllowStale: true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	closedResult, err := resultDocument(transaction, experiment.ID)
-	if err != nil {
-		return nil, err
-	}
-	planResult, err := resultDocument(transaction, plan.ID)
-	if err != nil {
-		return nil, err
-	}
-	result := &CloseExperimentResult{TransactionID: transaction.TransactionID, Experiment: closedResult, Plan: planResult}
-	for _, id := range findingIDs {
-		document, findErr := resultDocument(transaction, id)
-		if findErr != nil {
-			return nil, findErr
+	result := &CloseExperimentResult{Findings: []*record.Document{}}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Experiment, _ = resultDocument(transaction, experiment.ID)
+		result.Plan, _ = resultDocument(transaction, plan.ID)
+		for _, id := range findingIDs {
+			if document, findErr := resultDocument(transaction, id); findErr == nil {
+				result.Findings = append(result.Findings, document)
+			}
 		}
-		result.Findings = append(result.Findings, document)
+	}
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
+	}
+	if result.Experiment == nil || result.Plan == nil || len(result.Findings) != len(findingIDs) {
+		return nil, fmt.Errorf("canonical transaction omitted Experiment closure documents")
 	}
 	return result, nil
 }

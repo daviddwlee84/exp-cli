@@ -186,12 +186,7 @@ func verifyLockRoots(trustedPath string, trusted *os.Root, relative string, lock
 }
 
 func chmodRoot(root *os.Root, mode fs.FileMode) error {
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Chmod(mode)
+	return pathx.ProtectPrivateRoot(root, mode)
 }
 
 func openLockFile(root *os.Root) (*os.File, error) {
@@ -244,7 +239,7 @@ func writeOwner(file *os.File) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := file.Chmod(0o600); err != nil {
+	if err := pathx.ProtectPrivateOpenFile(file, 0o600); err != nil {
 		return err
 	}
 	if err := file.Truncate(0); err != nil {

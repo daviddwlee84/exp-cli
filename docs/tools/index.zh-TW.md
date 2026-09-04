@@ -16,11 +16,13 @@
 
 | 工具或元件 | 狀態 | 目前可用功能 | 權威邊界 |
 |---|---|---|---|
-| [Git 與 linked worktrees](git-worktrees.md) | 已實作整合 | 準備隔離的 experiment branch/worktree，並 commit 精確的 allowlisted change set | Git 擁有程式碼歷史與整合 |
-| [Pueue](pueue.md) | 已實作整合 | 已清理的 status、經身分檢查的 cancellation，以及 daemon 透過私有 worker envelope 提交工作 | Pueue 擁有即時 task 與 group 狀態 |
-| [MLflow](mlflow.md) | 已實作唯讀整合 | 驗證單一 workload-created run 上指定的 metrics 與 tags，再將已清理的身分附加至 Evaluation | Workload 與 MLflow 擁有 run 建立、telemetry、artifacts 與 registry state |
-| [Agent CLI profiles](agent-cli-profiles.md) | 已實作整合 | 驗證本機 profiles，並執行全新且受 schema 約束的 CLI process | 設定的 executable 擁有所有 external provider interaction；`exp` 不保存 session，agent output 仍只是建議 |
-| Direct worker 與 SQLite control state | 內部實作 | 執行精確的 workload envelope；協調 leases、jobs、fencing、outbox recovery 與 fairness | 私有操作狀態絕不是科學權威 |
+| [Git 與 linked worktrees](git-worktrees.md) | 已實作整合 | Source-aware isolated worktree、exact allowlisted formal commit、clean runtime snapshot、bounded dirty Try seeding、native inspection、verified Try cleanup | Native Git 擁有 bytes/lifecycle；human 擁有 integration/merge/push |
+| Workspace backends | Native 已實作；`dev_cli` fail-closed | Requested/actual/fallback report 與 bounded discovery；native prepare/inspect/cleanup/retire | 沒有 exact machine receipt 就不授權 optional lifecycle action |
+| [Pueue](pueue.md) | 已實作整合 | Sanitized status、identity-checked cancellation、daemon 經 private worker envelope submission | Pueue 擁有 live task/group state |
+| [MLflow](mlflow.md) | 已實作 read-only integration | Trusted named profile、selected metric/tag verification、exact Attempt ownership、Evaluation attachment、optional worker observation | Workload/MLflow 擁有 run creation、telemetry、artifact、registry state |
+| [Agent CLI profiles](agent-cli-profiles.md) | 已實作整合 | 驗證 separate `exp.agents/v1` profile，並執行 fresh schema-constrained CLI process | Configured executable 擁有 external interaction；`exp` 不保存 session，agent output 仍 advisory |
+| Direct worker 與 SQLite control state | 內部實作 | V1/v2 exact workload envelope、explicit v2 Project/scope authority、durable marker replay、lease、job、fencing、outbox、fairness | Private operational state 絕不是 scientific authority |
+| `exp ui` | 已實作 read-only TUI | Immutable local research views、read-only operation database、explicit bounded readiness probe | 沒有 key 會 mutation、trust、execute、install、login、start service、open editor 或 handoff |
 | [DVC 與 Slurm](planned-integrations.md) | 僅 discovery/contract | 本機 executable discovery 與 compiled capability metadata | 尚未整合任何 DVC 或 Slurm 操作 |
 | [Marimo 與 Jupyter](planned-integrations.md) | 僅 discovery/contract | 本機 executable discovery 與 Runner descriptor metadata | 尚未整合 notebook inspection 或 execution |
 | [Optuna-like search](planned-integrations.md) | 僅契約 | Provider-neutral `exp.search-adapter/v1` types 與 invariants | 不包含具體 Optuna runtime、package installation 或 service contact |
@@ -32,10 +34,11 @@ exp doctor
 exp doctor --json
 ```
 
-`doctor` 只進行 executable lookup。它不會執行第三方 `--version` commands、聯絡 daemon
-或 network、進行 authentication、安裝 package，或啟動 service。因此，在特定操作實際
-驗證前，versions 與 capability support 都會維持 `unknown`。目前的 `--live` flag 只會回報
-尚未實作 live probing，仍然僅執行本機 discovery。
+Default `doctor` 只執行 executable lookup，不執行 third-party command、不 contact daemon/network、
+不 authenticate/install package/start service，因此 version/capability 尚未 verified。
+`doctor --live` 是 explicit exception：它執行 bounded provider-specific version/read-only local
+service probe 加 workspace-backend probe。仍不 login、install、寫 config、start service、執行
+workload 或 canonical mutation；unsupported capability 仍是 unsupported。
 
 Provider contact 一律針對特定操作明確發生。目前只有 Pueue status/cancel、MLflow verify，
 或 daemon `tick`/`run` 會聯絡 provider；本機 record commands 與 `daemon frontier` 不會

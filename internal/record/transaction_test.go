@@ -66,7 +66,7 @@ func TestPreparedTransactionPublishesValidatedCompoundState(t *testing.T) {
 	if actual, readErr := os.ReadFile(projectionPath); readErr != nil || string(actual) != string(projectionBytes) {
 		t.Fatalf("projection participated in transaction: %q, %v", actual, readErr)
 	}
-	journalPath := filepath.Join(store.CoordinationDir(), "transactions", result.TransactionID, "journal.toml")
+	journalPath := filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml")
 	journal, err := os.ReadFile(journalPath)
 	if err != nil || !strings.Contains(string(journal), `phase = "committed"`) {
 		t.Fatalf("committed journal = %q, %v", journal, err)
@@ -110,7 +110,7 @@ func TestPreparedTransactionRecoveryRollsForwardAndIsIdempotent(t *testing.T) {
 	if _, err := store.Inventory(context.Background()); !errors.Is(err, record.ErrTransactionRecoveryRequired) {
 		t.Fatalf("split inventory was presented as committed: %v", err)
 	}
-	transactionRoot := filepath.Join(store.CoordinationDir(), "transactions", result.TransactionID)
+	transactionRoot := filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID)
 	for _, temporary := range []string{
 		filepath.Join(transactionRoot, ".exp-0123456789abcdef0123456789abcdef.tmp"),
 		filepath.Join(transactionRoot, "staged", ".exp-fedcba9876543210fedcba9876543210.tmp"),
@@ -140,7 +140,7 @@ func TestPreparedTransactionRecoveryRollsForwardAndIsIdempotent(t *testing.T) {
 			t.Fatalf("recovered %s = %#v, %v", id, document, readErr)
 		}
 	}
-	journal, err := os.ReadFile(filepath.Join(restarted.CoordinationDir(), "transactions", result.TransactionID, "journal.toml"))
+	journal, err := os.ReadFile(filepath.Join(restarted.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml"))
 	if err != nil || !strings.Contains(string(journal), `phase = "committed"`) {
 		t.Fatalf("recovery did not commit journal: %q, %v", journal, err)
 	}
@@ -281,7 +281,7 @@ func TestPreparedTransactionRejectsCorruptStagedBytesBeforeRecovery(t *testing.T
 	if !errors.Is(err, crash) || result == nil {
 		t.Fatalf("prepared corrupt transaction = %#v, %v", result, err)
 	}
-	staged := filepath.Join(store.CoordinationDir(), "transactions", result.TransactionID, "staged", "0000")
+	staged := filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID, "staged", "0000")
 	if err := os.WriteFile(staged, []byte("tampered staged bytes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -313,12 +313,12 @@ func TestPreparedTransactionRejectsUnknownJournalSchema(t *testing.T) {
 	if !errors.Is(err, crash) || result == nil {
 		t.Fatalf("prepared unknown-schema transaction = %#v, %v", result, err)
 	}
-	journalPath := filepath.Join(store.CoordinationDir(), "transactions", result.TransactionID, "journal.toml")
+	journalPath := filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml")
 	journal, err := os.ReadFile(journalPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal = []byte(strings.Replace(string(journal), `schema = "exp.transaction/v1"`, `schema = "exp.transaction/v2"`, 1))
+	journal = []byte(strings.Replace(string(journal), `schema = "exp.transaction/v2"`, `schema = "exp.transaction/v3"`, 1))
 	if err := os.WriteFile(journalPath, journal, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestPreparedTransactionChecksExpectedRevisionBeforeJournal(t *testing.T) {
 	if !errors.Is(err, record.ErrConflict) || result != nil {
 		t.Fatalf("stale Transact = %#v, %v", result, err)
 	}
-	entries, err := os.ReadDir(filepath.Join(store.CoordinationDir(), "transactions"))
+	entries, err := os.ReadDir(filepath.Join(store.CoordinationDir(), "transactions-v2"))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("stale transaction wrote a journal: %v, %v", entries, err)
 	}
@@ -416,6 +416,10 @@ func TestPreparedTransactionFailureInjectionBoundaries(t *testing.T) {
 			if !errors.Is(err, injected) || result == nil || !fired {
 				t.Fatalf("Transact = %#v, %v fired=%v", result, err, fired)
 			}
+			published := stage == record.StageTransactionCanonicalSync || stage == record.StageTransactionCommitMark
+			if result.State != record.TransactionPrepared || !result.RecoveryRequired || len(result.Paths) != 1 || result.Paths[0].Path == "" || result.Paths[0].Published != published {
+				t.Fatalf("transaction publication progress at %s = %#v, want published=%t", stage, result, published)
+			}
 			restarted := record.NewStore(info.Root, info.Repository.GitCommonDir)
 			if err := restarted.Recover(context.Background()); err != nil {
 				t.Fatalf("Recover: %v", err)
@@ -426,6 +430,47 @@ func TestPreparedTransactionFailureInjectionBoundaries(t *testing.T) {
 			}
 			if _, err := inventory.ByID(candidate.Record.(*research.Plan).ID); err != nil {
 				t.Fatalf("recoverable create missing: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransactionResultReportsPreparedPublicationProgress(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		stage     record.TransactionStage
+		published bool
+		txID      string
+		recordID  string
+	}{
+		{name: "before canonical publication", stage: record.StageTransactionCanonicalCreate, published: false, txID: "01a02220-0000-7001-8000-000000000001", recordID: "01a02120-0000-7001-8000-000000000001"},
+		{name: "after canonical publication", stage: record.StageTransactionCommitMark, published: true, txID: "01a02220-0000-7002-8000-000000000002", recordID: "01a02120-0000-7002-8000-000000000002"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := initializeStoreProject(t)
+			now := time.Date(2026, 8, 30, 14, 30, 0, 0, time.UTC)
+			injected := errors.New("report prepared publication progress")
+			fired := false
+			store := transactionStore(t, info.Root, info.Repository.GitCommonDir, now, test.txID, func(stage record.TransactionStage, _, _ string) error {
+				if !fired && stage == test.stage {
+					fired = true
+					return injected
+				}
+				return nil
+			})
+			candidate := transactionPlan(t, test.recordID, "Publication progress", now)
+			result, err := store.Transact(context.Background(), record.TransactionRequest{
+				Operation: "test.progress",
+				Changes:   []record.TransactionChange{{Operation: record.TransactionCreate, Document: candidate}},
+			})
+			if !errors.Is(err, injected) || !fired || result == nil {
+				t.Fatalf("Transact = %#v, %v fired=%t", result, err, fired)
+			}
+			if result.State != record.TransactionPrepared || !result.RecoveryRequired || len(result.Paths) != 1 || result.Paths[0].Published != test.published || len(result.Documents) != 1 {
+				t.Fatalf("prepared result = %#v, want published=%t", result, test.published)
+			}
+			if err := record.NewStore(info.Root, info.Repository.GitCommonDir).Recover(context.Background()); err != nil {
+				t.Fatalf("recover prepared result: %v", err)
 			}
 		})
 	}
@@ -537,6 +582,126 @@ func TestPreparedTransactionUsesLinkedWorktreeCommonLock(t *testing.T) {
 	}
 }
 
+func TestPreparedTransactionRecoveryIsScopedToOriginatingLinkedWorktree(t *testing.T) {
+	mainInfo := initializeStoreProject(t)
+	runGitCommand(t, mainInfo.Repository.Root, "config", "user.name", "Exp Test")
+	runGitCommand(t, mainInfo.Repository.Root, "config", "user.email", "exp-test@example.invalid")
+	runGitCommand(t, mainInfo.Repository.Root, "add", "experiments")
+	runGitCommand(t, mainInfo.Repository.Root, "commit", "--quiet", "-m", "initialize worktree-scoped recovery")
+	linkedRoot := filepath.Join(t.TempDir(), "linked")
+	runGitCommand(t, mainInfo.Repository.Root, "worktree", "add", "--quiet", "-b", "transaction-origin-test", linkedRoot)
+	linkedInfo, err := project.Discover(context.Background(), linkedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 30, 16, 30, 0, 0, time.UTC)
+	injected := errors.New("leave linked transaction prepared")
+	linkedStore := transactionStore(t, linkedInfo.Root, linkedInfo.Repository.GitCommonDir, now, "01a02213-0000-7003-8000-000000000003", func(stage record.TransactionStage, _, _ string) error {
+		if stage == record.StageTransactionCanonicalCreate {
+			return injected
+		}
+		return nil
+	})
+	candidate := transactionPlan(t, "01a02113-0000-7003-8000-000000000003", "Linked-only recovery", now)
+	result, err := linkedStore.Transact(context.Background(), record.TransactionRequest{
+		Operation: "test.worktree-origin",
+		Changes:   []record.TransactionChange{{Operation: record.TransactionCreate, Document: candidate}},
+	})
+	if !errors.Is(err, injected) || result == nil || result.State != record.TransactionPrepared || !result.RecoveryRequired {
+		t.Fatalf("linked prepared transaction = %#v, %v", result, err)
+	}
+
+	mainStore := record.NewStore(mainInfo.Root, mainInfo.Repository.GitCommonDir)
+	if err := mainStore.Recover(context.Background()); err != nil {
+		t.Fatalf("sibling recovery should ignore linked journal: %v", err)
+	}
+	mainInventory, err := mainStore.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("main inventory after sibling recovery: %v", err)
+	}
+	candidateID, _ := candidate.ID()
+	if _, err := mainInventory.ByID(candidateID); !errors.Is(err, research.ErrReferenceNotFound) {
+		t.Fatalf("sibling recovery published linked record into main worktree: %v", err)
+	}
+	journal, err := os.ReadFile(filepath.Join(linkedStore.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml"))
+	if err != nil || !strings.Contains(string(journal), `phase = "prepared"`) || !strings.Contains(string(journal), "worktree_id = \"sha256:") {
+		t.Fatalf("linked journal changed during sibling recovery: %q, %v", journal, err)
+	}
+
+	if err := record.NewStore(linkedInfo.Root, linkedInfo.Repository.GitCommonDir).Recover(context.Background()); err != nil {
+		t.Fatalf("originating worktree recovery: %v", err)
+	}
+	linkedInventory, err := record.NewStore(linkedInfo.Root, linkedInfo.Repository.GitCommonDir).Inventory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linkedInventory.ByID(candidateID); err != nil {
+		t.Fatalf("originating recovery omitted linked record: %v", err)
+	}
+	mainInventory, err = mainStore.Inventory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mainInventory.ByID(candidateID); !errors.Is(err, research.ErrReferenceNotFound) {
+		t.Fatalf("linked recovery changed main worktree: %v", err)
+	}
+}
+
+func TestLegacyUnscopedPreparedTransactionIsRejectedWithLinkedWorktrees(t *testing.T) {
+	mainInfo := initializeStoreProject(t)
+	runGitCommand(t, mainInfo.Repository.Root, "config", "user.name", "Exp Test")
+	runGitCommand(t, mainInfo.Repository.Root, "config", "user.email", "exp-test@example.invalid")
+	runGitCommand(t, mainInfo.Repository.Root, "add", "experiments")
+	runGitCommand(t, mainInfo.Repository.Root, "commit", "--quiet", "-m", "initialize legacy journal test")
+	linkedRoot := filepath.Join(t.TempDir(), "linked")
+	runGitCommand(t, mainInfo.Repository.Root, "worktree", "add", "--quiet", "-b", "transaction-legacy-origin-test", linkedRoot)
+	linkedInfo, err := project.Discover(context.Background(), linkedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 30, 16, 45, 0, 0, time.UTC)
+	injected := errors.New("leave legacy transaction prepared")
+	store := transactionStore(t, linkedInfo.Root, linkedInfo.Repository.GitCommonDir, now, "01a02213-0000-7004-8000-000000000004", func(stage record.TransactionStage, _, _ string) error {
+		if stage == record.StageTransactionCanonicalCreate {
+			return injected
+		}
+		return nil
+	})
+	candidate := transactionPlan(t, "01a02113-0000-7004-8000-000000000004", "Legacy unscoped", now)
+	result, err := store.Transact(context.Background(), record.TransactionRequest{
+		Operation: "test.legacy-origin",
+		Changes:   []record.TransactionChange{{Operation: record.TransactionCreate, Document: candidate}},
+	})
+	if !errors.Is(err, injected) || result == nil {
+		t.Fatalf("prepare legacy fixture = %#v, %v", result, err)
+	}
+	journalPath := filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml")
+	journal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(journal), "\n")
+	filtered := lines[:0]
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "worktree_id = ") {
+			filtered = append(filtered, line)
+		}
+	}
+	if err := os.WriteFile(journalPath, []byte(strings.Join(filtered, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mainStore := record.NewStore(mainInfo.Root, mainInfo.Repository.GitCommonDir)
+	if err := mainStore.Recover(context.Background()); !errors.Is(err, record.ErrUnsupportedTransaction) {
+		t.Fatalf("legacy unscoped recovery with linked worktrees = %v", err)
+	}
+	candidateID, _ := candidate.ID()
+	if _, err := os.Lstat(filepath.Join(mainInfo.Root, record.PlansDir, candidateID.String()+"-legacy-unscoped.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy unscoped journal changed sibling worktree: %v", err)
+	}
+}
+
 func TestPreparedTransactionsSupportPolicySingletonAndLaterReplacement(t *testing.T) {
 	info := initializeStoreProject(t)
 	now := time.Date(2026, 8, 30, 17, 0, 0, 0, time.UTC)
@@ -570,6 +735,27 @@ func TestPreparedTransactionsSupportPolicySingletonAndLaterReplacement(t *testin
 	inventory, err = secondStore.Inventory(context.Background())
 	if err != nil || inventory.Policy == nil || inventory.Policy.Record.(*research.Policy).Autonomy != research.AutonomyShadow {
 		t.Fatalf("replaced Policy inventory = %#v, %v", inventory, err)
+	}
+}
+
+func TestTransactionV2JournalIsOutsideLegacyV1Namespace(t *testing.T) {
+	info := initializeStoreProject(t)
+	now := time.Date(2026, 9, 4, 4, 0, 0, 0, time.UTC)
+	store := transactionStore(t, info.Root, info.Repository.GitCommonDir, now, "01a09000-0000-7901-8000-000000000901", nil)
+	candidate := transactionPlan(t, "01a09000-0000-7902-8000-000000000902", "Versioned journal", now)
+	result, err := store.Transact(context.Background(), record.TransactionRequest{
+		Operation: "test.versioned-journal", Changes: []record.TransactionChange{{Operation: record.TransactionCreate, Document: candidate}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEntries, err := os.ReadDir(filepath.Join(store.CoordinationDir(), "transactions"))
+	if err != nil || len(legacyEntries) != 0 {
+		t.Fatalf("legacy v1 namespace contains new journals: entries=%v err=%v", legacyEntries, err)
+	}
+	journal, err := os.ReadFile(filepath.Join(store.CoordinationDir(), "transactions-v2", result.TransactionID, "journal.toml"))
+	if err != nil || !strings.Contains(string(journal), `schema = "exp.transaction/v2"`) || !strings.Contains(string(journal), `worktree_id = "sha256:`) {
+		t.Fatalf("v2 journal = %q, %v", journal, err)
 	}
 }
 

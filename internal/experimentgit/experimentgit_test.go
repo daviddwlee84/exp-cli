@@ -94,8 +94,8 @@ func TestManagerUsesArgumentArraysAndStagesOnlyExactPaths(t *testing.T) {
 	steps := append([]gitStep{}, discoverSource...)
 	steps = append(steps,
 		gitStep{dir: repository, args: []string{"rev-parse", "--verify", testBase + "^{commit}"}, stdout: testBase + "\n"},
-		gitStep{dir: repository, args: []string{"status", "--porcelain=v1", "-z", "--untracked-files=all"}},
-		gitStep{dir: repository, args: []string{"worktree", "add", "-b", branch, worktree, testBase}, after: func() error {
+		gitStep{dir: repository, args: []string{"--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"}},
+		gitStep{dir: repository, args: []string{"-c", "core.hooksPath=" + os.DevNull, "worktree", "add", "-b", branch, worktree, testBase}, after: func() error {
 			return os.MkdirAll(worktreeGitDir, 0o755)
 		}},
 		gitStep{dir: worktree, args: []string{"rev-parse", "--verify", "HEAD"}, stdout: testBase + "\n"},
@@ -112,7 +112,7 @@ func TestManagerUsesArgumentArraysAndStagesOnlyExactPaths(t *testing.T) {
 		gitStep{dir: worktree, args: []string{"ls-files", "--others", "--exclude-standard", "-z", "--"}, stdout: "src/a.go\x00"},
 		gitStep{dir: worktree, args: []string{"add", "--", "src/a.go", "src/z.go"}},
 		gitStep{dir: worktree, args: []string{"diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--"}, stdout: "src/a.go\x00src/z.go\x00"},
-		gitStep{dir: worktree, args: []string{"commit", "--no-gpg-sign", "--no-verify", "-m", "Record experiment " + short + " changes for tune-encoder"}},
+		gitStep{dir: worktree, args: []string{"-c", "core.hooksPath=" + os.DevNull, "commit", "--no-gpg-sign", "--no-verify", "-m", "Record experiment " + short + " changes for tune-encoder"}},
 		gitStep{dir: worktree, args: []string{"rev-parse", "--verify", "HEAD"}, stdout: testHead + "\n"},
 		gitStep{dir: worktree, args: []string{"rev-list", "--parents", "-n", "1", testHead}, stdout: testHead + " " + testBase + "\n"},
 		gitStep{dir: worktree, args: []string{"diff", "--name-only", "-z", "--no-renames", testBase, testHead, "--"}, stdout: "src/a.go\x00src/z.go\x00"},
@@ -275,6 +275,94 @@ func TestRealGitWorktreeCommitAllowlistAndSafetyFailures(t *testing.T) {
 	}
 }
 
+func TestIdentityAwareCommitTranslationMetadataAndTryRefusal(t *testing.T) {
+	repository, base := newTestRepository(t)
+	repositoryInfo, err := gitx.Discover(t.Context(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := research.ParseUUID("01a09000-0000-7800-8000-000000000800")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{DataHome: filepath.Join(canonicalTempDir(t), "identity data")}
+	formal := Request{
+		RepositoryRoot: repository, RegisteredGitCommonDir: repositoryInfo.GitCommonDir, BaseCommit: base,
+		ProjectID: projectID, SourceID: mustGitID(t, "src_01a09000-0000-7801-8000-000000000801", research.KindSource),
+		OwnerID: mustGitID(t, "exp_01a09000-0000-7802-8000-000000000802", research.KindExperiment), OwnerTitle: "Exact Paths",
+		SourceSubdir: "src", AllowedPaths: []string{"model.txt"},
+	}
+	workspace, err := manager.Prepare(t.Context(), formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.CWD != filepath.Join(workspace.Worktree, "src") {
+		t.Fatalf("semantic CWD = %s", workspace.CWD)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.CWD, "model.txt"), []byte("formal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changeSet, err := manager.Commit(t.Context(), formal)
+	if err != nil || !reflect.DeepEqual(changeSet.Paths, []string{"src/model.txt"}) {
+		t.Fatalf("translated formal commit = %#v, %v", changeSet, err)
+	}
+
+	external := Request{
+		RepositoryRoot: repository, RegisteredGitCommonDir: repositoryInfo.GitCommonDir, BaseCommit: base,
+		ProjectID: projectID, SourceID: mustGitID(t, "src_01a09000-0000-7803-8000-000000000803", research.KindSource),
+		OwnerID: mustGitID(t, "exp_01a09000-0000-7804-8000-000000000804", research.KindExperiment), OwnerTitle: "External Experiments",
+		SourceSubdir: ".", AllowedPaths: []string{"experiments/local.txt"},
+	}
+	externalWorkspace, err := manager.Prepare(t.Context(), external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(externalWorkspace.Worktree, "experiments"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(externalWorkspace.Worktree, "experiments", "local.txt"), []byte("external\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := manager.Commit(t.Context(), external); err != nil || !reflect.DeepEqual(result.Paths, []string{"experiments/local.txt"}) {
+		t.Fatalf("external metadata-like commit = %#v, %v", result, err)
+	}
+
+	embedded := external
+	embedded.SourceID = mustGitID(t, "src_01a09000-0000-7805-8000-000000000805", research.KindSource)
+	embedded.OwnerID = mustGitID(t, "exp_01a09000-0000-7806-8000-000000000806", research.KindExperiment)
+	embedded.OwnerTitle = "Embedded Metadata"
+	embedded.CanonicalMetadataRoot = "experiments"
+	embeddedWorkspace, err := manager.Prepare(t.Context(), embedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(embeddedWorkspace.Worktree, "experiments"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(embeddedWorkspace.Worktree, "experiments", "local.txt"), []byte("forbidden\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Commit(t.Context(), embedded); !errors.Is(err, ErrForbiddenMetadata) {
+		t.Fatalf("embedded canonical exclusion error = %v", err)
+	}
+
+	quick := external
+	quick.SourceID = mustGitID(t, "src_01a09000-0000-7807-8000-000000000807", research.KindSource)
+	quick.OwnerID = mustGitID(t, "try_01a09000-0000-7808-8000-000000000808", research.KindTry)
+	quick.OwnerTitle = "No Try Commit"
+	quick.AllowedPaths = []string{"README.md"}
+	quickWorkspace, err := manager.Prepare(t.Context(), quick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(quickWorkspace.Worktree, "README.md"), []byte("dirty Try\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Commit(t.Context(), quick); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Try-owned commit error = %v", err)
+	}
+}
+
 func TestRecursiveAllowedPathGlobs(t *testing.T) {
 	tests := []struct {
 		glob  string
@@ -325,6 +413,15 @@ func runTestGitBytes(t *testing.T, directory string, args ...string) []byte {
 		t.Fatalf("git %v in %s: %v\n%s", args, directory, err, output)
 	}
 	return output
+}
+
+func mustGitID(t *testing.T, value string, kind research.Kind) research.ID {
+	t.Helper()
+	id, err := research.ParseIDForKind(value, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func mustExperimentID(t *testing.T, value string) research.ID {

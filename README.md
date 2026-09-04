@@ -1,437 +1,259 @@
 # exp
 
-`exp` is a Git-native autonomous research control plane for deciding which
-experiments deserve scarce compute, running selected work safely, and
-preserving the path from idea to production decision.
+`exp` is a Git-native research control plane for choosing which experiments
+receive scarce compute, running selected work safely, and preserving the path
+from a bounded question to a reviewed production decision.
 
 Documentation: [English](https://daviddwlee84.github.io/exp-cli/) ·
 [繁體中文](https://daviddwlee84.github.io/exp-cli/zh-TW/)
 
-Canonical research meaning lives in ordinary Markdown/TOML records under
-`experiments/`. Pueue owns local task execution, MLflow owns workload telemetry,
-Git owns code history, and a private SQLite database owns only leases, jobs,
-outbox recovery, and scheduling counters.
+The recommended layout is a **dedicated private experiment repository** for
+canonical research records plus ordinary **Source** records for the code/data
+repositories or governed subdirectories being studied. Private host-local
+associations locate clones without putting checkout paths in Git history.
+Embedded and monorepo Projects remain supported.
 
-## Research loop
+## Choose the right flow
+
+| Need | Start with | What it can become |
+|---|---|---|
+| Answer a short exploratory question now | `exp try run` | A reviewed Try; optionally `exp try adopt` into an Idea |
+| Spend governed compute on comparable evidence | `exp idea add` → qualify → Queue → runtime v2/daemon | Experiment → Evaluation v2 → Candidate v2 |
+| Move already-qualified evidence toward production | `exp candidate create` → Release → sealed holdout | Named-human Promotion → derived Champion manifest |
+
+A Try is not a cheaper Candidate path. A dirty Try is useful exploration, but
+promotion-bearing evidence must be rerun as a clean formal Attempt.
+
+```mermaid
+flowchart TD
+  A[Code or data Git repository] --> B[exp init]
+  B --> C[Dedicated experiment repository]
+  C --> D[Canonical Source record]
+  D --> E[Private local clone association]
+  E --> F{What decision is next?}
+  F -->|Quick question| T[Managed native-worktree Try]
+  T -->|finish and adopt| I[Idea]
+  F -->|Rigorous study| I
+  I --> P[Qualified Plan]
+  P --> Q[Pool and lane Queue]
+  Q --> X[Runtime v2 and daemon]
+  X --> R[Experiment / Run / clean Attempt]
+  R --> V[Evaluation v2]
+  V --> K[Candidate v2]
+  K --> L[Release]
+  L --> H[Sealed fresh holdout]
+  H -->|named human| M[Promotion]
+  M --> G[Derived Champion manifest]
+  C -. inspect .-> U[context / guide / completion / ui]
+```
+
+## Set up a dedicated workspace and Source
+
+From the Git repository you want to study, run the TTY wizard:
+
+```bash
+exp init
+```
+
+It defaults to a sibling dedicated repository and reviews the target, Source,
+subdirectory, local-only identity risk, and effects before writing. For an
+explicit non-interactive setup:
+
+```bash
+SOURCE_REPO="$(git rev-parse --show-toplevel)"
+EXP_REPO="$(dirname "$SOURCE_REPO")/$(basename "$SOURCE_REPO")-experiments"
+
+exp init \
+  --dedicated-repo "$EXP_REPO" \
+  --create \
+  --source-repo "$SOURCE_REPO" \
+  --source-key app \
+  --source-title "Application source" \
+  --source-subdir . \
+  --name "Application research" \
+  --confirm \
+  --confirm-local-only
+```
+
+`--confirm-local-only` is needed only when no sanitized Git remote identifies
+the Source. To add another repository or a governed subdirectory later:
+
+```bash
+DATA_REPO="$HOME/src/shared-data"
+exp --workspace "$EXP_REPO" source add \
+  --key data \
+  --title "Shared data definitions" \
+  --repo "$DATA_REPO" \
+  --subdir datasets \
+  --confirm
+
+exp --workspace "$EXP_REPO" source status
+```
+
+Use `exp source register SOURCE --repo DIR` after a clone moves or is recreated.
+Inspect and approve repository configuration with the same Source context used by
+execution. From the Source checkout, run
+`exp --workspace "$EXP_REPO" --source app config explain`. A Source-selected
+repository-layer trust receipt is scoped to that Source; it is not blanket
+approval for every Source. See
+[Getting Started](docs/getting-started.md) and
+[Configuration and Paths](docs/reference/configuration.md).
+
+## Try a bounded question
+
+A fully explicit Try executes argv directly in an exp-managed native Git
+worktree; arguments after `--` are never parsed by a shell:
+
+```bash
+exp --workspace "$EXP_REPO" --source app try run \
+  --title "Probe cosine decay" \
+  --goal "Decide whether this direction merits a controlled Experiment" \
+  --allow 'src/**' \
+  --timeout 20m \
+  -- project-runner --config configs/probe.toml
+```
+
+Clean is the default. Use `--dirty=capture` only to freeze bounded dirty Source
+state for Try-only replay. Inspect with `exp try status`, recover only provably
+safe work with `exp try resume`, and conclude explicitly:
+
+```bash
+TRY_ID='try_replace_with_returned_id'
+exp --workspace "$EXP_REPO" try finish "$TRY_ID" \
+  --summary "The direction merits a clean controlled study" \
+  --no-results \
+  --confirm
+```
+
+A concluded Try may be adopted into Idea v2; it never directly backs Candidate
+creation. See [Runtime Dispatch](docs/workflows/runtime-dispatch.md).
+
+## Run a rigorous Experiment
+
+Formal work is priced and ordered before dispatch:
+
+```text
+Idea v2 -> qualified Plan v2 -> Pool/lane Queue
+        -> runtime v2 -> Pueue -> Experiment -> Run -> clean Attempt v3
+```
+
+Initialize Policy and capacity, qualify an Idea, then insert its Plan using the
+typed IDs returned by each command:
+
+```bash
+exp --workspace "$EXP_REPO" policy init
+exp --workspace "$EXP_REPO" pool add \
+  --title "Local GPUs" --capacity 2 --unit gpu --bottleneck accelerator
+
+POOL_ID='pool_replace_with_returned_id'
+exp --workspace "$EXP_REPO" queue create --pool "$POOL_ID"
+
+exp --workspace "$EXP_REPO" idea add \
+  --title "Evaluate cosine decay" \
+  --summary "Measure the registered optimizer change" \
+  --lane explore \
+  --cluster optimizer
+```
+
+Configure and exact-digest trust `.exp/runtime.json` as `exp.runtime/v2`, inspect
+with the provider-free `exp daemon frontier`, then explicitly enable and run the
+daemon:
+
+```bash
+exp --workspace "$EXP_REPO" daemon frontier
+exp --workspace "$EXP_REPO" policy autonomy assisted --confirm-auto-experiment
+exp --workspace "$EXP_REPO" daemon run
+```
+
+Pueue is required for formal dispatch, not for native Try. Runtime v2 admits only
+clean, exact SourceSnapshots and carries explicit Project/Source authority into
+the worker. See [Core Research Workflow](docs/workflows/core-workflow.md) and
+[Runtime Dispatch](docs/workflows/runtime-dispatch.md).
+
+## Promote clean evidence
+
+Process, scheduler, output-hash, and MLflow success are observations—not a
+scientific verdict. The promotion-bearing path is:
 
 ```mermaid
 flowchart LR
-  I[Human or agent Idea] --> P[Qualified, priced Plan]
-  P --> Q[Pool x lane priority queue]
-  Q --> X[Experiment / Run / Attempt]
-  X --> E[Evaluation]
-  E --> F[Finding]
-  F --> I
-  E --> C[Candidate]
-  C --> R[Typed Release]
-  R --> H[Sealed holdout]
-  H -->|named human approval| M[Promotion]
-  M --> G[Derived Champion manifest]
+  A[Clean formal Attempt v3] --> E[Supported Experiment]
+  E --> V[Evaluation v2 bound to that Attempt]
+  V --> C[Candidate v2 with exact Source snapshots]
+  C --> R[Validated typed Release]
+  R --> S[Sealed fresh holdout Evaluation]
+  S -->|named human and confirm| P[Append-only Promotion]
+  P --> M[Derived Champion manifest]
 ```
 
-Ideas, Experiments, and Candidates retain parent edges, while Findings retain
-explicit belief-changing edges. A research thread can branch, stop, or merge
-without rewriting history. A generated view or manifest is never read back as
-authority.
+Use `exp evaluation spec create`, `exp evaluation create --attempt ATTEMPT`, and
+`exp candidate create --attempt ATTEMPT`; then follow the sealed Release and
+Promotion gates. No autonomy mode or agent can approve production. See
+[Evidence to Promotion](docs/workflows/evidence-to-promotion.md).
 
-## Safe defaults
+## Inspect, discover, and use the UI
 
-- `exp policy init` creates `POLICY.md` in `manual` mode with an 80/20
-  exploit/explore allocation. `manual` and `shadow` expose frontiers but do not
-  dispatch.
-- Moving to `assisted` or `limited` requires
-  `--confirm-auto-experiment`. This enables experiment dispatch only.
-- Production Promotion always requires a sealed holdout Evaluation, a named
-  human approver, and `--confirm`; no autonomy mode bypasses that gate.
-- Agent output is advisory and schema-validated. Queue insertion records a
-  listwise recommendation and compares adjacent candidates twice with their
-  order swapped. Disagreement, abstention, or low confidence leaves queue order
-  unchanged for human review.
-
-## Quick start
-
-Initialize the canonical root and policy, then name the constrained resource:
-
-```sh
-exp init --name "Encoder research"
-exp policy init
-exp pool add \
-  --title "Local GPUs" \
-  --capacity 2 \
-  --unit gpu \
-  --bottleneck accelerator
-```
-
-Use the returned ResourcePool ID to create the queue, then capture and qualify
-an Idea. Qualification atomically creates an `exp.plan/v2` with resource cost,
-expected utility, classification, and revision-pinned Finding dependencies.
-Autonomous admission currently requires exactly one ResourcePool need; model
-coupled GPU/CPU/memory reservations as one composite pool.
-
-```sh
-# Replace each example after its creation command prints the real ID.
-POOL_ID='pool_01a01e66-f8e0-7202-8000-000000000202'
-exp queue create --pool "$POOL_ID"
-QUEUE_ID='queue_01a01e67-e340-7303-8000-000000000303'
-
-exp idea add \
-  --title "Try cosine decay after warmup" \
-  --summary "Reduce late-stage optimizer noise" \
-  --lane exploit \
-  --cluster optimizer
-IDEA_ID='idea_01a01e68-e340-7404-8000-000000000404'
-
-exp idea qualify "$IDEA_ID" \
-  --payoff-summary "Improve validation macro-F1" \
-  --payoff-metric macro_f1 \
-  --payoff-unit score \
-  --probability 0.45 \
-  --impact 0.02 \
-  --information-value 0.005 \
-  --resource "$POOL_ID":1:3
-PLAN_ID='plan_01a01e69-e340-7505-8000-000000000505'
-
-exp queue insert "$QUEUE_ID" "$PLAN_ID" --pool "$POOL_ID"
+```bash
 exp context
+exp guide
+exp guide setup
+exp completion --help
+exp ui
 ```
 
-`queue insert --agent` adds global listwise advice and order-swapped adjacent
-battles. Without `--agent`, the transparent numeric score determines stable
-insertion. Queue order is canonical; each entry pins the Plan revision used to
-rank it.
+`exp ui` is a read-only local TUI. Startup performs local reads only; explicit
+readiness refresh performs bounded probes. It cannot mutate records or trust,
+execute work, install/login, start a service, open an editor, or hand off a
+workspace. For automation use `exp context --json` and command-specific JSON
+envelopes.
 
-New belief-changing Findings or an edited queued Plan intentionally make its
-pins stale and block dispatch. After review, `exp plan refresh PLAN` requires a
-complete utility reassessment, repins current Finding revisions/belief digests,
-and removes the Plan from its Queue. Run `queue insert` again for a fresh
-score/battle before dispatch.
+`exp doctor` performs local executable lookup only. `exp doctor --live` is an
+explicit bounded, read-only version/local-service probe: no install, login,
+configuration write, service start, or workload execution. Missing MLflow,
+Pueue, or `dev` remains visible in help/doctor and does **not** hide actions or
+block a native Try; only the operation that truly needs that tool is unavailable.
+The optional `dev_cli` backend's prepare/open/handoff/retire lifecycle remains
+unsupported until `dev` exposes schema-versioned exact-path machine capability
+receipts, so native Git remains the byte, inspection, and cleanup authority.
 
-```sh
-exp plan refresh "$PLAN_ID" \
-  --probability 0.35 --impact 0.02 \
-  --information-gain 0.01 --unblock-value 0 --risk-penalty 0.005
-exp queue insert "$QUEUE_ID" "$PLAN_ID" --pool "$POOL_ID" --agent
+Use `exp <command> --help` for syntax, `exp guide TOPIC` for workflow context,
+and the [Command Map](docs/reference/command-map.md) for discoverability.
+
+## Keep large bytes out of Git
+
+```mermaid
+flowchart LR
+  W[Workload] --> O[MLflow / DVC / object storage]
+  O -->|bounded metrics, digests, sanitized refs| E[exp records in Git]
+  E --> U[context / projections / ui]
+  W --> P[Pueue operational state]
+  E --> X[Private XDG associations, trust, SQLite]
 ```
 
-## Human and agent Ideas
+Large datasets, model checkpoints, artifacts, traces, and unbounded logs stay in
+MLflow, DVC, or object storage. Git receives only bounded summaries, cryptographic
+digests, exact Source/commit identities, and sanitized provider references.
+Credentials, raw environments, host paths, large artifact bytes, and unbounded
+provider output never belong in canonical records.
 
-Humans can qualify an Idea directly. A human can also supply only the direction
-and ask one fresh, single-shot CLI agent to propose the complete Plan:
+## Install and develop
 
-```sh
-exp idea develop "$IDEA_ID" --json
-exp idea develop "$IDEA_ID" --apply --json
+```bash
+git clone https://github.com/daviddwlee84/exp-cli.git
+cd exp-cli
+make install
+exp --version
 ```
 
-Agent profiles default to `$XDG_CONFIG_HOME/exp/agents.toml`. The executable is
-resolved from `PATH`; placeholders occupy a complete argument and every run
-must return exactly one JSON value matching the supplied schema. The
-`research-agent` name below stands for a user-configured wrapper.
+`make install` writes `${PREFIX:-$HOME/.local}/bin/exp` and links the embedded
+Agent Skill. The repository pins Go in `mise.toml`; CI checks formatting, vet,
+race-enabled tests, builds, generated skill metadata, and bilingual docs.
 
-```toml
-schema = "exp.agents/v1"
-
-[roles]
-idea_planner = "research-agent"
-queue_advisor = "research-agent"
-queue_battle = "research-agent"
-experiment_implementer = "research-agent"
-
-[profiles.research-agent]
-executable = "research-agent"
-args = ["--prompt", "{prompt_file}", "--schema", "{schema_file}", "--output", "{output_file}"]
-timeout = "10m"
-max_output_bytes = 1048576
-output = "output_file_json"
-stdin_prompt = false
-allowed_env = []
-secret_env = []
-reported_model = "configured-outside-exp"
-```
-
-Inspect the config or run a profile against an arbitrary JSON Schema with
-`exp agent profiles` and `exp agent run`. `exp` starts a new process for every
-request; it has no provider SDK session and does not persist hidden agent state.
-
-## Runtime dispatch
-
-`.exp/runtime.json` is the strict, project-local runtime contract. It binds
-canonical ResourcePools to Pueue groups and queue-ready Plans to an exact
-executable, argument vector, Git base/head, and changed paths. It contains
-only explicitly allowed non-secret, non-credential-sensitive environment
-variable names. Pueue persists task environments, so `secret_env` must be empty; workloads needing credentials
-must use a workload-side broker or provider profile. Absolute executable paths
-may be host-specific, so teams should choose deliberately whether to track it.
-Within one Pueue group, pool label prefixes must be pairwise prefix-free and
-short enough for the worktree-scoped dispatch suffix. The selected runtime
-config path itself is control metadata and cannot appear in a Plan ChangeSet.
-
-```json
-{
-  "schema_version": "exp.runtime/v1",
-  "pools": {
-    "pool_01a01e66-f8e0-7202-8000-000000000202": {
-      "pueue_group": "gpu",
-      "label_prefix": "exp-"
-    }
-  },
-  "plans": {
-    "plan_01a01e69-e340-7505-8000-000000000505": {
-      "executable": "/opt/project/bin/train",
-      "argv": ["--config", "configs/cosine.toml"],
-      "checkout": "main",
-      "cwd": ".",
-      "timeout": "4h",
-      "allowed_env": ["CUDA_VISIBLE_DEVICES"],
-      "secret_env": [],
-      "base_commit": "0000000000000000000000000000000000000000",
-      "head_commit": "1111111111111111111111111111111111111111",
-      "change_set": ["configs/cosine.toml", "src/train.go"],
-      "expected_outputs": ["outputs/metrics.json"]
-    }
-  }
-}
-```
-
-Set `checkout` to `registered_worktree` to execute the unique linked worktree
-whose HEAD equals `head_commit`; no host path is persisted in the config. Before
-dispatch, `exp` verifies the repository identity, clean executable tree, exact
-HEAD, base ancestry, and exact `base_commit..head_commit` path set. The worker
-also requires every `expected_outputs` file and records its SHA-256 digest.
-Git verification is applied to queued work and active prepared Attempts;
-obsolete config entries for completed or dropped Plans cannot block unrelated
-frontier work.
-
-`exp daemon frontier` is local and does not contact Pueue. `exp daemon tick`
-performs one reconciliation/admission pass; `exp daemon run` repeats until
-cancelled. Capacity comes from named ResourcePools. Weighted fairness targets
-the configured exploit/explore shares (80/20 by default) and borrows idle
-capacity when only one lane has eligible work.
-
-The daemon uses a lease and fencing tokens, writes an outbox before submission,
-and recovers a submission by its worktree-scoped stable Pueue label. The private database is at
-`<git-common-dir>/exp/runtime/v1/control.sqlite`. The hidden worker publishes a
-bounded frozen result and durable terminal marker before updating SQLite, so
-replay does not execute a completed claim again. Canonical recovery can verify
-those markers even if the rebuildable SQLite database is lost.
-
-Pueue remains authoritative for task/group state. Workloads remain responsible
-for creating and logging their own MLflow runs; `exp provider mlflow verify`
-only reads requested metrics/tags from an explicit run ID. Scheduler or process
-success may update operational Attempt state, but it never creates a scientific
-verdict, Finding, Candidate, Release, or Promotion.
-
-## Isolated code changes
-
-An experiment agent can work on a dedicated Git branch and linked worktree:
-
-```sh
-EXPERIMENT_ID='exp_01a01e6a-e340-7606-8000-000000000606'
-BASE_COMMIT='0123456789abcdef0123456789abcdef01234567'
-
-exp experiment workspace prepare "$EXPERIMENT_ID" \
-  --base "$BASE_COMMIT" \
-  --allow 'src/**' \
-  --allow 'configs/**'
-
-exp experiment workspace commit "$EXPERIMENT_ID" \
-  --base "$BASE_COMMIT" \
-  --allow 'src/**' \
-  --allow 'configs/**'
-
-# Or run the configured experiment_implementer agent and commit automatically.
-exp experiment agent "$EXPERIMENT_ID" \
-  --base "$BASE_COMMIT" \
-  --allow 'src/**' \
-  --allow 'configs/**' \
-  --prompt implementation-notes.md
-```
-
-The commit command stages only the observed, allowlisted paths, rejects
-`experiments/` and Git metadata, creates one exact experiment commit, and
-returns its base, head, paths, and diff digest. It never merges or removes the
-worktree; a human controls integration into the main branch.
-
-This command prepares code; it does not create execution evidence. Its commit
-can become a Candidate only after a successful direct Attempt for an included
-Run records the same head and ChangeSet. Normally, integrate it into a child
-Idea/Plan runtime and dispatch that follow-up.
-
-## Evidence, combinations, and production
-
-`exp experiment close --input ...` atomically closes an Experiment, completes
-its Plan, records included/excluded Run dispositions, and publishes any
-Findings. An operational failure is not a refuted hypothesis, and `invalid`
-means the evidence cannot answer the registered question.
-
-```json
-{
-  "schema_version": "exp.request.experiment-close/v1",
-  "experiment": "exp_...",
-  "plan": "plan_...",
-  "verdict": "supported",
-  "summary": "The registered change improved the primary metric.",
-  "evidence": [
-    {"run": "run_...", "disposition": "included", "reason": "Comparable run"}
-  ],
-  "findings": [
-    {
-      "title": "Cosine decay helps after warmup",
-      "statement": "Under the registered setup, cosine decay improved macro-F1.",
-      "scope": "encoder-v2 / validation-v1",
-      "evidence": [{"run": "run_...", "detail": "Primary comparable run"}]
-    }
-  ]
-}
-```
-
-```sh
-exp experiment close --input close.json
-exp evaluation spec create \
-  --title "Scientific gate" --purpose scientific \
-  --dataset validation-v1 --protocol "Fixed evaluator" \
-  --metric 'macro_f1:score:maximize:0.90' \
-  --pool "$POOL_ID" --budget-hours 1
-exp evaluation create \
-  --title "Candidate result" --spec evalspec_... --subject exp_... \
-  --outcome passed --metric 'macro_f1=0.91:score' \
-  --summary "Passed the registered threshold"
-exp candidate create \
-  --title "Cosine candidate" --experiment exp_... --evaluation eval_... \
-  --git-commit "$HEAD_COMMIT" --change configs/cosine.toml --change src/train.go
-```
-
-Create an immutable scientific Evaluation before turning a supported result
-into a Candidate. A Candidate also requires a successful direct Attempt for an
-included conclusion Run with the same full Git commit and exact ChangeSet. It
-pins that evidence lineage and optional parent Candidates. Releases are target-specific
-sets of named slots: a quantitative system might use `signal`, `risk`,
-`portfolio`, and `execution`, while a monolith may use `main`.
-
-Independent improvements are not assumed additive. A Release with multiple
-Candidates stores both a separately supported combination Experiment and its
-passing scientific Evaluation. Production
-then follows:
-
-```text
-EvaluationSpec -> Evaluation -> Candidate -> typed Release
-              -> sealed PromotionSpec -> fresh holdout Evaluation
-              -> human Promotion -> derived Champion manifest
-```
-
-`exp champion manifest` renders the current accepted Releases for downstream
-consumers. The append-only Promotion chain remains the authority.
-
-A Release request uses named slots and makes combination evidence explicit:
-
-```json
-{
-  "schema_version": "exp.request.release-create/v1",
-  "title": "Quant stack v7",
-  "target": "production",
-  "version": "v7",
-  "state": "draft",
-  "slots": [
-    {"name": "signal", "candidate": "cand_..."},
-    {"name": "risk", "candidate": "cand_..."}
-  ],
-  "combination": {"experiment": "exp_...", "evaluation": "eval_..."}
-}
-```
-
-For production, create a promotion-purpose EvaluationSpec with thresholds and
-`--sealed`, create the PromotionSpec, then run a fresh Evaluation of the
-validated Release after that seal. Only then append the named human decision:
-
-```sh
-exp promotion spec-create \
-  --title "Production v7 gate" --target production \
-  --evaluation-spec evalspec_... --holdout-budget-hours 1
-exp evaluation create \
-  --title "Fresh sealed holdout" --spec evalspec_... --subject rel_... \
-  --outcome passed --metric 'macro_f1=0.91:score' \
-  --summary "Passed the sealed holdout"
-exp promotion append \
-  --title "Promote v7" --target production --spec promspec_... \
-  --challenger rel_... --evaluation eval_... --outcome accepted \
-  --approved-by 'human:david' --confirm
-exp champion manifest --target production
-```
-
-## Storage and recovery
-
-Canonical multi-record mutations use a prepared, hash-checked journal under the
-Git common directory. Exact candidate bytes become durable before the first
-canonical rename. Recovery always rolls forward when a destination matches the
-recorded old or new hash and stops on an unrelated edit; run
-`exp record recover` to recover explicitly. Generated projections are rebuilt
-after canonical commit and are never transaction participants.
-
-Committed journals are retained only as a bounded diagnostic tail, and a crash
-before journal publication leaves staging that can be safely removed. The
-public `record transaction` surface is intentionally limited to low-risk Idea
-and ResourcePool edits; lifecycle records must use their domain commands.
-
-`README.md`, `ROADMAP.md`, `LEDGER.md`, and `DECISIONS.md` inside
-`experiments/` are deterministic projections. `exp validate` checks canonical
-records and graphs; `exp render --check` compares exact projection bytes.
-
-## Optuna and harness-v0
-
-The provider-neutral `exp.search-adapter/v1` contract defines idempotent
-open/ask/tell/prune/observe operations for an Optuna-like Study. A Study is
-strictly inside one Plan revision: it may choose parameters and prune trials,
-but it never owns the global queue, ResourcePool allocation, Findings,
-Releases, or Promotions. A concrete Optuna adapter is intentionally deferred.
-
-Migration from the earlier experiment-knowledge-harness is explicit and
-fingerprinted:
-
-```sh
-exp migrate plan --source experiments --output draft.json
-exp migrate plan --source experiments --resolutions resolutions.json --output reviewed.json
-exp migrate apply --plan reviewed.json
-```
-
-Planning is read-only unless `--output` is supplied. Apply accepts only a fully
-reviewed plan, rechecks every source hash, archives exact legacy bytes, and uses
-a recoverable root swap. Migration is never automatic and never executes a
-legacy script.
-
-## Machine output and embedded guidance
-
-Commands advertising `--json` emit one `exp.cli/v1` envelope on stdout. Agents
-should use complete typed IDs and revisions from that envelope, never scrape
-human tables or generated projections. `exp <command> --help` is authoritative
-for all flags.
-
-`exp --skill` and `exp skill print` expose guidance embedded in the same binary.
-`exp skill install` installs it; `exp skill check` detects drift. Maintainers use
-`exp skill sync --check` or `make skill-check` to verify the generated command
-reference.
-
-## Development
-
-The repository pins Go 1.26.4 in `mise.toml`.
-
-```sh
+```bash
 mise install
 mise exec -- make all
-./exp --version
-```
-
-CI runs formatting, vet, race-enabled tests, versioned builds, and portability
-checks.
-
-The bilingual documentation uses `uv` and MkDocs:
-
-```sh
-make docs-serve
 make docs-build
 ```
-
-`docs-build` performs a strict site build and generates English and Traditional
-Chinese `llms.txt` outputs under `site/`.
 
 ## License
 

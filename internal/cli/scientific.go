@@ -26,6 +26,8 @@ type scientificOptions struct {
 	body           string
 	experiment     string
 	evaluation     string
+	attempt        string
+	legacy         bool
 	parents        []string
 	gitCommit      string
 	changeSet      []string
@@ -118,18 +120,21 @@ func newCandidateCommand(app *App, root *rootOptions) *cobra.Command {
 	command := &cobra.Command{Use: "candidate", Short: "Promote supported experimental evidence into Git-addressed Candidates", Args: cobra.NoArgs}
 	command.RunE = func(command *cobra.Command, _ []string) error { return command.Help() }
 	options := &scientificOptions{}
-	create := &cobra.Command{Use: "create", Short: "Create a Candidate from a supported Experiment and passing Evaluation", Args: cobra.NoArgs}
+	create := &cobra.Command{Use: "create", Short: "Create Candidate v2 from a clean formal Attempt, or explicitly select legacy v1", Args: cobra.NoArgs}
 	create.RunE = func(command *cobra.Command, _ []string) error { return runCandidateCreate(command, app, root, options) }
 	flags := create.Flags()
 	flags.StringVar(&options.title, "title", "", "set the Candidate title")
 	flags.StringVar(&options.body, "body", "", "set optional Markdown detail")
 	flags.StringVar(&options.experiment, "experiment", "", "reference the closed supported Experiment")
 	flags.StringVar(&options.evaluation, "evaluation", "", "reference its passing scientific Evaluation")
+	flags.StringVar(&options.attempt, "attempt", "", "reference the clean successful formal Attempt backing Candidate v2")
+	flags.BoolVar(&options.legacy, "legacy", false, "explicitly select Candidate v1 Git fields (legacy field shape is also inferred)")
 	flags.StringSliceVar(&options.parents, "parent", nil, "link parent Candidates")
-	flags.StringVar(&options.gitCommit, "git-commit", "", "set the full exact Git object ID")
-	flags.StringSliceVar(&options.changeSet, "change", nil, "add an exact changed path")
+	flags.StringVar(&options.gitCommit, "git-commit", "", "set the legacy full exact Git object ID")
+	flags.StringSliceVar(&options.changeSet, "change", nil, "add a legacy exact changed path")
 	flags.StringSliceVar(&options.tags, "tags", nil, "set free tags")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
+	markRequiredFlags(create, "title")
 	command.AddCommand(create)
 	return command
 }
@@ -167,6 +172,7 @@ func newPromotionSpecCommand(app *App, root *rootOptions) *cobra.Command {
 	flags.Float64Var(&options.holdoutHours, "holdout-budget-hours", 0, "set the finite holdout budget")
 	flags.StringSliceVar(&options.tags, "tags", nil, "set free tags")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
+	markRequiredFlags(command, "title")
 	return command
 }
 
@@ -186,6 +192,7 @@ func newPromotionAppendCommand(app *App, root *rootOptions) *cobra.Command {
 	flags.StringSliceVar(&options.tags, "tags", nil, "set free tags")
 	flags.BoolVar(&options.confirm, "confirm", false, "confirm this exact human production decision")
 	flags.BoolVar(&options.json, "json", false, jsonFlagUsage)
+	markRequiredFlags(command, "title")
 	return command
 }
 
@@ -271,7 +278,7 @@ func runExperimentClose(command *cobra.Command, app *App, root *rootOptions, opt
 		Experiment: experiment, Plan: plan, Verdict: research.Verdict(request.Verdict), Summary: request.Summary, Evidence: evidence, Findings: findings,
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "experiment close", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "experiment close", err)
 	}
 	data := struct {
 		Transaction string                `json:"transaction_id"`
@@ -285,6 +292,10 @@ func runExperimentClose(command *cobra.Command, app *App, root *rootOptions, opt
 	return commandSuccess(app, options.json, "experiment close", data, false, refreshAfterTransaction(command, app, info, store), fmt.Sprintf("Closed Experiment %s and published %d Finding(s).\n", data.Experiment.ID, len(data.Findings)))
 }
 
+func candidateUsesLegacyShape(options *scientificOptions) bool {
+	return options != nil && (options.legacy || strings.TrimSpace(options.gitCommit) != "" || len(options.changeSet) != 0)
+}
+
 func runCandidateCreate(command *cobra.Command, app *App, root *rootOptions, options *scientificOptions) error {
 	info, store, err := openTransactionalStore(command, app, root)
 	if err != nil {
@@ -293,6 +304,24 @@ func runCandidateCreate(command *cobra.Command, app *App, root *rootOptions, opt
 	inventory, err := store.Inventory(command.Context())
 	if err != nil {
 		return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, err)
+	}
+	attempt := lifecycle.RevisionRef{}
+	legacyShape := candidateUsesLegacyShape(options)
+	if legacyShape {
+		if strings.TrimSpace(options.attempt) != "" {
+			return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, errors.New("--attempt cannot be mixed with legacy --git-commit/--change fields"))
+		}
+		if strings.TrimSpace(options.gitCommit) == "" || len(options.changeSet) == 0 {
+			return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, errors.New("legacy Candidate v1 requires --git-commit and at least one --change"))
+		}
+	} else {
+		if strings.TrimSpace(options.attempt) == "" {
+			return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, errors.New("Candidate v2 requires an explicit clean successful formal --attempt; legacy --git-commit/--change invocations remain accepted"))
+		}
+		attempt, err = currentRevisionRef(inventory, options.attempt, research.KindAttempt)
+		if err != nil {
+			return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, err)
+		}
 	}
 	experiment, err := currentRevisionRef(inventory, options.experiment, research.KindExperiment)
 	if err != nil {
@@ -318,11 +347,11 @@ func runCandidateCreate(command *cobra.Command, app *App, root *rootOptions, opt
 	}
 	result, err := lifecycle.New(store, lifecycle.WithClock(app.clock), lifecycle.WithUUIDGenerator(app.GenerateUUID)).CreateCandidate(command.Context(), lifecycle.CreateCandidateRequest{
 		Title: options.title, Body: options.body, Experiment: experiment, Evaluation: evaluation,
-		EvaluationSpecExpectedRevision: evaluationSpecDocument.Revision, Parents: parents,
+		EvaluationSpecExpectedRevision: evaluationSpecDocument.Revision, Parents: parents, Attempt: attempt,
 		GitCommit: options.gitCommit, ChangeSet: options.changeSet, Tags: options.tags,
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "candidate create", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "candidate create", err)
 	}
 	data := struct {
 		Transaction string              `json:"transaction_id"`
@@ -393,7 +422,7 @@ func runReleaseCreate(command *cobra.Command, app *App, root *rootOptions, optio
 		State: research.ReleaseState(request.State), Slots: slots, Combination: combination, Evaluation: evaluation, Tags: request.Tags,
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "release create", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "release create", err)
 	}
 	data := struct {
 		Transaction string               `json:"transaction_id"`
@@ -424,7 +453,7 @@ func runPromotionSpecCreate(command *cobra.Command, app *App, root *rootOptions,
 		Title: options.title, Body: options.body, Target: options.target, EvaluationSpec: spec, HoldoutBudgetHours: options.holdoutHours, Tags: options.tags,
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "promotion spec-create", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "promotion spec-create", err)
 	}
 	data := struct {
 		Transaction string              `json:"transaction_id"`
@@ -472,7 +501,7 @@ func runPromotionAppend(command *cobra.Command, app *App, root *rootOptions, opt
 		ExpectedPrevious: tip, PreviousExpectedRevision: tipRevision, ExpectedChampion: champion, IncumbentExpectedRevision: incumbentRevision, Tags: options.tags,
 	})
 	if err != nil {
-		return commandFailure(app, options.json, "promotion append", struct{}{}, false, nil, err)
+		return lifecycleCommandFailure(app, options.json, "promotion append", err)
 	}
 	data := struct {
 		Transaction string              `json:"transaction_id"`
@@ -511,13 +540,24 @@ func runChampion(command *cobra.Command, app *App, root *rootOptions, options *s
 	return commandSuccess(app, options.json, "champion", data, false, convertRecordDiagnostics(inventory.Diagnostics), human.String())
 }
 
+type championManifestSource struct {
+	Source       string   `json:"source"`
+	LocatorHints []string `json:"locator_hints"`
+	Subdir       string   `json:"subdir"`
+	HeadCommit   string   `json:"head_commit"`
+	ChangeSet    []string `json:"change_set"`
+}
+
 type championManifestSlot struct {
-	Name       string   `json:"name"`
-	Candidate  string   `json:"candidate"`
-	Experiment string   `json:"experiment"`
-	Evaluation string   `json:"evaluation"`
-	GitCommit  string   `json:"git_commit"`
-	ChangeSet  []string `json:"change_set"`
+	Name            string                   `json:"name"`
+	Candidate       string                   `json:"candidate"`
+	Experiment      string                   `json:"experiment"`
+	Evaluation      string                   `json:"evaluation"`
+	GitCommit       string                   `json:"git_commit,omitempty"`
+	ChangeSet       []string                 `json:"change_set,omitempty"`
+	Attempt         string                   `json:"attempt,omitempty"`
+	ExecutionSource string                   `json:"execution_source,omitempty"`
+	Sources         []championManifestSource `json:"sources,omitempty"`
 }
 
 type championManifestEntry struct {
@@ -531,6 +571,45 @@ type championManifestEntry struct {
 type championManifest struct {
 	SchemaVersion string                  `json:"schema_version"`
 	Champions     []championManifestEntry `json:"champions"`
+}
+
+func projectChampionManifestSlot(inventory *record.Inventory, name string, candidate *research.Candidate) (championManifestSlot, bool, error) {
+	if inventory == nil || candidate == nil {
+		return championManifestSlot{}, false, errors.New("champion manifest Candidate is missing")
+	}
+	projected := championManifestSlot{
+		Name: name, Candidate: candidate.ID.String(), Experiment: candidate.Experiment.String(), Evaluation: candidate.Evaluation.String(),
+		GitCommit: candidate.GitCommit, ChangeSet: append([]string(nil), candidate.ChangeSet...),
+	}
+	if candidate.Schema != research.SchemaCandidateV2 {
+		return projected, false, nil
+	}
+	attemptDocument, err := inventory.ByID(candidate.Attempt)
+	if err != nil {
+		return championManifestSlot{}, false, err
+	}
+	attempt, ok := attemptDocument.Record.(*research.Attempt)
+	if !ok {
+		return championManifestSlot{}, false, fmt.Errorf("Candidate backing record %s is not an Attempt", candidate.Attempt)
+	}
+	projected.Attempt = candidate.Attempt.String()
+	projected.ExecutionSource = attempt.ExecutionSource.String()
+	projected.Sources = make([]championManifestSource, 0, len(candidate.Sources))
+	for _, candidateSource := range candidate.Sources {
+		sourceDocument, sourceErr := inventory.ByID(candidateSource.Source)
+		if sourceErr != nil {
+			return championManifestSlot{}, false, sourceErr
+		}
+		source, ok := sourceDocument.Record.(*research.Source)
+		if !ok {
+			return championManifestSlot{}, false, fmt.Errorf("Candidate Source record %s has unexpected type", candidateSource.Source)
+		}
+		projected.Sources = append(projected.Sources, championManifestSource{
+			Source: candidateSource.Source.String(), LocatorHints: append([]string{}, source.LocatorHints...), Subdir: source.Subdir,
+			HeadCommit: candidateSource.HeadCommit, ChangeSet: append([]string{}, candidateSource.ChangeSet...),
+		})
+	}
+	return projected, true, nil
 }
 
 func runChampionManifest(command *cobra.Command, app *App, root *rootOptions, options *scientificOptions) error {
@@ -563,7 +642,14 @@ func runChampionManifest(command *cobra.Command, app *App, root *rootOptions, op
 				return commandFailure(app, options.json, "champion manifest", manifest, false, nil, candidateErr)
 			}
 			candidate := candidateDocument.Record.(*research.Candidate)
-			entry.Slots = append(entry.Slots, championManifestSlot{Name: slot.Name, Candidate: candidate.ID.String(), Experiment: candidate.Experiment.String(), Evaluation: candidate.Evaluation.String(), GitCommit: candidate.GitCommit, ChangeSet: append([]string(nil), candidate.ChangeSet...)})
+			projected, sourceAware, projectErr := projectChampionManifestSlot(inventory, slot.Name, candidate)
+			if projectErr != nil {
+				return commandFailure(app, options.json, "champion manifest", manifest, false, nil, projectErr)
+			}
+			if sourceAware {
+				manifest.SchemaVersion = "exp.champion-manifest/v3"
+			}
+			entry.Slots = append(entry.Slots, projected)
 		}
 		manifest.Champions = append(manifest.Champions, entry)
 	}
@@ -574,7 +660,16 @@ func runChampionManifest(command *cobra.Command, app *App, root *rootOptions, op
 	if err != nil {
 		return commandFailure(app, options.json, "champion manifest", manifest, false, nil, err)
 	}
-	return commandSuccess(app, options.json, "champion manifest", manifest, false, convertRecordDiagnostics(inventory.Diagnostics), string(encoded)+"\n")
+	return writeChampionManifestOutput(app, options.json, manifest, convertRecordDiagnostics(inventory.Diagnostics), encoded)
+}
+
+func writeChampionManifestOutput(app *App, machine bool, manifest championManifest, diagnostics []Diagnostic, encoded []byte) error {
+	if machine {
+		return commandSuccess(app, true, "champion manifest", manifest, false, diagnostics, "")
+	}
+	// The manifest is already schema-validated structured data. Diagnostic-text
+	// redaction would corrupt valid canonical SSH locator usernames such as git@.
+	return successfulOutputError(app.WriteHuman(string(encoded) + "\n"))
 }
 
 func currentRevisionRef(inventory *record.Inventory, reference string, kind research.Kind) (lifecycle.RevisionRef, error) {

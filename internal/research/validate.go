@@ -3,6 +3,7 @@ package research
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -31,6 +32,9 @@ func Validate(record Record) error {
 		validateProject(value, collector)
 	case *Policy:
 		validatePolicy(value, collector)
+	case *Source:
+		validateCommon(record, &value.Common, collector)
+		validateSource(value, collector)
 	case *Idea:
 		validateCommon(record, &value.Common, collector)
 		validateIdea(value, collector)
@@ -49,6 +53,9 @@ func Validate(record Record) error {
 	case *Plan:
 		validateCommon(record, &value.Common, collector)
 		validatePlan(value, collector)
+	case *Try:
+		validateCommon(record, &value.Common, collector)
+		validateTry(value, collector)
 	case *Experiment:
 		validateCommon(record, &value.Common, collector)
 		validateExperiment(value, collector)
@@ -103,6 +110,59 @@ func validateProject(project *Project, collector *issueCollector) {
 	}
 	if project.ExperimentsRoot != "." {
 		collector.add("project.experiments_root", "experiments_root", "v1 PROJECT.md must use experiments_root = \".\"")
+	}
+}
+
+func validateSource(source *Source, collector *issueCollector) {
+	key, err := NormalizeSourceKey(source.Key)
+	if err != nil || key != source.Key {
+		collector.add("source.key", "key", "key must be its normalized lower-case ASCII slug form")
+	}
+	if source.Kind != SourceGit {
+		collector.add("source.kind", "kind", "kind must be git")
+	}
+	subdir, err := NormalizeSourceSubdir(source.Subdir)
+	if err != nil {
+		collector.add(policyCode(err, "source.subdir"), "subdir", "%v", err)
+	} else if subdir != source.Subdir {
+		collector.add("source.subdir_normalized", "subdir", "subdir must use normalized Git-root-relative POSIX syntax")
+	}
+	if source.LocatorHints == nil {
+		collector.add("record.list_required", "locator_hints", "locator_hints array must be present, even when empty")
+	}
+	if len(source.LocatorHints) > MaxSourceLocatorHints {
+		collector.add("source.locator_count", "locator_hints", "Source has more than %d locator hints", MaxSourceLocatorHints)
+	}
+	seen := make(map[string]struct{}, len(source.LocatorHints))
+	for index, locator := range source.LocatorHints {
+		field := fmt.Sprintf("locator_hints[%d]", index)
+		normalized, normalizeErr := NormalizeSourceLocator(locator)
+		if normalizeErr != nil {
+			collector.add(policyCode(normalizeErr, "source.locator"), field, "%v", normalizeErr)
+		} else if normalized != locator {
+			collector.add("source.locator_normalized", field, "locator must be sanitized and normalized without userinfo, query, or fragment")
+		}
+		if _, duplicate := seen[locator]; duplicate {
+			collector.add("record.set_duplicate", field, "duplicate Source locator")
+		}
+		seen[locator] = struct{}{}
+	}
+
+	switch source.State {
+	case SourceActive:
+		if source.RetiredAt != nil {
+			collector.add("source.retired_at", "retired_at", "active Sources forbid retired_at")
+		}
+	case SourceRetired:
+		if source.RetiredAt == nil {
+			collector.add("source.retired_at", "retired_at", "retired Sources require retired_at")
+		} else if !validUTC(*source.RetiredAt) {
+			collector.add("timestamp.utc", "retired_at", "retired_at must be a UTC offset datetime")
+		} else if source.RetiredAt.Before(source.CreatedAt) || source.RetiredAt.After(source.UpdatedAt) {
+			collector.add("timestamp.order", "retired_at", "retired_at must fall within the record lifetime")
+		}
+	default:
+		collector.add("source.state", "state", "state must be active or retired")
 	}
 }
 
@@ -190,6 +250,114 @@ func validatePlan(plan *Plan, collector *issueCollector) {
 		collector.add("plan.payoff_estimate", "expected_payoff.estimate", "payoff estimate must be finite")
 	}
 	validatePlanVersion(plan, collector)
+}
+
+func validateTry(value *Try, collector *issueCollector) {
+	if value.Schema != SchemaTry {
+		collector.add("record.schema", "schema", "Try records require exp.try/v1")
+	}
+	if !nonempty(value.Goal) {
+		collector.add("try.goal", "goal", "goal is required")
+	} else if len(value.Goal) > MaxTryGoalBytes {
+		collector.add("try.goal_size", "goal", "goal exceeds the %d-byte bound", MaxTryGoalBytes)
+	}
+	validateCommitSafeString(value.Goal, "goal", collector)
+	if len(value.Sources) == 0 {
+		collector.add("try.sources", "sources", "at least one declared Source is required")
+	}
+	validateIDSet(value.Sources, KindSource, "sources", collector)
+	if !idsSorted(value.Sources) {
+		collector.add("record.set_order", "sources", "Source references must be sorted by canonical ID")
+	}
+
+	switch value.State {
+	case TryOpen:
+		if value.Conclusion != nil || value.Abandonment != nil || !value.AdoptedIdea.IsZero() {
+			collector.add("try.lifecycle_fields", "state", "open Try forbids conclusion, abandonment, and adopted_idea")
+		}
+		if !value.CreatedAt.Equal(value.UpdatedAt) {
+			collector.add("try.lifecycle_time", "updated_at", "an open Try has no lifecycle event and requires updated_at equal to created_at")
+		}
+	case TryConcluded:
+		if value.Conclusion == nil || value.Abandonment != nil || !value.AdoptedIdea.IsZero() {
+			collector.add("try.lifecycle_fields", "state", "concluded Try requires only conclusion")
+		}
+	case TryAbandoned:
+		if value.Conclusion != nil || value.Abandonment == nil || !value.AdoptedIdea.IsZero() {
+			collector.add("try.lifecycle_fields", "state", "abandoned Try requires only abandonment")
+		}
+	case TryAdopted:
+		if value.Conclusion == nil || value.Abandonment != nil || value.AdoptedIdea.IsZero() {
+			collector.add("try.lifecycle_fields", "state", "adopted Try requires conclusion and adopted_idea")
+		}
+	default:
+		collector.add("try.state", "state", "state must be open, concluded, abandoned, or adopted")
+	}
+	if value.Conclusion != nil {
+		validateTryConclusion(value, collector)
+	}
+	if value.Abandonment != nil {
+		validateTryAbandonment(value, collector)
+	}
+	if !value.AdoptedIdea.IsZero() {
+		validateReferenceKind(value.AdoptedIdea, KindIdea, "adopted_idea", collector)
+	}
+}
+
+func validateTryConclusion(value *Try, collector *issueCollector) {
+	conclusion := value.Conclusion
+	if !validUTC(conclusion.ConcludedAt) {
+		collector.add("timestamp.utc", "conclusion.concluded_at", "concluded_at must be UTC")
+	} else if conclusion.ConcludedAt.Before(value.CreatedAt) || conclusion.ConcludedAt.After(value.UpdatedAt) {
+		collector.add("timestamp.order", "conclusion.concluded_at", "concluded_at must fall within the Try lifetime")
+	} else if value.State == TryConcluded && !conclusion.ConcludedAt.Equal(value.UpdatedAt) {
+		collector.add("try.lifecycle_time", "conclusion.concluded_at", "conclusion time must equal updated_at when the Try is concluded")
+	}
+	if !nonempty(conclusion.Summary) {
+		collector.add("try.conclusion", "conclusion.summary", "human conclusion summary is required")
+	} else if len(conclusion.Summary) > MaxTryConclusionSummaryBytes {
+		collector.add("try.conclusion_size", "conclusion.summary", "summary exceeds the %d-byte bound", MaxTryConclusionSummaryBytes)
+	}
+	validateCommitSafeString(conclusion.Summary, "conclusion.summary", collector)
+	if len(conclusion.ResultDigests) > MaxTryResultDigests {
+		collector.add("try.result_count", "conclusion.result_digests", "result digest count exceeds %d", MaxTryResultDigests)
+	}
+	validateStringSet(conclusion.ResultDigests, "conclusion.result_digests", validDigest, collector)
+	if !sort.StringsAreSorted(conclusion.ResultDigests) {
+		collector.add("record.set_order", "conclusion.result_digests", "result digests must be sorted")
+	}
+	if len(conclusion.ExternalRefs) > MaxTryConclusionExternalRefs {
+		collector.add("try.external_ref_count", "conclusion.external_refs", "ExternalRef count exceeds %d", MaxTryConclusionExternalRefs)
+	}
+	for index := range conclusion.ExternalRefs {
+		validateExternalRef(&conclusion.ExternalRefs[index], fmt.Sprintf("conclusion.external_refs[%d]", index), collector)
+	}
+}
+
+func validateTryAbandonment(value *Try, collector *issueCollector) {
+	abandonment := value.Abandonment
+	if !validUTC(abandonment.AbandonedAt) {
+		collector.add("timestamp.utc", "abandonment.abandoned_at", "abandoned_at must be UTC")
+	} else if abandonment.AbandonedAt.Before(value.CreatedAt) || abandonment.AbandonedAt.After(value.UpdatedAt) {
+		collector.add("timestamp.order", "abandonment.abandoned_at", "abandoned_at must fall within the Try lifetime")
+	} else if !abandonment.AbandonedAt.Equal(value.UpdatedAt) {
+		collector.add("try.lifecycle_time", "abandonment.abandoned_at", "abandonment time must equal updated_at")
+	}
+	if !nonempty(abandonment.Reason) {
+		collector.add("try.abandonment", "abandonment.reason", "human abandonment reason is required")
+	} else if len(abandonment.Reason) > MaxTryAbandonmentReasonBytes {
+		collector.add("try.abandonment_size", "abandonment.reason", "reason exceeds the %d-byte bound", MaxTryAbandonmentReasonBytes)
+	}
+	validateCommitSafeString(abandonment.Reason, "abandonment.reason", collector)
+}
+
+func idsSorted(values []ID) bool {
+	for index := 1; index < len(values); index++ {
+		if values[index-1].String() >= values[index].String() {
+			return false
+		}
+	}
+	return true
 }
 
 func validateExperiment(experiment *Experiment, collector *issueCollector) {
@@ -390,7 +558,21 @@ func validateRun(run *Run, collector *issueCollector) {
 }
 
 func validateAttempt(attempt *Attempt, collector *issueCollector) {
-	validateReferenceKind(attempt.Run, KindRun, "run", collector)
+	switch attempt.Schema {
+	case SchemaAttempt, SchemaAttemptV2:
+		validateReferenceKind(attempt.Run, KindRun, "run", collector)
+	case SchemaAttemptV3:
+		hasRun, hasTry := !attempt.Run.IsZero(), !attempt.Try.IsZero()
+		if hasRun == hasTry {
+			collector.add("attempt.owner", "run", "exp.attempt/v3 requires exactly one of run or try")
+		}
+		if hasRun {
+			validateReferenceKind(attempt.Run, KindRun, "run", collector)
+		}
+		if hasTry {
+			validateReferenceKind(attempt.Try, KindTry, "try", collector)
+		}
+	}
 	terminal := isTerminalState(attempt.State)
 	if !terminal && !isNonterminalState(attempt.State) {
 		collector.add("attempt.state", "state", "state is not a recognized operational state")
@@ -416,6 +598,9 @@ func validateAttempt(attempt *Attempt, collector *issueCollector) {
 	}
 	validateCredentialSensitiveString(attempt.CWD, "cwd", collector)
 	validateArgv(attempt.Argv, collector)
+	if attempt.Schema == SchemaAttemptV3 && !attempt.Try.IsZero() {
+		validateTryArgvPaths(attempt.Argv, collector)
+	}
 	if attempt.StateReason != "" {
 		validateCommitSafeString(attempt.StateReason, "state_reason", collector)
 	}
@@ -468,6 +653,35 @@ func validateArgv(argv []string, collector *issueCollector) {
 		}
 		validateCommitSafeString(argument, field, collector)
 	}
+}
+
+func validateTryArgvPaths(argv []string, collector *issueCollector) {
+	for index, argument := range argv {
+		candidate := argument
+		if _, attached, found := strings.Cut(argument, "="); found {
+			candidate = attached
+		}
+		if hostAbsoluteCanonicalPath(argument) || hostAbsoluteCanonicalPath(candidate) {
+			collector.add("privacy.host_path", fmt.Sprintf("argv[%d]", index), "direct Try argv cannot contain a host-absolute path")
+		}
+	}
+	if len(argv) == 0 || !strings.ContainsAny(argv[0], `/\\`) {
+		return
+	}
+	relative := strings.TrimPrefix(argv[0], "./")
+	if relative == argv[0] && strings.HasPrefix(argv[0], ".") || ValidateCommittedPath(relative, false) != nil {
+		collector.add("privacy.host_path", "argv[0]", "direct Try executable must be a PATH basename or managed-worktree-relative path")
+	}
+}
+
+func hostAbsoluteCanonicalPath(value string) bool {
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	return path.IsAbs(value) ||
+		len(value) >= 2 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':' ||
+		strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, "//") || strings.HasPrefix(lower, "file:/")
 }
 
 func singleArgument(value string) bool {

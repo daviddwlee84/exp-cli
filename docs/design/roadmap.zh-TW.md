@@ -1,99 +1,167 @@
 # 實作藍圖
 
-!!! note "Terminology rule (zh-TW pages)"
-    技術名詞首次出現以「中文 (English original)」格式呈現，例：依賴注入
-    (dependency injection)。**不自創翻譯**——若無公認譯名直接保留英文
-    （如 `embedding`、`tokenizer`）。代碼、API 名、CLI flag、套件名、檔名一律不翻。
+目前 release 已交付 Git-native research control plane；其 canonical experiment repository 可獨立於
+Source repositories。本頁區分 implemented behavior、remaining integration 與 explicit non-goal。
+只有 current code path functional/tested 的 command 才列為 delivered。
 
-目前的 release 是本機研究控制平面 (local research control plane) 的基礎。以下里程碑 (milestone) 將已交付的行為與刻意保留到未來的 integration 分開列出。只有當 command 的行為確實可用時，才會加入該 command。
+## 已交付：canonical research 與 recovery
 
-## 已交付：規範研究基礎
+- fixed `experiments/PROJECT.md` discovery、idempotent Project v1 initialization，以及跨 linked
+  worktree 的 Project receipt reconciliation；
+- strict Markdown/TOML records、UUID identity、privacy/path check、graph/lifecycle validation、
+  deterministic revision/projection 與 stable JSON envelope；
+- Source v1、Try v1、Idea v2、Attempt v3 SourceSnapshots/retry ownership、Evaluation v2 typed
+  Attempt ownership、Candidate v2 Source identity；
+- linked-worktree ID reservation 與 Git-common lock；
+- `transactions-v2/` 中的 worktree-scoped `exp.transaction/v2` journal、exact-byte roll-forward
+  recovery，以及 conditional backward reading v1 journal；
+- local `record list/show/transaction/recover`、`validate`、`render`、`context` 與 exact harness-v0
+  plan/apply migration。
 
-- 固定探索 `<git-root>/experiments`，並提供冪等初始化 (idempotent initialization)；
-- 嚴格、具版本的 Markdown/TOML 記錄，包含 UUID identity、privacy check、graph validation、deterministic projection 與 stable JSON envelope；
-- linked-worktree ID reservation 與 Git-common locking；
-- 已準備的 multi-record create/replace/delete transaction，具備 exact-byte journal、經 hash 檢查的 roll-forward recovery、failure injection，以及明確的 `record recover`；
-- 本機 `record list/show/transaction`、`validate`、`render` 與 `context`。
+## 已交付：independent experiment repository 與 Sources
 
-## 已交付：研究 Queue 與 Agent 協作
+- dedicated private experiment repository 作為 guided initialization default，可 safe adopt existing
+  Git root，或 explicit create missing/empty target；
+- dedicated initialization 不 implicit 建立 remote、commit、submodule 或 push；
+- embedded/monorepo initialization 保留給 shared governance/legacy v1 compatibility；
+- 一般 canonical Git Source record，具有 project-unique key、immutable subdir、sanitized locator
+  history、active/retired lifecycle 與 exact CAS update；
+- 每 Project 多個 Sources，以及 Source-aware Experiment workspace commands；
+- private `exp.associations/v1` Project/Source mapping，帶 clone/Git-common filesystem identity 與
+  locator revalidation；
+- deterministic explicit/current-Project/most-specific-Source resolution，ambiguity/staleness 會回報而
+  非猜測；
+- XDG user/state/cache/data path，canonical Source record 不含 host path。
 
-- 明確的 `POLICY.md`、預設為 manual 的 autonomy、受控 classification、cluster saturation data，以及 80/20 exploit/explore share；
-- 由人類或 Agent 提出的 Idea、parent Idea lineage，以及以原子操作 qualification 成含資源價格的 Plan v2 記錄；
-- 具名 ResourcePool 與有序的 pool/lane Queue partition；
-- 透明的 expected-value scoring、global listwise advice、交換順序的 adjacent pairwise battle、不可變更的 audit record，以及 human-review fallback；
-- 每次均為全新 single-shot 的 Agent CLI profile，具備嚴格 JSON Schema output、environment allowlist、secret reference、bounded output，且不使用 SDK session。
+## 已交付：layered config、trust 與 profiles
 
-## 已交付：本機執行控制平面
+- strict `exp.config/v1` hierarchy：built-in、XDG user、canonical repository、Source root、再加
+  Source-subdir root-to-leaf files；
+- documented scalar/array/backend/profile merge rule、combined digest、per-leaf provenance 與
+  applied-layer audit；
+- private `exp.trust/v1` receipt，綁定 exact bytes、capability、Project/Source/config scope、Git-common
+  path/filesystem identity；
+- `config path/show/explain/trust/revoke/list`，包含 historical revocation/sanitized output；
+- workspace backend profile，`native_git` 是 mandatory correctness baseline；
+- named MLflow profile，只有 binary/context/timeout/default metrics 與 environment names/policy；
+  explicit compatibility flags 仍可用；
+- runtime v2 exact `runtime.dispatch` trust，與 layered config 分離。
 
-- 嚴格的 `.exp/runtime.json` binding，將 Pool/Plan 對應至 Pueue group，以及精確的 workload argv/Git identity；
-- 本機 frontier inspection、one-shot daemon tick、continuous daemon loop、pause/resume、lease fencing、weighted fairness 與 outbox recovery；
-- Git common directory 下的 SQLite operational state，絕不屬於 canonical；
-- 已消毒的 Pueue status、具 audit 的 private-worker submission，以及明確 cancel；
-- durable worker terminal marker 與 replay-safe completion；
-- 隔離的 XDG Git worktree 與精確 allowlisted experiment auto-commit，不具 merge 或 cleanup authority；
-- 唯讀的 MLflow run verification；workload 擁有 run creation 與 logging。
+## 已交付：bounded Try workflow
 
-## 已交付：科學結案與 production 邊界
+- `try run` 在 operational execution 前 publish Try 加 planned Attempt v3；
+- deterministic native Git worktree 中 direct argv execution，change allowlist 預設 empty，timeout bounded；
+- clean capture 或 explicit Try-only `--dirty=capture`，包含 full tracked patch、bounded untracked
+  bytes、clean direct submodule、canonical dirty/snapshot digest、private authenticated
+  `exp.source-seed/v1` bundle；
+- workspace preparation marker recovery 與 byte-exact seed round-trip checks；
+- private lease/fencing job execution、heartbeat、bounded result file、redacted v2 streams、durable
+  terminal/result markers；
+- conservative resume、marker/SQLite repair、explicit unknown reconciliation，以及維持 Source/config/
+  argv identity 的 one-successor retry lineage；
+- human conclusion/abandonment、result ownership check、atomic adopt as Idea v2、status、partial-safe
+  cleanup；
+- native cleanup verified clean/exactly-seeded worktree 加 private seed，同時保留 branch、commit、marker、
+  operation row 與 canonical record。
 
-- 以原子操作完成 Experiment closure、Plan completion、evidence disposition 與 Finding publication；
-- 能感知 revision 的 belief dependency 與 stale-queue detection；
-- 不可變更的 EvaluationSpec 與 Evaluation；
-- 從 supported evidence 建立 Candidate，並帶有完整 Git commit/ChangeSet；
-- typed Release slot，以及 multi-Candidate Release 強制要求經評估的 combination evidence；
-- 已封存、用於 promotion 的 evaluation、append-only human Promotion chain，以及衍生的 Champion manifest。
+## 已交付：Source-aware formal runtime
 
-## 已交付：相容性與 extension contract
+- closed `exp.runtime/v1` 保留給 embedded Attempt v2/worker v1 dispatch；
+- separate strict `exp.runtime/v2`，具有一個 writable execution Source、多個 read-only Sources、
+  `main`/`registered_worktree`/`managed_worktree` selection、explicit observational no-change，以及
+  Source-subdir-relative cwd/output；
+- 每個 Source exact clean SourceSnapshot capture 與 formal Attempt v3；
+- cross-repository canonical-before-operational Experiment/Run/Attempt creation、Plan transition、Queue
+  removal；
+- outbox submission revalidation；Source authority 消失時將 unstarted job/Attempt 標成 blocked，不會
+  optimistic submit；
+- worker-job/terminal/result v2，帶 explicit canonical root、Project UUID、checkout-local scope、
+  metadata-only pre-payload authorization、fencing、private checkout identity，以及 post-success
+  read-only Source verification；
+- durable marker temporary promotion 與 database-independent replay，不重跑 workload；
+- 透過 Evaluation v2/Candidate v2 的 clean formal Candidate gate。
 
-- 明確的 harness-v0 migration plan/apply，具備 exact-byte archive、deterministic UUIDv5 identity、經審閱的 ambiguity resolution、fingerprint revalidation，以及可復原的 root swap；
-- provider-neutral `exp.search-adapter/v1` contract，用於冪等的 Plan-scoped Study `open`/`ask`/`tell`/`prune`/`observe`；
-- 版本相符的 embedded skill 與 generated command reference；
-- 透過 `mise.toml` 在 repository local 固定 Go 1.26.4。
+## 已交付：research Queue、closure 與 promotion
 
-## 下一步：強化無人值守運作
+- default-manual Policy、controlled classification、cluster saturation、80/20 exploit/explore allocation；
+- Idea、qualified resource-priced Plan v2、named ResourcePool、globally unique ordered pool/lane Queue
+  partition；
+- transparent scoring、listwise advice、order-swapped pairwise battle、immutable audit record、human-review
+  fallback；
+- daemon frontier/tick/run/pause/resume、project lease fencing、weighted fairness、Pueue outbox recovery、
+  sanitized status、ownership-checked cancel；
+- Experiment design lock/amendment/closure、explicit Run evidence disposition、Finding/belief-staleness
+  propagation；
+- EvaluationSpec/Evaluation、Candidate v1 compatibility/Candidate v2、typed Release slot、mandatory
+  combination evidence、sealed promotion holdout、append-only human Promotion chain、Champion manifest
+  v1/v3。
 
-優先工作應改善復原能力與可觀測性 (observability)，同時不削弱 authority model：
+## 已交付：provider 與 UI boundary
 
-- 對長時間執行的 daemon 進行 soak test 與 crash test，涵蓋 Pueue submit ambiguity、expired job lease、worker interruption 與 provider restart；
-- 為 SQLite operation 與 outbox state 提供更清楚、有限的 event/audit inspection；
-- 在 policy 層級進一步區分 `assisted` 與 `limited` 的語意，而不只共用同一個 explicit dispatch gate；
-- 根據已完成工作提供更豐富的 Queue saturation 與 budget-consumption feedback；
-- first-class follow-up 與 combination Experiment creation，包括一條受支援的路徑，將 Agent 準備的精確 commit 轉成新的 executable Plan/Attempt，而不是手寫 canonical record；
-- 明確的 holdout-budget consumption accounting，以及 immutable Release supersession 的易用操作；
-- 納入更多實際 harness-v0 layout 的 migration fixture；
-- 只有在 process-tree 與 SQLite 行為經過測試後，才支援 runtime Windows；AIX 仍明確不支援 operational store。
+- provider registry/discovery，具 bounded local probe/sanitized readiness；
+- Pueue scheduling/control 僅限 declared capabilities；
+- read-only MLflow verification、exact Attempt ownership、selected metrics/tags、sanitized artifact URI，
+  以及 unavailable 時不改變 workload success 的 optional worker observation；
+- provider-neutral `exp.search-adapter/v1` interface contract（尚無 concrete search backend）；
+- workspace-provider registry 與 requested/actual/fallback report；
+- `exp ui` read-only Workflow、Workspace、Tries、Queue、Attempts、Candidates、Readiness tabs；
+  cancellable generation-fenced read、read-only SQLite open、只有 explicit bounded probe；
+- version-matched embedded skill/generated command reference。
 
-## 下一步：具體的 Plan-scoped search
+## Remaining：unattended-operation hardening
 
-只有當 integration 能證明以下項目後，才實作 Optuna adapter：
+優先 hardening 可改善 observability，但不擴大 authority：
 
-1. 支援的 Optuna/storage 版本與安全 capability probe；
-2. `open`、`ask`、`tell` 與 `prune` 的 durable idempotency；
-3. timeout-after-provider-commit ambiguity 的 recovery；
-4. storage configuration 只能使用 secret reference；
-5. multi-objective 與 trial-state mapping；
-6. 有限且經結構消毒的 observation。
+- 更長 daemon/worker soak/crash test，涵蓋 Pueue submit ambiguity、expired lease、provider restart、
+  marker/result publication、outbox repair；
+- 更清楚的 bounded event/audit inspection 與 budget-consumption reporting；
+- 在 shared explicit dispatch gate 外區分 `assisted`／`limited` 的 policy semantics；
+- 提升 follow-up/combination Experiment creation ergonomics，但不削弱 typed gate；
+- explicit holdout-budget consumption accounting 與 Release supersession ergonomics；
+- 更多 real harness-v0 migration fixtures；
+- Windows 上更完整 runtime/process-tree verification；AIX 刻意只保留 canonical Git operations，
+  operational store 回報 unsupported。
 
-Optuna 始終從屬於單一 Plan revision。它不會取代 global Queue，也不會配置 ResourcePool。
+## Remaining：optional workspace provider
 
-## 後續的 provider capability
+`dev_cli` 可 discovery，但今日**所有 lifecycle capabilities 都 fail closed**：prepare、inspect、cleanup、
+open、handoff、retire 均 compiled unsupported。Public CLI 沒有 schema-versioned content-free capability
+response，也沒有 exact native-path machine receipt 加 verifiable occupancy。Human help/version/catalog
+output 不是 authorization。
 
-每次加入一項已驗證的 external operation capability：
+在此 contract 出現前：
 
-- 更完整的 Pueue observation/cancellation reconciliation 與 bounded log；
-- 只有在 CLI 具備 stable safe surface 時，才加入 MLflow artifact/registry read；
-- DVC artifact 與 Queue read，之後再加入範圍狹窄的 write；
-- 具名 site 的 Slurm probe 與 scheduling，並明確 export environment；
-- notebook runner 作為 workload entrypoint，而不是 durable scheduler。
+- 不 invocation lifecycle `dev` subprocess；
+- trusted selection 可 report explicit fallback 至 `native_git`；
+- native Git 擁有 prepare、byte verification、inspect、cleanup、retire；
+- provider-local task/catalog/worktree ID 絕不是 canonical authority。
 
-每一項新的 mutation 都必須宣告 effect、保留 argument boundary、揭露可供審閱的 identity，並避免 implicit installation、authentication、daemon startup 或 artifact download。
+未來 capability 只有在回傳 exact machine receipt，且 native postcondition 能證明 provider 作用於
+requested worktree 後，才可 enable。
 
-## 明確延後
+## Remaining：concrete Plan-scoped search 與 providers
 
-- 自動 production deployment 或 rollback execution；
-- 由 Agent 核准 Promotion；
-- 通用 cloud scheduler 或 model registry abstraction；
-- W&B、Kaggle、Ray、Kubernetes、Azure ML、Databricks、Modal、RunPod，或 generic browser-session control；
-- 一個 repository 中存在多個 `experiments/` root，或 cross-repository graph；
-- dynamic Go plugin、強制 FTS index 或 TUI；
-- raw telemetry/log mirroring 與 artifact-byte storage；
-- 在沒有專用 Experiment 與 Evaluation 的情況下，假設各個獨立 Candidate 的增益組合後仍成立。
+Provider-neutral Study contract 已存在，但沒有 concrete Optuna runtime。Future adapter 必須證明
+version/capability support、durable idempotency、timeout-after-provider-commit recovery、secret-reference-
+only storage config、trial-state mapping、bounded sanitized observation。它從屬一個 exact Plan revision，
+不能取代 Queue/ResourcePool authority。
+
+Additional Pueue observation、MLflow registry/artifact read、DVC、Slurm、notebook entrypoint 仍需逐
+capability 實作。每項都必須 declare effect、preserve argv boundary、避免 implicit install/login/service
+start/download，且除非 explicit import，provider state 保持 non-canonical。
+
+## Explicit non-goal 與 true limit
+
+目前 scope 不提供：
+
+- automatic Git merge、push、rebase、branch deletion、production deploy 或 rollback execution；
+- agent/provider/autonomy/manifest/TUI-approved Promotion；
+- large artifact store、raw telemetry/log mirror、artifact-byte persistence 或 automatic artifact/model
+  download；
+- 從 Try（尤其 dirty Try）直接建立 Candidate/Promotion；必須 clean formal rerun、typed Evaluation v2
+  與 Candidate v2；
+- 同一 Git repository 的多個 canonical Project roots，或不同 Project UUID 間的 canonical relation
+  （單一 Project 內多個 external Sources 已交付）；
+- universal cloud scheduler/model registry、generic browser-session control、dynamic Go plugin ABI；
+- 從 process、scheduler、tracker、commit 或 artifact state automatic scientific verdict；
+- migration 期間執行 legacy harness scripts。

@@ -11,15 +11,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/daviddwlee84/exp-cli/internal/safex"
 )
 
 const (
 	SchemaVersion = 5
-	MaxJSONBytes  = 1 << 20
+	MaxJSONBytes  = 2 << 20
 )
 
 var (
@@ -30,6 +33,15 @@ var (
 	ErrFenced      = errors.New("operational writer has a stale fencing token")
 	ErrPaused      = errors.New("operational dispatch is paused")
 )
+
+// Available reports whether this build has a usable operational backend. Callers
+// that would publish canonical-to-operational work must check it before mutation.
+func Available() error {
+	if runtime.GOOS == "aix" {
+		return ErrUnsupported
+	}
+	return nil
+}
 
 type Option func(*options)
 
@@ -130,6 +142,20 @@ type JobInput struct {
 	MaxAttempts    int
 }
 
+// JobAuthority is the metadata-only claim projection used before a worker is
+// allowed to read a private payload. It deliberately omits Payload and Result.
+type JobAuthority struct {
+	ID             string
+	Kind           string
+	Role           string
+	SubjectID      string
+	CanonicalScope string
+	State          JobState
+	ClaimedBy      string
+	FencingToken   int64
+	PueueTaskID    *int64
+}
+
 type Job struct {
 	JobInput
 	State          JobState
@@ -143,6 +169,18 @@ type Job struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	LeaseExpiresAt *time.Time
+}
+
+// JobSummary is the payload-free operational projection used by read-only
+// status surfaces. It cannot expose prompts, results, errors, provider-native
+// identifiers, or other private execution content.
+type JobSummary struct {
+	ID             string
+	SubjectID      string
+	State          JobState
+	FencingToken   int64
+	LeaseExpiresAt *time.Time
+	UpdatedAt      time.Time
 }
 
 // ActiveAllocation is the minimal scheduler-accounting projection. It omits
@@ -234,6 +272,23 @@ func ChooseLane(fairness Fairness, exploitReady, exploreReady bool, exploitWeigh
 		return "exploit", true
 	}
 	return "explore", true
+}
+
+func validateMLflowRunID(value string) error {
+	if value == "" {
+		return nil
+	}
+	if value != strings.TrimSpace(value) || len(value) > 256 || !utf8.ValidString(value) || safex.ContainsSecretText(value) {
+		return errors.New("MLflow run identity is invalid")
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._:-", character) {
+			continue
+		}
+		return errors.New("MLflow run identity is invalid")
+	}
+	return nil
 }
 
 func validateIdentifier(name, value string) error {

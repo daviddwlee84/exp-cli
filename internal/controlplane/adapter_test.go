@@ -17,17 +17,19 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
 	"github.com/daviddwlee84/exp-cli/internal/worker"
+	"github.com/daviddwlee84/exp-cli/internal/workspace"
 	"github.com/google/uuid"
 )
 
 type canonicalFixture struct {
-	repository string
-	store      *record.Store
-	adapter    Adapter
-	poolID     research.ID
-	planID     research.ID
-	queueID    research.ID
-	now        time.Time
+	repository   string
+	store        *record.Store
+	adapter      Adapter
+	associations *workspace.Store
+	poolID       research.ID
+	planID       research.ID
+	queueID      research.ID
+	now          time.Time
 }
 
 func TestAdapterPreparesSubmitsAndReconcilesCanonicalAttempt(t *testing.T) {
@@ -179,6 +181,28 @@ func TestAdapterRecoversSubmissionByStableLabel(t *testing.T) {
 	attempt := findAttemptByDispatch(validInventory(t, fixture.store), selection.ID).Record.(*research.Attempt)
 	if attempt.State != research.AttemptQueued || len(attempt.ExternalRefs) != 1 || attempt.ExternalRefs[0].NativeID != "77" {
 		t.Fatalf("label-recovered Attempt = %#v", attempt)
+	}
+	if err := fixture.adapter.Reconcile(t.Context(), controller.SchedulerSnapshot{Tasks: []controller.SchedulerTask{{ID: 77, Label: "foreign-label", Group: "gpu", State: "running"}}}); err != nil {
+		t.Fatal(err)
+	}
+	attemptDocument := findAttemptByDispatch(validInventory(t, fixture.store), selection.ID)
+	if attemptDocument.Record.(*research.Attempt).State != research.AttemptQueued {
+		t.Fatal("referenced numeric task bypassed captured label validation")
+	}
+	replacement := attemptDocument.Clone()
+	replacement.Record.(*research.Attempt).ExternalRefs[0].Context = "remote"
+	encoded, err := record.Encode(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "experiments", filepath.FromSlash(replacement.Path)), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.adapter.Reconcile(t.Context(), controller.SchedulerSnapshot{Tasks: []controller.SchedulerTask{{ID: 77, Label: prepared.Label, Group: "gpu", State: "running"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if current := findAttemptByDispatch(validInventory(t, fixture.store), selection.ID).Record.(*research.Attempt); current.State != research.AttemptQueued {
+		t.Fatal("non-local Pueue reference mutated canonical Attempt")
 	}
 	if err := fixture.adapter.Reconcile(t.Context(), controller.SchedulerSnapshot{}); err != nil {
 		t.Fatal(err)

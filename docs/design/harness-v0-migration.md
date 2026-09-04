@@ -21,6 +21,23 @@ README.md and other root-level Markdown summaries (views only)
 A v0 tree is legacy input, not malformed v1. `migrate plan` reports parsed
 records, raw spans, and diagnostics without rewriting any source byte.
 
+## Boundary with current versioned compatibility
+
+This migrator is not an upgrader for a valid `exp.project/v1` Project. Dedicated
+and embedded projects use the same Project v1 schema; Source records and Try
+paths are additive canonical namespaces with conservative exact path recognition.
+Idea v1/v2, Attempt v1/v2/v3, Evaluation v1/v2, and Candidate v1/v2 each retain
+closed decoders, so older records remain older records. Runtime v1/v2 and worker
+job/terminal/result v1/v2 are separate strict JSON contracts. Transaction v1 is
+read only from `transactions/` under its linked-worktree safety rule, while all
+new transactions use worktree-scoped v2 in `transactions-v2/`.
+
+Host-local associations, layered configuration, and trust receipts are never
+migration source evidence and are not placed in the archive. Existing embedded
+Projects continue physical discovery without associations. See
+[Migration and backward compatibility](../workflows/migration.md) for the exact
+matrix and the opt-in path for each newer feature.
+
 ## Lossless reader
 
 The reader first captures each source file as bytes and a SHA-256 hash. Parsing produces nodes with source path, zero-based byte range, exact raw bytes, decoded fields, and diagnostics. Every byte belongs to exactly one of:

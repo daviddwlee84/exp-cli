@@ -1,162 +1,200 @@
 # MLflow
 
-!!! note "Terminology rule (zh-TW pages)"
-    技術名詞首次出現以「中文 (English original)」格式呈現，例：依賴注入
-    (dependency injection)。**不自創翻譯**——若無公認譯名直接保留英文
-    （如 `embedding`、`tokenizer`）。代碼、API 名、CLI flag、套件名、檔名一律不翻。
+MLflow 仍是 workload-created run、metric、parameter、tag、trace、artifact location/bytes 與 registry
+state 的 authority。`exp` 是 bounded read-only observer：絕不 create/mutate run、log telemetry、
+download artifact、改 registry state，或把 run status 轉成 scientific verdict。
 
-`exp` 將 MLflow 視為唯讀遙測來源 (read-only telemetry source)。Workload 自行建立
-並記錄其 MLflow run；`exp` 可以驗證單一明確 run 的指定欄位，並在通過更嚴格的
-lineage 檢查後，將已清理的參照附加至不可變的 Evaluation。
+Canonical authorities 彼此分離：
 
-MLflow 仍是 runs、metrics、tags、parameters、artifacts 與 registry state 的權威來源。
-Evaluation 則是規範性研究陳述 (canonical research statement)。
+- Attempt 記錄 redacted operational execution；只有 verification 後才可帶 sanitized MLflow
+  ExternalRef；
+- Evaluation 在 EvaluationSpec 下記錄 scientific metric outcome；
+- Candidate/Release/Promotion enforcement 各自 typed evidence gates；
+- artifact URI 是 provider identity，不是 artifact-byte/deployment authority。
 
-## 已實作功能
+## 已交付 entry points
 
-目前的 boundary 有兩個入口：
+| Entry point | MLflow 缺少或 assertion 失敗時的行為 |
+|---|---|
+| `exp provider mlflow verify` | Strict command failure；不建立 canonical record。 |
+| `exp evaluation create --mlflow-run-id ...` | Immutable Evaluation 建立前 strict verification/lineage/metric failure。 |
+| Direct Try 或 formal worker 選 profile，且 workload result 含 `mlflow_run_id` | Optional observation 變成 `unavailable`／`unverified`；successful process state 不變。只有 `verified` ownership 會匯入。 |
 
-- `exp provider mlflow verify` 檢查單一 workload-owned run 上的精確 metrics 與
-  expected tags。
-- `exp evaluation create --mlflow-run-id ...` 重新執行驗證，且只有 canonical Attempt
-  ownership 與 subject lineage 相符時才附加該 run。
+全部使用 installed `mlflow` binary 的 read-only `runs describe --run-id RUN_ID`。Binary 必須已可從
+`PATH` 解析；`exp` 不 install MLflow、不進入 Python environment、不 start tracking server、不
+interactive authenticate，也不 invocation shell。
 
-此整合**不會**：
+## Named profiles
 
-- 建立、啟動、終止或刪除 MLflow run；
-- 記錄或更新 metrics、parameters、tags 或 artifacts；
-- 註冊、轉換 stage、設定 alias 或刪除 model；
-- 安裝 MLflow、隱式進入 Python environment，或開啟 authentication；
-- 將 run success 轉換成科學結論。
+MLflow profile 已由 layered `exp.config/v1` 提供。Named profile 會由 higher-precedence config
+atomically replace，不含 endpoint/credential value；只含 non-secret context、binary name、timeout、
+environment **names 與 policy**，以及 default metric names。
 
-`mlflow` executable 必須已存在於 `PATH`。Adapter 會從 project repository 執行
-`mlflow runs describe --run-id RUN_ID`，並套用有大小限制、預設拒絕
-(deny-by-default) 的 environment。
+```toml
+schema = "exp.config/v1"
 
-## 驗證 workload-owned run
+[defaults]
+mlflow_profile = "observer"
 
-每個 metric 都必須使用精確名稱要求；每個 tag 都必須寫成精確的 `NAME=VALUE`
-assertion：
+[mlflow.profiles.observer]
+context = "research"
+binary = "mlflow"
+timeout = "30s"
+default_metrics = ["macro_f1", "validation_loss"]
+
+[mlflow.profiles.observer.env.MLFLOW_TRACKING_URI]
+from = "MLFLOW_TRACKING_URI"
+secret = false
+required = true
+
+[mlflow.profiles.observer.env.MLFLOW_TRACKING_TOKEN]
+from = "MLFLOW_TRACKING_TOKEN"
+secret = true
+required = true
+```
+
+Map key 與 `from` value 都是 variable name。其 value 只在 child start 前立即從 parent resolve，
+絕不放入 config、worker output、record 或 receipt，且全部註冊供 redaction。Required variable 缺少
+時，在 child process 前失敗。Serialized workload profile 禁止以 `EXP_` 開頭的 child name。
+
+Profile precedence 先看 explicit root flag：
 
 ```bash
-RUN_ID='0123456789abcdef0123456789abcdef'
-ATTEMPT_ID='att_01a01e61-0000-7031-8000-000000000031'
-
-exp provider mlflow verify \
-  --run-id "$RUN_ID" \
-  --metric macro_f1 \
-  --metric validation_loss \
-  --tag "exp.attempt_id=$ATTEMPT_ID" \
+exp --mlflow-profile observer provider mlflow verify \
+  --run-id <WORKLOAD_RUN_ID> \
+  --tag 'exp.attempt_id=<ATTEMPT_ID>' \
   --json
 ```
 
-至少需要一個 `--metric` 或 `--tag`。只有下列條件全部成立，驗證才會成功：
+沒有 flag 時由 `defaults.mlflow_profile` 提供。若 winning profile definition 來自 experiment/Source/
+subdirectory repository file，即使 explicit name 仍要求 exact trust。Repository-selected default
+同時要求 selector/profile definition trusted。應使用 `exp config explain`／`exp config trust`，不要把
+value 複製到 command。
 
-- MLflow 回傳的 run ID 與要求的 ID 相同；
-- run status 精確等於 `FINISHED`；
-- 每個 requested metric 都存在；
-- 每個 expected tag 都存在，且其值完全相符。
+為 backward compatibility，`--mlflow-context`、`--allow-env`、`--secret-env` 建立 invocation-local
+`compatibility` profile，binary 為 `mlflow`、timeout 30 秒。Named `--mlflow-profile` 不能與這些
+flags 混用。`--allow-env NAME` 是 optional non-secret inheritance；`--secret-env NAME` 是從同名
+parent variable 取得的 required secret inheritance；兩者都不接受 value。
 
-缺少 metric、缺少或不相符的 tag、不同的 run ID，以及任何非 `FINISHED` status，
-都會產生 diagnostics 並使 command 失敗。驗證不會判斷 metric 在科學上是好是壞。
+## Explicit run verification
 
-### 指定欄位與遮蔽邊界
-
-只有 requested metric names 與 expected tag names 會跨越 adapter boundary。
-未要求的 metrics 與 tags、所有 parameters，以及其他 raw MLflow fields 都會被丟棄。
-Result 也包含有大小限制的 run metadata：run ID、experiment ID、status、verification
-diagnostics，以及可安全保留時的已清理 artifact URI。
-
-URI userinfo 會被移除；看似 credential 的 query data 會被移除或遮蔽；不安全或無法解析
-的 artifact URI 會被省略並留下 diagnostic。需要穩定的 `exp.cli/v1` response envelope
-時請使用 `--json`，不要 scrape 人類閱讀用 summary。
-
-### Environment 與 credentials
-
-MLflow subprocess 預設只繼承一小組 portable baseline。使用 `--allow-env` 明確加入
-非秘密 configuration names；使用 `--secret-env` 從 parent environment 綁定必要
-credentials：
+提供一個 explicit run ID，以及至少一個 effective assertion：exact `--metric`、exact
+`--tag NAME=VALUE`，或 selected profile 的 default metric。
 
 ```bash
-export MLFLOW_TRACKING_URI='https://mlflow.example.test'
-export MLFLOW_TRACKING_TOKEN='set-outside-shell-history'
-
-exp provider mlflow verify \
-  --run-id "$RUN_ID" \
+exp --mlflow-profile observer provider mlflow verify \
+  --run-id <WORKLOAD_RUN_ID> \
   --metric macro_f1 \
-  --allow-env MLFLOW_TRACKING_URI \
-  --secret-env MLFLOW_TRACKING_TOKEN
+  --tag 'exp.attempt_id=<ATTEMPT_ID>' \
+  --json
 ```
 
-`--allow-env NAME` 只用於額外的非秘密 variables。`--secret-env NAME` 要求 parent
-process 中存在相同名稱的 variable；其值只會綁定至 MLflow subprocess，且不會出現在
-rendered command 或 environment metadata。缺少必要 secret 時，系統會在 MLflow
-執行前失敗。
+只有下列條件全部成立才成功：
 
-## 將 run 附加至 Evaluation
+- returned run ID 完全等於 requested ID；
+- status 完全等於 `FINISHED`；
+- 每個 requested metric 存在；
+- 每個 expected tag 存在且等於 supplied string。
 
-附加 MLflow telemetry 是 `evaluation create` 的一部分，而不是對既有 Evaluation
-進行另一項 mutation：
+Missing/mismatched assertion、其他 run ID、其他 status 都產生 sorted diagnostics 與 command
+failure。`exp` 不判斷 metric value 是否 scientifically desirable。
 
-```bash
-exp evaluation create \
-  --title "Validation result" \
-  --spec "$EVALUATION_SPEC_ID" \
-  --subject "$EXPERIMENT_ID" \
-  --outcome passed \
-  --metric 'macro_f1=0.913:score' \
-  --summary "Passed the registered threshold" \
-  --mlflow-run-id "$RUN_ID" \
-  --mlflow-context local \
-  --mlflow-tag "exp.attempt_id=$ATTEMPT_ID" \
-  --allow-env MLFLOW_TRACKING_URI \
-  --secret-env MLFLOW_TRACKING_TOKEN
-```
+### Selected-field boundary
 
-`--mlflow-context` 是非秘密的 provider context name，預設值為 `default`。可以加入其他
-`--mlflow-tag NAME=VALUE` assertions；建立 Evaluation 時若 tag name 重複會被拒絕。
+只有 requested metric names/expected tag names 會跨 adapter boundary。Unrequested metrics/tags、
+所有 parameters 與 unrelated raw output 都丟棄。Bounded result 可含 safe run ID、experiment ID、
+status、diagnostics，以及 sanitized artifact URI。Canonical URI sanitization 會移除 userinfo 與完整
+query component，拒絕 `file:`、unsafe host/path/fragment；無法安全保留時帶 diagnostic 省略 URI。
+Safe routing fragment 可保留。系統不會沿 URI 讀取或下載 artifact。
 
-### Ownership 與 lineage 檢查
+Subprocess 只收到 deny-by-default minimal environment 加 profile late-bound names。Output 有 bounds、
+只解析一個 JSON value，且不視為超過此 read-only operation 的 provider capability。
 
-每個 attachment 都必須包含：
+## Optional worker attachment
+
+選擇 profile 的 workload 仍自行 create/log run。它可以在 assigned `EXP_RESULT_PATH` 的 bounded
+JSON 中放 safe `mlflow_run_id` string。Process complete 後，worker 以 profile default metrics 加
+required ownership tag 執行一次 read-only observation：
 
 ```text
---mlflow-tag exp.attempt_id=<canonical-attempt-id>
+exp.attempt_id = <the exact canonical Attempt ID>
 ```
 
-指定的 Attempt 必須存在於目前 project、是成功的 terminal execution，並指向一筆
-canonical Run。該 Run 的 Experiment 必須屬於 Evaluation subject：
+Attachment state：
 
-- Experiment subject 必須就是同一個 Experiment；
-- Candidate subject 必須參照該 Experiment；
-- Release subject 必須透過 combination evidence 或受支援的 single-slot lineage
-  包含該 Experiment。
+- 只有 run ID/status/default metrics 與 exact ownership tag 都 verified 時為 `verified`；
+- syntactically invalid identity 或 assertion mismatch 為 `unverified`；
+- invalid profile environment、provider/binary absence 或 invocation failure 為 `unavailable`。
 
-來自其他 Experiment 的 run、未知 Attempt，或非成功的 Attempt 都不能附加。如果該
-Evaluation 後續用來建立 Candidate，記錄的 MLflow owner Attempt 也必須等於該 Candidate
-的 successful backing Attempt。
+Observation failure 不會把 otherwise successful workload 變成 failure。只有 valid `verified`
+attachment 會轉成 Attempt ExternalRef。該 reference 記錄 selected profile/context、run/status/
+experiment identity、selected metric values、`mlflow.owner_attempt`、observation time 與 sanitized
+artifact URI；不含 profile value 或 artifact bytes。Replay durable worker marker 只在 reference
+byte-equivalent 時匯入；conflicting run identity 會 fail closed。
 
-### 精確 metric 比對
+### Direct Try 與 formal Pueue runtime
 
-進行 attachment 時，`exp` 會要求 Evaluation 的每個 `--metric NAME=VALUE:UNIT`
-argument 所指定的 metric。每個 supplied numeric value 都必須與 MLflow 回傳值完全相等；
-沒有 rounding 或 tolerance。Units 與 thresholds 由 EvaluationSpec 驗證，MLflow 只提供
-numeric telemetry value。
+Direct Try 在本機執行，可使用帶 environment binding 的 profile。Selected profile name/context
+會 pin 進 Attempt direct policy；retry 要求相同 effective config digest/profile identity。
 
-只有 run verification、ownership、lineage 與 exact metric checks 全部通過後，`exp`
-才會建立不可變的 Evaluation。其 external reference 會記錄已清理的 MLflow identity、
-observation time、verified status、experiment ID、owner Attempt 與 owner subject。
-Verification 本身絕不會建立 Evaluation、Finding、Candidate、Release 或 Promotion。
+Formal runtime v2 可選 value-free profile（context、binary、timeout、default metrics），但因 Pueue
+會保存 task environment，任何 profile environment binding 都會被拒絕。需要 credential 的 formal
+workload 必須在 start 後透過自行 reviewed broker 取得。Runtime v1 沒有 integrated named-profile
+attachment route。
 
-完整的科學流程請參閱 [從證據到 Promotion](../workflows/evidence-to-promotion.md)；共通
-安全模型請參閱 [Provider 契約](../design/provider-contract.md)。
+兩種 worker path 的 provider observation 都是 optional。Candidate v2 不要求 MLflow；但若其
+Evaluation 或 backing Attempt 帶 MLflow owner claim，就必須指向 exact same formal Attempt。
 
-## 未來可探索主題
+## 將 MLflow 附加至 Evaluation
 
-以下是預留的文件位置，並非目前支援的操作：
+MLflow attachment 是 immutable Evaluation creation 的一部分，不是 later update。目前 formal
+Candidate v2 path 應明確綁定 successful formal Attempt，讓 command 建立 Evaluation v2：
 
-- named tracking-server profiles 與 context-specific authentication guidance；
-- proxy 與 direct artifact-access topology 及其 credential boundaries；
-- read-only history comparisons 與更完整的 metric diagnostics；
-- sweeps、trials 與 nested runs 的 workload conventions；
-- 經獨立審查的 read-only model-registry capability。
+```bash
+exp --mlflow-profile observer evaluation create \
+  --title "Registered validation result" \
+  --spec <EVALUATION_SPEC_ID> \
+  --subject <EXPERIMENT_ID> \
+  --attempt <FORMAL_ATTEMPT_ID> \
+  --outcome passed \
+  --metric 'macro_f1=0.913:score' \
+  --metric 'validation_loss=0.204:loss' \
+  --summary "Passed the sealed protocol" \
+  --mlflow-run-id <WORKLOAD_RUN_ID> \
+  --mlflow-tag 'exp.attempt_id=<FORMAL_ATTEMPT_ID>'
+```
+
+Command 要求：
+
+1. ownership tag 可 parse 成此 Project 的 Attempt；
+2. successful terminal Attempt 且有 canonical Run；
+3. 該 Run Experiment 位於 Evaluation subject lineage；
+4. 有 `--attempt` 時，subject 必須是 Experiment，Attempt 必須是該 Experiment 的 successful formal
+   Attempt v3；
+5. explicit Attempt 與 MLflow owner 相同；
+6. 每個 supplied Evaluation numeric metric 與 MLflow 完全相等，沒有 tolerance；
+7. name/unit/threshold-derived outcome 符合 EvaluationSpec。
+
+Experiment subject 直接對應；Candidate subject 使用其 Experiment；Release subject 有設定時使用
+combination Experiment，否則使用 slot Candidate lineage。但 Evaluation v2 本身只接受 Experiment
+subject。省略 `--attempt` 會保留 Evaluation v1，即使 MLflow metadata 有 owner；此 record 無法
+滿足 Candidate v2 typed Attempt gate。
+
+全部通過後才 publish Evaluation transaction。MLflow verification 單獨不會建立 Finding、Candidate、
+Release、Champion 或 Promotion。
+
+## Artifact 與 promotion boundary
+
+Verified artifact URI 是 navigation/provenance，不證明 bytes present、immutable、safe 或
+production-ready。`exp` 不 hash、copy、cache、compare、register、alias、promote、delete 或 serve
+MLflow artifact/model。Candidate v2 authority 來自 clean SourceSnapshots 加 typed Evaluation；
+Promotion 來自 sealed holdout 與具名 human approval。MLflow state 不會觸發 automatic deployment/
+rollback。
+
+## 目前限制
+
+- 不 create/log run，也不 mutation artifact/model registry。
+- 沒有 artifact-byte store 或 automatic artifact download。
+- 除 sanitized run observation 外，沒有 read-only registry capability。
+- Formal Pueue runtime 不接受 environment-bound MLflow profile。
+- 不把 sweep/trial/nested-run 解讀為 canonical Run/Attempt。

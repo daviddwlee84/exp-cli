@@ -42,7 +42,7 @@ func (scheduler PueueScheduler) Submit(ctx context.Context, dispatch Dispatch) (
 	return scheduler.Adapter.Submit(ctx, pueue.SubmitRequest{
 		Group: dispatch.Group, Label: dispatch.Label, Priority: dispatch.Priority,
 		WorkingDir: dispatch.WorkingDir, Worker: dispatch.Worker, WorkerArgs: dispatch.WorkerArgs,
-		Environment: environment,
+		QuotedWorkerArgs: dispatch.QuotedWorkerArgs, Environment: environment,
 	})
 }
 

@@ -125,12 +125,19 @@ func (inventory *Inventory) ResearchEdges() []ResearchEdge {
 	}
 	for _, document := range inventory.Documents {
 		switch value := document.Record.(type) {
+		case *research.Source:
+		case *research.Try:
+			for _, source := range value.Sources {
+				add(source, value.ID, "declared_source")
+			}
+			add(value.ID, value.AdoptedIdea, "adopts")
 		case *research.Idea:
 			for _, parent := range value.Parents {
 				add(parent, value.ID, "derives")
 			}
 			add(value.ID, value.ResultingPlan, "qualifies")
 			add(value.ID, value.MergedInto, "merges")
+			add(value.OriginTry, value.ID, "originates")
 		case *research.Queue:
 			for _, partition := range value.Partitions {
 				add(partition.Pool, value.ID, "partitions")
@@ -168,6 +175,10 @@ func (inventory *Inventory) ResearchEdges() []ResearchEdge {
 			add(value.Experiment, value.ID, "contains")
 		case *research.Attempt:
 			add(value.Run, value.ID, "attempts")
+			add(value.Try, value.ID, "attempts")
+			for _, snapshot := range value.SourceSnapshots {
+				add(snapshot.Source, value.ID, "snapshots")
+			}
 		case *research.Evaluation:
 			add(value.Spec, value.ID, "evaluates_with")
 			add(value.Subject, value.ID, "evaluated_by")
@@ -186,6 +197,10 @@ func (inventory *Inventory) ResearchEdges() []ResearchEdge {
 		case *research.Candidate:
 			add(value.Experiment, value.ID, "produces")
 			add(value.Evaluation, value.ID, "scientific_evidence")
+			add(value.Attempt, value.ID, "execution_evidence")
+			for _, source := range value.Sources {
+				add(source.Source, value.ID, "source_identity")
+			}
 			for _, parent := range value.Parents {
 				add(parent, value.ID, "follows")
 			}

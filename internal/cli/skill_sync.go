@@ -69,10 +69,10 @@ func runSkillSync(command *cobra.Command, app *App, options *skillSyncOptions) e
 		return fmt.Errorf("read source command reference: %w", err)
 	}
 	if bytes.Equal(actual, []byte(expected)) {
-		return app.WriteHuman(safeHumanOutput(fmt.Sprintf("Skill command reference is current at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath)))))
+		return app.WriteStyledHuman(safeHumanOutput(fmt.Sprintf("Skill command reference is current at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath)))))
 	}
 	if options.check {
-		if writeErr := app.WriteHuman(safeHumanOutput(fmt.Sprintf("Skill command reference drift at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath))))); writeErr != nil {
+		if writeErr := app.WriteStyledHuman(safeHumanOutput(fmt.Sprintf("Skill command reference drift at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath))))); writeErr != nil {
 			return writeErr
 		}
 		return errSkillSourceDrift
@@ -85,7 +85,7 @@ func runSkillSync(command *cobra.Command, app *App, options *skillSyncOptions) e
 	}); err != nil {
 		return fmt.Errorf("replace source command reference: %w", err)
 	}
-	return app.WriteHuman(safeHumanOutput(fmt.Sprintf("Synchronized skill command reference at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath)))))
+	return app.WriteStyledHuman(safeHumanOutput(fmt.Sprintf("Synchronized skill command reference at %s\n", filepath.Join(repositoryRoot, filepath.FromSlash(commandReferenceSourcePath)))))
 }
 
 func findCommandReferenceSourceRoot(startDir string) (string, error) {

@@ -34,10 +34,40 @@ func (store *Store) inspectTransactionArtifactsReadOnly(ctx context.Context, can
 		return fmt.Errorf("inspect Git-common coordination directory: %w", err)
 	}
 	defer coordination.Close()
-	if err := inspectTransactionJournalsReadOnly(ctx, coordination, canonical); err != nil {
+	worktreeID, allowLegacy, err := store.transactionScope()
+	if err != nil {
+		return err
+	}
+	if err := inspectTransactionJournalsReadOnly(ctx, coordination, canonical, worktreeID, allowLegacy); err != nil {
 		return err
 	}
 	return errors.Join(pathx.VerifyRootPath(store.GitCommonDir, common), pathx.VerifyRootPath(store.CoordinationDir(), coordination))
+}
+
+func (store *Store) inspectLockedTransactionJournals(ctx context.Context) error {
+	worktreeID, allowLegacy, err := store.transactionScope()
+	if err != nil {
+		return err
+	}
+	return inspectTransactionJournalsReadOnly(ctx, store.coordinationRoot, store.canonicalRoot, worktreeID, allowLegacy)
+}
+
+// InspectProjectTransactionArtifacts validates known journals for an existing
+// canonical worktree while the caller holds the Git-common project lock. It is
+// read-only: committed journals are historical and prepared journals report that
+// recovery is required.
+func InspectProjectTransactionArtifacts(ctx context.Context, coordination *os.Root, canonicalRoot, gitCommonDir string) error {
+	store := NewStore(canonicalRoot, gitCommonDir)
+	canonical, err := store.openCanonicalRoot()
+	if err != nil {
+		return err
+	}
+	defer canonical.Close()
+	worktreeID, allowLegacy, err := store.transactionScope()
+	if err != nil {
+		return err
+	}
+	return inspectTransactionJournalsReadOnly(ctx, coordination, canonical, worktreeID, allowLegacy)
 }
 
 // CheckTransactionArtifacts refuses nonempty unknown transaction state without
@@ -47,38 +77,40 @@ func CheckTransactionArtifacts(coordination *os.Root) error {
 }
 
 func rejectTransactionArtifacts(coordination *os.Root) error {
-	transactions, err := pathx.OpenRootAtNoSymlinks(coordination, "transactions")
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect transaction directory: %w", err)
-	}
-	defer transactions.Close()
-	directory, err := transactions.Open(".")
-	if err != nil {
-		return err
-	}
-	entries, readErr := directory.ReadDir(-1)
-	closeErr := directory.Close()
-	if readErr != nil || closeErr != nil {
-		return errors.Join(readErr, closeErr)
-	}
-	if len(entries) != 0 {
-		return fmt.Errorf("%w: found %d artifact(s) in Git-common transactions", ErrUnsupportedTransaction, len(entries))
+	for _, name := range []string{transactionDirectoryV1, transactionDirectoryV2} {
+		transactions, err := pathx.OpenRootAtNoSymlinks(coordination, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect transaction directory: %w", err)
+		}
+		directory, err := transactions.Open(".")
+		if err != nil {
+			_ = transactions.Close()
+			return err
+		}
+		entries, readErr := directory.ReadDir(-1)
+		closeErr := errors.Join(directory.Close(), transactions.Close())
+		if readErr != nil || closeErr != nil {
+			return errors.Join(readErr, closeErr)
+		}
+		if len(entries) != 0 {
+			return fmt.Errorf("%w: found %d artifact(s) in Git-common %s", ErrUnsupportedTransaction, len(entries), name)
+		}
 	}
 	return nil
 }
 
 func ensureCoordinationState(coordination *os.Root) error {
-	for _, name := range []string{"transactions", "attempts", "reservations"} {
+	for _, name := range []string{transactionDirectoryV1, transactionDirectoryV2, "attempts", "reservations"} {
 		directory, _, err := pathx.EnsureRootAtNoSymlinks(coordination, name, 0o700)
 		if err != nil {
 			return fmt.Errorf("open coordination directory %s: %w", name, err)
 		}
 		opened, openErr := directory.Open(".")
 		if openErr == nil {
-			openErr = opened.Chmod(0o700)
+			openErr = pathx.ProtectPrivateOpenFile(opened, 0o700)
 			openErr = errors.Join(openErr, opened.Close())
 		}
 		closeErr := directory.Close()
@@ -153,7 +185,7 @@ func readCanonicalFileRoot(ctx context.Context, root *os.Root, relative string) 
 }
 
 func (store *Store) seedCanonicalIDReservations(ctx context.Context, coordination *os.Root) error {
-	repository, err := gitx.Discover(ctx, store.Root)
+	repository, err := gitx.DiscoverWithRunner(ctx, store.Root, store.git)
 	if err != nil {
 		return fmt.Errorf("discover repository for canonical ID reservations: %w", err)
 	}
@@ -167,7 +199,7 @@ func (store *Store) seedCanonicalIDReservations(ctx context.Context, coordinatio
 	if !currentInventory.Valid() && !onlyRepairableStaleness(currentInventory) {
 		return fmt.Errorf("current worktree inventory is invalid: %w", currentInventory.Error())
 	}
-	worktrees, err := gitx.Worktrees(ctx, repository.Root, gitx.ExecRunner{})
+	worktrees, err := gitx.Worktrees(ctx, repository.Root, store.git)
 	if err != nil {
 		return fmt.Errorf("enumerate worktrees for canonical ID reservations: %w", err)
 	}

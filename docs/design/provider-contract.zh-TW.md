@@ -7,10 +7,11 @@
 
 ## 邊界
 
-Providers 公開已安裝上游工具的能力；它們不會成為研究 records 的權威來源。目前的實作
-包含已稽核的 Pueue scheduler 操作、私有 direct worker envelope，以及唯讀的 MLflow run
-驗證。預設的 `doctor` 仍只探測 executable 是否存在。沒有動態 Go plugin ABI，也沒有
-通用的「experiment provider」interface。
+Providers 公開 installed upstream tool capability；不會成為 research record authority。目前
+實作包含 audited Pueue scheduler operation、v1/v2 private worker envelopes、named-profile
+read-only MLflow observation，以及 separate workspace-provider registry；其中 native Git baseline
+擁有 byte verification。Default `doctor` 仍只 discovery executable presence。沒有 dynamic Go
+plugin ABI 或 universal「experiment provider」interface。
 
 一個 adapter 會宣告一份描述元 (descriptor)，且只實作它支援的角色：
 
@@ -22,9 +23,15 @@ Providers 公開已安裝上游工具的能力；它們不會成為研究 record
 | ArtifactStore | stat/列出不可變的 artifact references | DVC/MLflow/object references；絕不隱式下載 |
 | Registry | 取得/列出/解析 model resources 的 aliases | 僅在具體 API 已驗證後提供唯讀操作 |
 
-一個 provider 可以實作多個角色，但每個操作只屬於一個角色與一項 capability。每個
-Attempt 恰好只有一個 Scheduler owner。除非有明確且經審查的操作計畫指定 concurrency
-與 cancellation 的歸屬，否則拒絕巢狀 schedulers。
+一個 provider 可實作多個 role，但每個 operation 只屬一個 role/capability。每個 Attempt 恰好
+一個 Scheduler owner。除非 explicit reviewed operation plan 指定 concurrency/cancellation
+ownership，否則拒絕 nested scheduler。
+
+Workspace preparation 是 separate capability boundary，不是新 research record role。`native_git`
+實作 prepare/verify/inspect/cleanup/retire；即使 optional provider selection 後仍是 authority。
+`dev_cli` 可 list，但目前每個 lifecycle capability 都 fail closed，因 public output 沒有 schema-
+versioned exact-path machine receipt。Trusted fallback 可 report native Git 為 actual provider；
+provider-local ID 絕不識別 canonical Source 或 managed worktree。
 
 一般消費者使用的 Google Colab browser sessions 沒有持久且通用的 control plane，因此
 不受支援。未來的 adapter 必須以特定名稱指明已有文件的 enterprise service，例如適用的
@@ -68,12 +75,13 @@ supported | unsupported | unknown
 provider 降級；但不會讓本機 record commands 失敗。絕不會因樂觀解析而將 `unknown`
 提升為 `supported`。
 
-預設的 `exp doctor` 僅透過 `LookPath` 進行本機 executable discovery。它絕不執行第三方
-`--version`，因為名義上唯讀的 flags 仍可能建立 configuration、telemetry 或 log state；
-因此探索到的 versions 與 capabilities 會維持 `unknown`。目前 `--live` 不會進行任何額外
-聯絡。只有 `provider pueue status`、`provider mlflow verify`、`daemon tick` 或
-`daemon run` 等針對特定操作的 command 才會聯絡 provider。Probing 與 operations 絕不
-安裝 package、啟動 daemon、遷移 provider database，或開啟 authentication。
+Default `exp doctor` 只透過 `LookPath` 做 local executable discovery，version/capability support
+保持 unverified。Explicit `doctor --live` 執行 bounded `--version` probe、適用時的 read-only
+local Pueue status probe，以及 workspace-backend readiness。Version 單獨存在時 capability 仍
+unknown；`dev_cli` lifecycle support 維持 statically unsupported。Provider operation 也只經 explicit
+`provider pueue status`、`provider mlflow verify`、`daemon tick`、`daemon run` 等 commands。
+Probe/operation 絕不 install package、start daemon、migrate provider database、write config 或 open
+authentication。
 
 ## 操作計畫 (operation plans) 與 effects
 
@@ -259,8 +267,9 @@ Invocation 從 executable discovery 與 upstream profile selection 所需的最�
 Pueue 4.x 的 `status --json` task objects 可能包含已擷取的 `envs`。必須在 parsing 回傳，
 或 raw state 跨越 adapter boundary 前，遞迴移除整個 `envs` member。不能只遮蔽目前已知的
 keys。由於 daemon 會保存 task environments，submissions 使用明確、不含 secret 且不屬於
-credential-sensitive 的 environment allowlist。因此 Pueue 會拒絕 runtime `secret_env`；
-workload 必須在啟動後，透過 broker 或 provider profile 取得 credentials。
+credential-sensitive environment allowlist。因此 Pueue 拒絕 runtime `secret_env`；workload 必須在
+startup 後透過 own broker 取得 credential。Formal runtime v2 也拒絕帶 environment binding 的
+MLflow profile，因此 named profile 不能作為 credential-transfer workaround。
 
 已實作的 adapter 提供 sanitized status，以及只有在下列條件都成立時才能搭配 `--confirm`
 執行的 exact-task cancel：由一個 canonical Attempt 指定 Pueue 負責 scheduling、其 reference
@@ -285,13 +294,19 @@ query parameters、tokens 與 doctor output。要求 storage credentials 前，�
 還是 direct artifact access。Tracker 擁有的 trials 與 telemetry 留在 MLflow；canonical
 records 只保留選定 evidence 與已清理的 references。
 
-已實作的 integration 是唯讀的：workload 會自行建立並記錄自己的 run，接著
-`exp provider mlflow verify --run-id ...` 只要求具名 metrics 與 expected tags。它不會建立
-run、記錄 metric、上傳 artifact 或變更 registry state。只有在宣告的 `exp.attempt_id` tag
-識別出成功的 canonical Attempt，且該 Attempt 的 Run 屬於該 Experiment、Candidate 的
-Experiment，或 Release 的 combination/single-slot Experiment lineage 時，verified run 才
-能以 sanitized identity 連結至 Evaluation。之後由 Evaluation 建立 Candidate 時，該 owner
-必須等於 Candidate 所納入且成功的 backing Attempt。Verification 本身不是科學結論。
+Implemented integration 是 read-only：workload 自行 create/log run，
+`exp provider mlflow verify --run-id ...` 只要求 named metrics/expected tags。Layered named
+profile 只含 binary name、context、timeout、environment names/policy、default metrics，絕無
+resolved value。Adapter 不 create run、log metric、upload/download artifact 或 mutation registry。
+
+只有 asserted `exp.attempt_id` tag 識別 successful canonical Attempt，且其 Run 位於 Experiment、
+Candidate Experiment 或 Release combination/single-slot Experiment lineage，verified run 才能以
+sanitized identity link Evaluation。Explicit `--attempt` 只為 Experiment subject/successful formal
+Attempt v3 建立 Evaluation v2；MLflow metadata 單獨存在時刻意仍是 Evaluation v1。Candidate v2
+要求 typed Evaluation 與任何 MLflow owner 都符合 same clean backing Attempt。Optional worker
+observation 即使 unavailable/unverified，也不改 workload process success；只有 verified ownership
+匯入。Artifact URI 仍只是 navigation hint，artifact bytes 由 MLflow 擁有。Verification 本身不是
+scientific verdict。
 
 ### DVC、notebooks 與後續系統
 
@@ -302,12 +317,17 @@ resolution 或 notebook execution。W&B、Kaggle、Ray、Kubernetes 與 cloud co
 
 ## Daemon 與操作狀態
 
-`.exp/runtime.json` 是 canonical IDs 與 provider-native configuration 之間的嚴格 execution
-binding。它包含 `exp.runtime/v1` schema、Pool 至 Pueue group/label bindings，以及 Plan 至
-executable/argv/cwd/timeout/Git identity bindings。Allowed environment arrays 只能包含
-non-secret names；由於 task environments 會被保存，Pueue runtime secret arrays 必須為空。
-同一個 Pueue group 內的 label prefixes 必須兩兩 prefix-free，並為完整的 scoped dispatch
-ID 保留足夠空間。每個 executable ChangeSet 都會排除實際選定的 runtime config path。
+`.exp/runtime.json` 是 canonical IDs 與 provider-native configuration 間的 strict execution
+binding。Closed `exp.runtime/v1` decoder 保留 embedded-repository Pool/Plan 與 top-level Git
+identity contract。Separate `exp.runtime/v2` decoder 把一個 execution Source 與 optional read-only
+Sources 綁到 `main`、`registered_worktree` 或 `managed_worktree` checkout、exact clean
+SourceSnapshots 與 worker-job v2。Runtime v2 要求 exact raw-file `runtime.dispatch` trust receipt
+與 explicit canonical worker authority；v1 fields 絕不 reinterpret 成 v2。
+
+Allowed environment arrays 只含 non-secret names；因 Pueue 保存 task environment，runtime secret
+arrays 必須空。Formal v2 也拒絕 environment-bound MLflow profile。同一 Pueue group 的 label
+prefixes 必須 pairwise prefix-free，並為 complete scoped dispatch ID 留足空間。每個 executable
+ChangeSet 都排除 actual selected runtime config path。
 
 Daemon 的 SQLite database 位於
 `<git-common-dir>/exp/runtime/v1/control.sqlite`，擁有 leases、fencing tokens、jobs、

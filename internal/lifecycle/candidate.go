@@ -18,6 +18,7 @@ type CreateCandidateRequest struct {
 	Evaluation                     RevisionRef
 	EvaluationSpecExpectedRevision string
 	Parents                        []RevisionRef
+	Attempt                        RevisionRef
 	GitCommit                      string
 	ChangeSet                      []string
 	ExternalRefs                   []research.ExternalRef
@@ -63,9 +64,33 @@ func (service *Service) CreateCandidate(ctx context.Context, request CreateCandi
 	if spec.Purpose != research.EvaluationScientific {
 		return nil, fmt.Errorf("Evaluation %s does not use a scientific EvaluationSpec: %w", evaluation.ID, ErrPrecondition)
 	}
-	attemptDocument, attemptRunDocument, err := successfulCandidateAttempt(inventory, experiment, request.GitCommit, request.ChangeSet)
-	if err != nil {
-		return nil, err
+	candidateSchema := research.SchemaCandidate
+	var candidateSources []research.CandidateSource
+	var attemptDocument, attemptRunDocument *record.Document
+	if !request.Attempt.ID.IsZero() || request.Attempt.Revision != "" {
+		if request.GitCommit != "" || len(request.ChangeSet) > 0 {
+			return nil, fmt.Errorf("Candidate v2 copies Source identity from Attempt and forbids legacy Git fields: %w", ErrPrecondition)
+		}
+		attemptDocument, err = resolve(inventory, request.Attempt, research.KindAttempt)
+		if err != nil {
+			return nil, err
+		}
+		attemptRunDocument, candidateSources, err = formalCandidateAttempt(inventory, experiment, attemptDocument)
+		if err != nil {
+			return nil, err
+		}
+		candidateSchema = research.SchemaCandidateV2
+	} else {
+		attemptDocument, attemptRunDocument, err = successfulCandidateAttempt(inventory, experiment, request.GitCommit, request.ChangeSet)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if candidateSchema == research.SchemaCandidateV2 {
+		attemptID, _ := attemptDocument.ID()
+		if evaluation.Schema != research.SchemaEvaluationV2 || evaluation.Attempt != attemptID {
+			return nil, fmt.Errorf("Candidate v2 Evaluation %s must be typed-bound to backing Attempt %s: %w", evaluation.ID, attemptID, ErrPrecondition)
+		}
 	}
 	if owner, found, ownerErr := evaluationMLflowOwner(evaluation); ownerErr != nil {
 		return nil, ownerErr
@@ -109,27 +134,83 @@ func (service *Service) CreateCandidate(ctx context.Context, request CreateCandi
 	if err != nil {
 		return nil, err
 	}
+	backingAttempt := research.ID{}
+	if candidateSchema == research.SchemaCandidateV2 {
+		backingAttempt = attemptDocument.Record.(*research.Attempt).ID
+	}
 	candidate := &research.Candidate{
 		Common: research.Common{
-			Schema: research.SchemaCandidate, ID: id, Title: request.Title,
+			Schema: candidateSchema, ID: id, Title: request.Title,
 			CreatedAt: now, UpdatedAt: now, Tags: append([]string(nil), request.Tags...),
 		},
 		Experiment: experiment.ID, Evaluation: evaluation.ID, Parents: parentIDs,
 		GitCommit: request.GitCommit, ChangeSet: append([]string(nil), request.ChangeSet...),
+		Attempt: backingAttempt, Sources: cloneCandidateSources(candidateSources),
 		ExternalRefs: cloneExternalRefs(request.ExternalRefs), Extensions: cloneExtensions(request.Extensions),
 	}
 	changes.create(&record.Document{Record: candidate, Body: request.Body})
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "candidate.create", Changes: changes.changes,
 	})
-	if err != nil {
-		return nil, err
+	result := &CreateCandidateResult{}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Candidate, _ = resultDocument(transaction, id)
 	}
-	document, err := resultDocument(transaction, id)
-	if err != nil {
-		return nil, err
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
 	}
-	return &CreateCandidateResult{TransactionID: transaction.TransactionID, Candidate: document}, nil
+	if result.Candidate == nil {
+		return nil, fmt.Errorf("canonical transaction omitted Candidate %s", id)
+	}
+	return result, nil
+}
+
+func formalCandidateAttempt(inventory *record.Inventory, experiment *research.Experiment, attemptDocument *record.Document) (*record.Document, []research.CandidateSource, error) {
+	if inventory == nil || experiment == nil || attemptDocument == nil || attemptDocument.Kind() != research.KindAttempt {
+		return nil, nil, fmt.Errorf("formal Candidate Attempt is incomplete: %w", ErrPrecondition)
+	}
+	attempt := attemptDocument.Record.(*research.Attempt)
+	if attempt.Schema != research.SchemaAttemptV3 || attempt.Run.IsZero() || !attempt.Try.IsZero() ||
+		attempt.State != research.AttemptSucceeded || attempt.Terminal == nil || len(attempt.SourceSnapshots) == 0 ||
+		experiment.Conclusion == nil || attempt.CreatedAt.After(experiment.Conclusion.ConcludedAt) || attempt.Terminal.EndedAt.After(experiment.Conclusion.ConcludedAt) {
+		return nil, nil, fmt.Errorf("Attempt %s is not a successful formal Run-backed exp.attempt/v3: %w", attempt.ID, ErrPrecondition)
+	}
+	for _, snapshot := range attempt.SourceSnapshots {
+		if snapshot.State != research.SourceSnapshotClean {
+			return nil, nil, fmt.Errorf("Attempt %s contains a dirty SourceSnapshot and cannot back a Candidate: %w", attempt.ID, ErrPrecondition)
+		}
+	}
+	runDocument, err := inventory.ByID(attempt.Run)
+	if err != nil {
+		return nil, nil, err
+	}
+	run, ok := runDocument.Record.(*research.Run)
+	if !ok || run.Experiment != experiment.ID || !conclusionIncludesRun(experiment, attempt.Run) {
+		return nil, nil, fmt.Errorf("Attempt %s Run is not included by Experiment %s: %w", attempt.ID, experiment.ID, ErrPrecondition)
+	}
+	sources := make([]research.CandidateSource, len(attempt.SourceSnapshots))
+	for index, snapshot := range attempt.SourceSnapshots {
+		sources[index] = research.CandidateSource{
+			Source: snapshot.Source, HeadCommit: snapshot.HeadCommit,
+			ChangeSet: append([]string{}, snapshot.ChangeSet...),
+		}
+	}
+	return runDocument, sources, nil
+}
+
+func cloneCandidateSources(sources []research.CandidateSource) []research.CandidateSource {
+	if sources == nil {
+		return nil
+	}
+	cloned := append([]research.CandidateSource(nil), sources...)
+	for index := range cloned {
+		cloned[index].ChangeSet = append([]string{}, sources[index].ChangeSet...)
+	}
+	return cloned
 }
 
 func successfulCandidateAttempt(inventory *record.Inventory, experiment *research.Experiment, commit string, changeSet []string) (*record.Document, *record.Document, error) {

@@ -31,11 +31,37 @@ func TestRootInjectsContextStreamsAndProductThesis(t *testing.T) {
 	help := stdout.String()
 	for _, phrase := range []string{
 		"Git-native research control plane, not another tracker or scheduler",
-		"Private SQLite state coordinates leases and jobs",
-		"production Promotion always requires a named",
+		"dedicated private experiment repository",
+		"Private SQLite coordinates jobs",
+		"production Promotion always",
+		"exp guide setup",
 	} {
 		if !strings.Contains(help, phrase) {
 			t.Errorf("help does not contain %q:\n%s", phrase, help)
+		}
+	}
+}
+
+func TestStaticHelpPreservesRegisteredFlagSyntax(t *testing.T) {
+	for _, testCase := range []struct {
+		args []string
+		want []string
+	}{
+		{args: []string{"evaluation", "create", "--help"}, want: []string{"--secret-env strings", "--title string", "--summary string"}},
+		{args: []string{"provider", "mlflow", "verify", "--help"}, want: []string{"--secret-env strings", "non-secret"}},
+		{args: []string{"source", "add", "--help"}, want: []string{"--key string"}},
+	} {
+		invocation := invokeCommand(t, NewApp(t.Context(), nil, nil, nil), "", testCase.args...)
+		if invocation.err != nil {
+			t.Fatalf("%v: %v", testCase.args, invocation.err)
+		}
+		for _, expected := range testCase.want {
+			if !strings.Contains(invocation.stdout, expected) {
+				t.Errorf("%v help omitted %q:\n%s", testCase.args, expected, invocation.stdout)
+			}
+		}
+		if strings.Contains(invocation.stdout, "--[REDACTED]") {
+			t.Errorf("%v help redacted static syntax:\n%s", testCase.args, invocation.stdout)
 		}
 	}
 }
@@ -50,7 +76,7 @@ func TestBareRootShowsOnlyApprovedFunctionalCommands(t *testing.T) {
 	if !strings.Contains(help, "Usage:") || !strings.Contains(help, "Available Commands:") {
 		t.Fatalf("bare root did not render command help:\n%s", help)
 	}
-	for _, command := range []string{"agent", "candidate", "champion", "context", "daemon", "doctor", "evaluation", "experiment", "idea", "init", "migrate", "plan", "policy", "pool", "promotion", "provider", "queue", "record", "release", "render", "skill", "validate"} {
+	for _, command := range []string{"agent", "candidate", "champion", "config", "context", "daemon", "doctor", "evaluation", "experiment", "idea", "init", "migrate", "plan", "policy", "pool", "promotion", "provider", "queue", "record", "release", "render", "skill", "source", "validate", "workspace"} {
 		if !strings.Contains(help, "  "+command) {
 			t.Errorf("bare root help is missing %q:\n%s", command, help)
 		}

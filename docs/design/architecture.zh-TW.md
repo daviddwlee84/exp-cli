@@ -1,82 +1,119 @@
 # 架構
 
 !!! note "Terminology rule (zh-TW pages)"
-    技術名詞首次出現以「中文 (English original)」格式呈現，例：依賴注入
-    (dependency injection)。**不自創翻譯**——若無公認譯名直接保留英文
-    （如 `embedding`、`tokenizer`）。代碼、API 名、CLI flag、套件名、檔名一律不翻。
+    技術名詞首次出現以「中文 (English original)」格式呈現。若無公認譯名，
+    直接保留 English original。程式碼、API 名、CLI flag、套件名與檔名一律不翻。
 
 ## 產品邊界
 
-`exp` 是 Git 原生研究控制平面 (Git-native research control plane)。它選擇並記錄研究
-工作；但不取代執行程式碼、儲存遙測資料 (telemetry) 或提供正式環境產物的系統。
+`exp` 是 Git 原生研究控制平面 (Git-native research control plane)。它負責選擇、
+記錄、派送與保存研究工作；但不取代 Git、scheduler、telemetry system、artifact
+store 或 production deployment system。
+
+Project 的 canonical records 不必與受研究的 code 位於同一個 Git repository。
+Canonical **experiment repository** 是包含 `experiments/PROJECT.md` 的一般 Git
+repository。每筆 canonical `Source` record 定義 Project-local Git source identity；
+private host-local association 再把該 identity 對應到 checkout。`Try` 是有界的探索工作；
+正式 `Experiment`／`Run` execution 才是能進入 promotion 的路徑。
 
 ```mermaid
 flowchart TB
-  subgraph Canonical[以 Git 為後盾的科學權威]
-    I[Ideas 與 Plans]
+  subgraph Canonical[獨立且由 Git 支持的 experiment repository]
+    P[Project、Policy、Sources]
+    I[Ideas、Plans、Tries]
     Q[Pool/lane Queues]
     X[Experiments、Runs、Attempts]
     K[Evaluations、Findings、Decisions]
     R[Candidates、Releases、Promotions]
   end
 
-  subgraph Operational[私有操作狀態]
-    D[Daemon 租約與公平性]
-    O[Jobs、outbox、fencing tokens]
-    T[終止標記 (terminal markers) 與觀察結果]
+  subgraph Local[Host-local non-canonical state]
+    A[Project 與 Source associations]
+    C[Layered config 與 exact-digest trust]
+    D[Jobs、leases、outbox、fencing]
+    T[Durable worker markers 與 dirty seed bundles]
   end
 
-  subgraph Upstream[上游擁有者]
-    G[Git branches 與 worktrees]
-    P[Pueue tasks 與 groups]
-    M[MLflow runs 與 artifacts]
-    S[限定於 Plan 的 Study backend]
+  subgraph Upstream[Upstream owners]
+    G[Source Git repositories 與 worktrees]
+    U[Pueue tasks 與 groups]
+    M[Workload-owned MLflow runs 與 artifacts]
+    W[Optional workspace 與 Study providers]
   end
 
-  I --> Q --> X --> K --> R
-  D --> O --> P
-  Q --> D
-  G --> X
-  P --> T --> X
-  M -. 已清理的參照 .-> K
-  S -. 已清理的觀察結果 .-> X
+  P --> I --> Q --> X --> K --> R
+  A --> G
+  C --> D
+  Q --> D --> U
+  G --> T --> X
+  M -. 經挑選且消毒的 observation .-> X
+  W -. bounded capability .-> D
 ```
 
-程序成功是操作事實，而絕不是科學結論。無效證據不等於遭反駁的假設。
+Process success 是 operational fact，絕不是 scientific verdict。Invalid evidence
+不等於 refuted hypothesis。Provider artifact URI 是 observation，不是 canonical
+content 或 deployment authority。
 
 ## 權威矩陣
 
-| 資訊 | 權威來源 | `exp` 的處理方式 |
+| 資訊 | Authority | `exp` 的處理方式 |
 |---|---|---|
-| 自主性、分類法、queue 公式、lane 配置、promotion gate | 規範性 (canonical) `POLICY.md` | 以 revision 檢查進行變更 |
-| 人類/agent 提案與父層 Ideas | 規範性 Idea | 保留來源與資格判定狀態 |
-| 預期效用、受限資源、假設 | 規範性 Plan | 僅將資格完整的 Plan 加入 Queue |
-| Pool 容量與 Queue 順序 | 規範性 ResourcePool 與 Queue | 從精確的 pool/lane frontier 分派 |
-| Listwise 建議與 pairwise 比較 | 規範性 QueueAdvice 與 Battle | 不可變的稽核輸入；絕非隱藏權威 |
-| 科學協定與結論 | 規範性 Experiment | 鎖定設計；僅透過明確交易 (transaction) 結案 |
-| 預期的證據單位 | 規範性 Run | 與重試/程序叫用分開保存 |
-| 已遮蔽的執行身分與操作狀態 | 規範性 Attempt | 根據持久觀察結果明確進行調和 (reconcile) |
-| 指標協定與測量結果 | 規範性 EvaluationSpec 與 Evaluation | 不可變且可比較的證據 |
-| 信念與改變信念的關係 | 規範性 Finding | 從連入邊推導 weakened/overturned 狀態 |
-| 可重複使用的已評估結果 | 規範性 Candidate | 固定 Experiment、Evaluation、Git commit 與 ChangeSet |
-| 下游組合 | 規範性 typed Release | 多個 Candidates 必須具備組合證據 |
-| 正式環境決策 | append-only Promotion chain | 必須有 sealed holdout 與具名人類核准 |
-| 目前的正式環境選擇 | 衍生的 Champion | 只負責呈現；絕不讀回 manifest 作為權威來源 |
-| 程式碼歷史與整合 | Git | Agent 可建立精確的 experiment commit；由人類 merge |
-| 即時本機 task/group 狀態 | Pueue | 透過 adapter 觀察/調和；絕不複製原始 envs |
-| 指標、traces、artifacts、registry | workload 擁有的 MLflow 或其他 provider | 驗證選定欄位；保留已清理的參照 |
-| 租約、jobs、outbox、公平性、provider 觀察結果 | 私有 SQLite | 持久的本機協調，絕非科學權威 |
-| 單一 Plan 內的搜尋 trials 與 pruning | 設定的 Study backend | provider-neutral adapter 邊界；沒有全域優先權 |
-| 產生的 README/roadmap/ledger/decision/champion views | 規範性 records | 僅允許確定性投影 (deterministic projections) |
+| Project identity 與 canonical research graph | 所選 experiment repository 中的 `PROJECT.md` 與 typed records | 先解析唯一 Project；驗證 exact schema/revision，並在其 Git-common lock 下 mutation。 |
+| Source identity、不可變 semantic subdirectory、lifecycle 與 sanitized locator hints | canonical `Source` | 保持 path-free 與 host-independent。Source 是一般 record，不是第二個 root 或 repository mount。 |
+| Local Project/Source checkout mapping | `$XDG_STATE_HOME/exp/associations/v1.json` | 每次使用都驗證 Project UUID、Source ID、Git-common path/filesystem identity、subdir 與 locator intersection；此檔案不能建立 canonical identity。 |
+| Config selection 與 execution-bearing preference | layered `exp.config/v1` files 加上 `$XDG_STATE_HOME/exp/trust/v1.json` | 只在 authority 確定後解析；保留每個 leaf 的 provenance；要求 exact file digest、capability、Project/Source scope 與 Git-common filesystem identity。 |
+| Autonomy、taxonomy、Queue formula、lane allocation、promotion gate | canonical `POLICY.md` | 以 revision check mutation。 |
+| Proposal、exploratory question 與 formal qualification | canonical Idea、Try 與 Plan | 將 Try 與 formal evidence 分離；已 concluded Try 只有經具名人類確認，才能 atomically adopt 成 Idea v2。 |
+| Pool capacity 與 Queue order | canonical ResourcePool 與 Queue | 從精確 pool/lane frontier dispatch。 |
+| Listwise advice 與 pairwise comparison | canonical QueueAdvice 與 Battle | 不可變 audit input；絕不是隱藏 mutation authority。 |
+| Scientific protocol 與 conclusion | canonical Experiment | Attempt 前先 lock design；只能透過 explicit transaction closure。 |
+| Intended evidence unit | canonical Run | 與 retry/process invocation 分開。 |
+| Redacted execution identity 與 state | canonical Attempt | V3 恰好擁有一個 Run 或 Try，並攜帶 SourceSnapshots；terminal observation 必須明確匯入。 |
+| Metric protocol 與 measured result | canonical EvaluationSpec 與 Evaluation | Evaluation v2 把 formal evidence 綁到一個精確 successful Attempt。 |
+| Belief 與 belief-changing relation | canonical Finding | 從 incoming edge 推導 weakened/overturned state。 |
+| Reusable evaluated result | canonical Candidate | Candidate v2 從 formal Attempt 複製 clean Source identities，並要求綁到同一 Attempt 的 Evaluation v2。 |
+| Downstream composition 與 production decision | Release 與 append-only Promotion chain | 要求 combination evidence、sealed holdout 與具名 human approval。 |
+| 目前 production selection | derived Champion | Render manifest；絕不讀回作為 authority。 |
+| Commit、branch、worktree 與 integration | native Git | 固定 full object ID 與 exact changed path。`exp` 絕不自動 merge 或 push。 |
+| Live task/group state | Pueue | 透過 bounded adapter observe/reconcile；絕不複製 raw environment。 |
+| Run、metric、trace、artifact 與 registry state | workload-owned MLflow 或其他 provider | 只讀 selected field，且只保留 verified sanitized reference；artifact bytes 位於 `exp` 外。 |
+| Lease、job、outbox、fairness、provider observation | private SQLite | 協調 local execution；不能建立 scientific meaning。 |
+| Generated page、manifest 與 TUI row | canonical records 加 bounded local observations | 一律視為 read-only projection。TUI 沒有 mutation、login、install、service-start、editor 或 handoff key。 |
 
-## 研究有向無環圖
+## 建議的 repository arrangement { #recommended-repository-arrangement }
 
-線性證據鏈在更大的有向無環圖 (directed acyclic graph, DAG) 中仍然有效：
+預設建議使用**專用 private experiment repository**。它讓 canonical research
+history、trust review 與 access policy 不依附任何單一 code repository，同一 Project
+仍可宣告多個 Sources。Interactive `exp init` 會先提供此 layout；non-interactive
+專用設定使用 `--dedicated-repo`、`--source-repo`、`--source-key` 與 `--confirm`。
+Initialization 可以採用精確 Git root；若明確加上 `--create`，也能初始化經審閱的 missing／
+empty target。它不會建立 remote、commit、submodule 或 push。Dedicated repository 與
+initial Source 必須有不同 Git-common identity。
+
+Git submodule 只是一種 optional checkout convenience。它可以讓 experiment repository
+與 code checkout 同時出現在一個 parent tree，但 submodule placement 不是 Source
+identity、association state 或 execution authority。仍必須使用一般 Source record 與經驗證的
+local association。
+
+當 code 與 research 共用治理時，monorepo 或 embedded `experiments/` directory 仍受支援，
+也保留既有 v1 Project 的 backward compatibility。每筆 Source 的不可變 `subdir` 選擇其
+Git repository 內的 semantic root；`.` 代表 repository root。多筆 Source records 可以代表
+多個 repositories 或多個受治理的 subdirectories；每個 Try 或 formal runtime 都明確宣告
+所用 Source set。
+
+每個 canonical Project 仍只有一個可探索 root：
+`<experiment-git-root>/experiments/PROJECT.md`。「獨立」表示此 Git repository 可以不同於
+Source repositories，不表示 Project v1 會搜尋任意 marker path。
+
+## Research DAG 與 Policy
+
+線性 evidence chain 仍可存在於較大的有向無環圖 (DAG) 中：
 
 ```mermaid
 flowchart LR
-  I0[Idea] --> I1[後續 Idea]
-  I0 --> I2[替代 Idea]
+  T[Try] --> I0[Adopted Idea]
+  I0 --> I1[Follow-up Idea]
+  I0 --> I2[Alternative Idea]
   I1 --> P1[Plan]
   I2 --> P2[Plan]
   P1 --> E1[Experiment]
@@ -85,200 +122,193 @@ flowchart LR
   E2 --> F2[Finding]
   E1 --> C1[Candidate]
   E2 --> C2[Candidate]
-  C1 --> EC[組合 Experiment]
+  C1 --> EC[Combination Experiment]
   C2 --> EC
-  EC --> RC[已驗證 Release]
+  EC --> RC[Validated Release]
 ```
 
-正向邊只有一個規範性擁有者。反向邊與彙整樹狀結構都是投影。當某個分支失敗、
-被取代，或成為後續組合的輸入時，不會重寫歷史。
+Forward edge 只有一個 canonical owner；reverse edge 與 consolidated tree 都是 projection。
+某分支失敗或被 supersede 時不重寫 history。Plan v2 dependency 同時固定 Finding revision
+與 belief digest；digest 也涵蓋 incoming `weakens`／`overturns` edges。因此即使 referenced
+Finding 沒有被編輯，新的 belief-changing evidence 仍可使 Plan 與 Queue entry stale。
 
-Plan v2 中的 Finding 相依性同時固定 Finding revision 與信念摘要 (belief digest)。
-該摘要包含連入的 `weakens` 與 `overturns` 邊，因此即使目標 Finding 檔案本身沒有
-改變，新的信念變更證據仍會使相依的 Plans 與 Queue entries 過期。
+`POLICY.md` 預設 `manual`，exploit/explore share 為 80/20。`manual` 與 `shadow`
+顯示 frontier 但不 admission；`assisted` 與 `limited` 只有在明確 policy confirmation 後才
+允許 dispatch，目前 dispatcher 除此之外不區分兩者。Production Promotion 不在此 autonomy
+axis 內，永遠只能由人類執行。
 
-指定的 ResourcePool/lane partition 只能由一個規範性 Queue 擁有。這能讓每個受限的
-frontier 維持全域排序，避免 Queue ID 的排序讓另一個 Queue 中價值更高的 Plan 得不到
-資源。
+Queue 擁有有序 `(ResourcePool, lane)` partitions。指定 partition 只能由一個 Queue 擁有，
+一個 Plan 在 Project 內最多出現一次。Ranking 結合 expected utility、information gain、
+unblock value、risk、pool-hours 與 bounded aging。Agent listwise advice 與交換順序的
+adjacent battles 都會被記錄；abstention、disagreement、low confidence 或 policy tie 都維持
+incumbent order。
 
-## Policy 與自主性
+## Execution paths
 
-`POLICY.md` 是沒有 ID 的 singleton。其預設值為 `manual`，並採用 80/20 的
-exploit/explore 配置。
+### Direct Try
 
-| 模式 | Frontier 可見性 | 自動分派 Experiment |
-|---|---:|---:|
-| `manual` | 是 | 否 |
-| `shadow` | 是 | 否 |
-| `assisted` | 是 | 是，但必須明確確認 |
-| `limited` | 是 | 是，但必須明確確認 |
+`exp try run` 解析一個 active Source、capture 其精確目前狀態，並在建立 job 或 worktree
+之前先發布 Try 與 planned Attempt v3。它直接傳遞 argv，絕不傳 shell string。除非 `--allow`
+globs 授權 Source-subdir-relative changes，managed workspace 預設為 read-only。
 
-目前的 dispatcher 將 `assisted` 與 `limited` 視為允許分派的 policy modes；下游部署
-可利用兩者差異制定額外的審查慣例。切換至任一模式都需要
-`--confirm-auto-experiment`。正式環境 Promotion 不屬於此自主性軸線，且一律只能由
-人類執行。
+Clean mode 會拒絕任何 tracked、untracked 或 submodule dirt。Dirty work 絕不 implicit：
+`--dirty=capture` 僅供 Try 使用，會記錄 bounded SourceSnapshot，並在 XDG cache 建立 private
+authenticated seed bundle。Capture 會拒絕 Source subdir 外的 path、ambiguous rename/copy、
+unsupported index flag、dirty 或 nested submodule、symlink/non-regular node，以及超過 hard
+size/count limit 的內容。Execution 前與 destructive cleanup 前，managed worktree 都必須能
+精確 round-trip 至該 seed。
 
-Policy 也擁有受控的 `domain`、`work`、`method` 與 `component` 詞彙；以及 lane、
-risk、horizon、origin、cluster saturation thresholds、score formula version 與
-tie behavior。自由探索用的 labels 則仍保留在 `tags` 中。
+Direct job 透過 private operational store 在本機執行，不經 Pueue。Lease heartbeat 與 durable
+worker-terminal marker 讓 resume 採保守策略：`resume` 只重用可證明尚未啟動的 Attempt，或
+匯入 verified marker；絕不重新執行 uncertain execution。`retry` 只有在最新 Attempt 已
+terminal 後才建立一筆新 Attempt v3，並透過 `retry_of` 保留 Source state、cwd、argv 與
+execution Source。沒有 terminal evidence 的 unknown Attempt 必須 explicit reconcile 才能
+abandon。
 
-## Queue 准入 (admission)
+Try 只有在所有 owned Attempts 均 terminal 後才能 conclude 或 abandon；selected result
+digests 必須屬於那些 Attempts。Adoption 會在同一 transaction 中建立 Idea v2 並更新
+reciprocal Try state。Clean 或 dirty Try evidence 都不能直接支持 Candidate；有價值的 dirty
+Try 必須經 clean formal path 重跑。
 
-Queue 包含以 `(ResourcePool, lane)` 識別的有序 partitions。一個 Plan 在所有 Queues
-中最多出現一次，並固定用於排序的精確正規化 Plan revision。
+### Formal runtime v1 與 v2
 
-透明的評分估算如下：
+`.exp/runtime.json` 仍是 strict、non-secret、project-local execution contract，具有兩個
+彼此分離的 closed decoders：
 
-```text
-(probability × impact + information gain + unblock value - downside)
---------------------------------------------------------------------- + aging
-                         pool-hours
-```
+- `exp.runtime/v1` 是 embedded-repository compatibility contract。它把 Plan 綁到單一
+  repository 的 `main` 或 `registered_worktree`、top-level Git base/head/ChangeSet、
+  executable、argv、cwd、environment-name allowlist 與 expected outputs；產生 Attempt v2。
+- `exp.runtime/v2` 支援 Source。它指定一個 writable `execution_source` 與零個以上
+  `read_only_sources`；每個 Source 都指定 `main`、`registered_worktree` 或
+  `managed_worktree` checkout、full base/head IDs、exact ChangeSet，以及適用時明確的
+  no-change observation。Cwd 與 expected outputs 相對 execution Source canonical subdir；
+  ChangeSet 仍相對 Git root。它產生 Attempt v3。
 
-排序層支援有界區間 (bounded intervals)；Plan v2 的點估計會以退化區間
-(degenerate intervals) 輸入。計算也會使用較小的成本下限與設有上限的 aging bonus。
-分數公開可見，但不會賦予 agent 變更權限。
+Runtime v2 dispatch 要求 raw runtime-file digest 的 exact `runtime.dispatch` trust receipt。
+它透過 local association 解析每筆 canonical Source、載入 execution Source layered config、
+只 capture clean SourceSnapshots，並可準備 deterministic managed worktrees。Missing、stale、
+dirty、mismatched 或 untrusted Source 會在 scheduler submission 前 block；recovered outbox
+也會重新驗證，不能樂觀提交時改成 `blocked`。
 
-由 agent 支援的插入分為兩個階段：
+Controller 先 atomically 建立 Experiment、Run 與 Attempt、啟動 Plan，並移除精確 Queue
+frontier，之後才建立 private job/outbox，再向 Pueue 提交 argv-only worker command。
+Runtime v2 會把 explicit `--canonical-root`、`--project` 與 checkout-local `--scope` 傳給
+hidden worker。Worker 先重新探索 exact Project、驗證 scope 與 metadata-only job
+authority/fencing，之後才讀 payload。V2 payload 綁定 Project、canonical scope、execution
+Source、所有 private checkout paths 與 canonical snapshot digests；non-execution Sources
+必須為 read-only，並在 process 成功後再次驗證。
 
-1. 由一個全新的 agent 對完整 partition 加上 challenger 進行排序 (listwise)；
-2. challenger 與相鄰 incumbents 進行兩次 Battle，並對調呈現順序。
+Worker 使用 minimal environment、hash declared outputs、freeze bounded result JSON，並在
+SQLite completion 前 durable publish terminal marker。有效 final marker，或 recoverable
+`.tmp` marker 搭配 matching frozen result，可以修復中斷的 SQLite state，而不會重跑 workload。
+Missing marker、expired lease 或 ambiguous scheduler observation 都不能證明 retry 安全。
+Daemon 可 reconcile Attempt operational state；絕不 closure Experiment、選 evidence、寫
+Finding、建立 Evaluation/Candidate 或核准 Promotion。
 
-兩次判斷都必須一致且高於設定的信心閾值 (confidence threshold)。棄權、意見分歧、
-信心不足，或 policy 規定的 tie review，都會記錄 Advice/Battle 稽核資料，但不會改變
-Queue。其他穩定的 ties 則維持 incumbent 排在前面。
+## Git workspace 與 provider boundary
 
-## 執行控制平面 { #execution-control-plane }
+Native Git 是 byte 與 lifecycle authority。Identity-aware branch 與 XDG worktree path 包含完整
+Project、Source 與 owner IDs。Preparation 固定 exact full commit、重新驗證 Source Git-common
+identity、把 worktree 放在所有 registered checkout 外，並拒絕 canonical metadata 與 allowlist
+外的 paths。Formal agent commit creation 只允許 Experiment owner；它只 stage 實際觀察到且
+允許的 paths，並建立 single-parent commit。
 
-`.exp/runtime.json` (`exp.runtime/v1`) 是嚴格、專案本機且不含祕密的 runtime contract。
-它綁定：
+Native inspection 一律驗證 repository、branch、ancestry、path、metadata 與 allowlist state。
+一般 cleanup 只移除仍在 base 的 clean worktree。Dirty Try cleanup 只有在兩次 exact private-seed
+verification 後，才可使用 Git force removal。Cleanup 會移除 worktree 與 private seed，但刻意保留
+branch、commit、operation row 與 terminal marker。Preparation marker 只允許清除經驗證且未完成的
+prepare。
 
-- 一個規範性 ResourcePool 至 Pueue group 與 label prefix；
-- 一個規範性 Plan 至絕對路徑 executable、精確 argument vector、main 或
-  registered-worktree checkout 選擇、repository-relative cwd、timeout、明確允許且不含
-  祕密的 environment-variable names、完整 Git base/head commits、ChangeSet 與預期輸出。
+Workspace registry 公開 `native_git` 與 optional `dev_cli`。目前 `dev_cli` release 沒有
+schema-versioned exact-path machine lifecycle receipt，因此 prepare、inspect、cleanup、open、
+handoff 與 retire 全部 fail closed 為 unsupported。Trusted selection 可在 policy 明確允許時
+fallback 至 `native_git`。不論 requested provider 為何，verification、inspection 與 cleanup
+都由 native Git 擁有；provider-local catalog/task ID 絕不是 canonical。
 
-daemon 會讀取規範性 frontiers 與該 runtime contract。`frontier` 是本機讀取；`tick` 與
-`run` 會聯絡 Pueue。controller 會：
+## Evaluation、artifact 與 Promotion
 
-1. 取得帶有 fencing token 的專案租約 (lease)；
-2. 建立 Pueue snapshot，並調和已知 Attempts 的操作狀態；
-3. 透過穩定的 task label 恢復到期的 outbox submissions，且暫停時不送出；
-4. 暫停時，或 policy 為 manual/shadow 時，停止准入；
-5. 以加權的 exploit/explore 公平性，使用宣告的 units 填滿已啟用 pool 的容量；
-6. 以原子方式建立 Experiment、Run 與 Attempt，啟動 Plan，並移除精確的 Queue frontier；
-7. 以原子方式將私有 job 加入 queue、依精確 ID claim 該 job，同時建立其 submission
-   outbox entry，接著要求 Pueue 將 worker envelope 加入 queue。
+EvaluationSpec 定義 comparable dataset/protocol、metrics、thresholds、budget 與 purpose。
+Evaluation v2 只適用 Experiment subject，且要求一個 successful terminal formal Attempt v3；
+其 Run 必須屬於該 Experiment。Candidate v2 要求 Evaluation 綁定同一 Attempt、Experiment
+conclusion 納入該 Attempt 的 Run、所有 snapshots 都是 clean，並複製每個 Source ID、head
+commit 與 exact ChangeSet。Candidate v1 保持 closed legacy path，且必須由 matching
+successful Attempt v2 支持。
 
-公平性計數器會隨時間朝 Policy shares 靠攏；若只有一個 lane 符合資格，則可借用未使用
-的容量。具名 ResourcePools 是不可跨越的硬性容量邊界；Queue score 無法繞過它們。
+MLflow profile 只包含 binary name、non-secret context、timeout、environment **names 與
+policy**，以及 default metric names。Workload 擁有 run creation 與 logging；`exp` 只執行
+bounded read-only describe。Provider 缺少或 optional worker observation 未 verified，不會把
+successful workload 改成 failure。只有 exact verified Attempt ownership 才能成為 ExternalRef。
+Artifact URI 只是 sanitized identity hint；artifact bytes 不會下載進 canonical records，也不是
+promotion authority。
 
-分派之前，controller 會驗證精確的 Git HEAD、base ancestry、已 commit 的 ChangeSet，
-以及乾淨且可執行的 tree。registered-worktree runtime 會選擇位於 `head_commit` 的唯一
-linked worktree，而不保存其 host path。私有 worker 會檢查 fencing token、在最小化
-環境中執行精確的 workload argv、驗證預期輸出並計算 hash，接著在更新 SQLite 前發布
-持久的終止標記 (terminal marker)。Replay 會修復中斷的 SQLite finalize，而不會重複
-執行 workload。缺少 marker 或 scheduler 狀態不明確時，狀態為 `unknown`，不能據此
-證明重試安全。
+Release 用 Candidates 填入 typed slots。多個 distinct Candidates 需要 supported combination
+Experiment 與 Evaluation。Promotion 使用另行 sealed 的 promotion-purpose EvaluationSpec、
+fresh finite holdout、append-only chain 與具名 human approval。目前 Champion 與
+`exp.champion-manifest/v1` 或 Source-aware v3 output 都只是 derived view。
 
-daemon 可以調和 Attempt 的操作狀態。它絕不會結束 Experiment、選擇 evidence
-disposition、寫入 Finding、評估 Candidate、組成 Release，或核准 Promotion。
+## Storage 與 recovery boundary
 
-## Git 工作區邊界
-
-Experiment 的程式碼變更使用由 XDG 管理的 linked worktree，以及名為
-`exp/<short-id>-<slug>` 的 branch。準備作業需要乾淨的來源 checkout 與精確、完整的
-base commit。Commit 會根據明確的 allowlist globs 驗證每個變更路徑，排除
-`experiments/` 與 Git metadata，只 stage 那些精確路徑，並建立一個以指定 base 為
-parent 的 commit。
-
-回傳的 ChangeSet 包含 base、head、branch、精確路徑與 binary diff digest。`exp` 絕不
-merge 該 branch、移除 worktree，或變更由人類擁有的 integration branch。
-
-## Evaluation、Release 與 Promotion
-
-EvaluationSpec 定義 dataset/split identity、protocol、metric directions 與 thresholds、
-ResourcePool budget，以及用途（`scientific` 或 `promotion`）。Evaluation 是針對
-Experiment、Candidate 或 Release 的不可變測量結果。只有已清理的外部參照，才能附加
-workload 所擁有的 MLflow identity。
-
-Candidate 只有在來源為受支援且已結束的 Experiment、通過的 scientific Evaluation，
-以及 included Run 的成功 direct Attempt，且該 Attempt 符合 Candidate 的 Git identity
-與 ChangeSet 時，才符合資格。Release 使用 Candidates 填入特定 target 的具名 slots。
-Slot names 是專案慣例，而不只是 model-specific types：量化工作可以組合 `signal`、
-`risk`、`portfolio` 與 `execution`；其他專案則可使用 `main` 或特定領域名稱。
-
-使用超過一個 Candidate 時，必須有經過評估的組合 Experiment，因為不會假設各自獨立的
-收益可相加。已驗證的 Release 只有透過 sealed、用於 promotion 的 EvaluationSpec、
-有界的 holdout，以及由具名人類 approver 核准的 append-only Promotion，才能挑戰
-incumbent。每個 target 的 Champion 都會獨立衍生。
-
-## 儲存邊界
-
-規範性 records 位於固定的 `<git-root>/experiments` root。front matter 中的 IDs 是身分；
-paths 則用於導覽。
+Canonical records 位於所選 experiment repository：
 
 ```text
 experiments/
-├── PROJECT.md
-├── POLICY.md
-├── README.md, ROADMAP.md, LEDGER.md, DECISIONS.md
-├── ideas/, plans/, resource-pools/, queues/, queue-advice/, battles/
-├── evaluation-specs/, evaluations/, findings/, decisions/
+├── PROJECT.md, POLICY.md
+├── sources/, ideas/, plans/, resource-pools/, queues/
+├── queue-advice/, battles/, evaluations/, findings/, decisions/
 ├── candidates/, releases/, promotion-specs/, promotions/
-└── e-<short-id>-<slug>/
+├── t-<full-try-uuid>-<slug>/
+│   ├── TRY.md
+│   └── attempts/
+└── e-<prefix>-<slug>/
     ├── REPORT.md
     ├── runs/
     └── attempts/
 ```
 
-所有 linked worktrees 都透過 Git common directory 協調：
+該 experiment clone 的所有 linked worktrees 都透過其 Git common directory 協調。新的 compound
+write 使用 worktree-scoped `<git-common-dir>/exp/v1/transactions-v2/` journal，schema 為
+`exp.transaction/v2`；舊 `transactions/` namespace 依 strict compatibility rule 維持可讀。
+V2 包含 path-free worktree identity，因此 prepared journal 只由 owning worktree recovery。
+Exact old/new byte hash 使 recovery 只能 roll forward，遇到第三種 value 就停止。Canonical
+commit 後才重新產生 projections。
+
+其他 local state 包含：
 
 ```text
-<git-common-dir>/exp/
-├── v1/
-│   ├── lock
-│   ├── project-receipt.json
-│   ├── reservations/
-│   ├── transactions/
-│   └── attempts/
-└── runtime/v1/control.sqlite
+$XDG_STATE_HOME/exp/associations/v1.json
+$XDG_STATE_HOME/exp/trust/v1.json
+$XDG_CACHE_HOME/exp/source-seeds/
+$XDG_DATA_HOME/exp/worktrees/
+<experiment-git-common-dir>/exp/runtime/v1/control.sqlite
+<experiment-git-common-dir>/exp/v1/attempts/
 ```
 
-協調 tree 與 SQLite database 都是私有本機狀態。它們不受 Git 追蹤，也無法建立科學真相。
+以上都不是 Git-backed scientific authority。請參閱
+[Storage and transactions](transactions.md)與
+[Configuration and paths](../reference/configuration.md)。
 
-## 交易與恢復
+## Read-only TUI
 
-複合規範性變更使用 `exp.transaction/v1` prepared journals。在 common lock 保護下，
-`exp` 會驗證完整的 candidate inventory、保留新 IDs、寫入並 fsync 精確的 staged bytes，
-然後在第一次規範性變更前發布 journal。發布會依 path 以確定性順序進行。
+`exp ui` 由 immutable sanitized snapshot 呈現 Workflow、Workspace、Tries、Queue、Attempts、
+Candidates 與 Readiness tabs。Startup 只讀 canonical records、associations、config provenance，
+並以 read-only mode 開啟既有 operation database；不會建立 database。只有明確進入或 refresh
+Readiness tab 才會 probe，且只執行 bounded local probe，不會 install、login、start service、
+執行 workload 或寫 canonical record。Generation/identity fence 會丟棄 stale asynchronous
+response。Machine caller 應使用一般 `--json` commands；`exp ui` 本身要求 terminal stdin/stdout，
+沒有 JSON mode。
 
-恢復會根據精確的 old/new hashes 向前推進。destination 已是新 hash 時會接受；仍為舊
-hash 時會推進；任何第三種值都會停止，且不覆寫無關的編輯。變更操作會先恢復 prepared
-journals，再建立新的 candidate state；`exp record recover` 則提供明確的恢復操作。
-投影只會在規範性 commit 之後重新產生。請參閱 [transactions.md](transactions.md)。
+## 非目標與目前限制
 
-## Provider 與搜尋邊界
+目前實作不會：
 
-Pueue 與 MLflow 是已實作的外部 adapters。Pueue snapshots 會在資料跨越 adapter 邊界前，
-遞迴移除已擷取的 environment maps。Submission 僅接受已稽核的私有 worker envelope。
-明確取消需要確認。MLflow verification 是唯讀的，只會從 workload 建立的 run 回傳指定的
-metrics/tags。
-
-provider-neutral Study contract 是作為整合邊界實作，而非具體的 Optuna runtime。Search
-保持在單一且精確的 Plan revision 內；它不能擁有 queue ordering、scheduling、Findings、
-Releases 或 Promotions。請參閱 [provider-contract.md](provider-contract.md) 與
-[search-adapter-contract.md](search-adapter-contract.md)。
-
-## 非目標
-
-目前的實作不會：
-
-- 取代 Pueue、MLflow、artifact store、registry 或 notebook runtime；
-- 從 process/scheduler/tracker 狀態推斷科學結論；
-- merge experiment branches 或部署 Champion；
-- 允許 agent 或 autonomy mode 核准正式環境 Promotion；
-- 實作具體的 Optuna adapter、安裝 Python packages，或啟動 search service；
-- 保存原始 environments、無界限 logs、secrets 或 artifact bytes；
-- 提供多個 experiment roots、跨 repository graph，或動態 Go plugin ABI；
-- 在 migration 期間執行 legacy harness scripts。
+- 自動 merge、push、deploy 或 rollback Git branch／Champion；
+- 從 process、scheduler、MLflow 或 artifact state 推論 scientific validity；
+- 讓 agent、autonomy mode、TUI 或 provider 核准 Promotion；
+- 在沒有 exact schema-versioned machine receipt 時使用 `dev_cli` lifecycle operation；
+  native Git 仍是 prepare/inspect/cleanup authority；
+- 提供 large-artifact store、mirror raw telemetry/log，或保存 artifact bytes/raw environment；
+- 直接 promotion dirty Try；必須 clean formal rerun 並建立 typed Evaluation；
+- 在同一 Git repository 探索多個 canonical Project roots，或在不同 Project UUID 間建立
+  canonical relationship；
+- 提供 concrete Optuna runtime、universal cloud scheduler/registry 或 dynamic Go plugin ABI；
+- 在 migration 中執行 legacy harness scripts。

@@ -54,7 +54,7 @@ plugins:
             Agents and Workspaces: Agent 與工作區
             Runtime Dispatch: 執行與派送
             Evidence to Promotion: 從證據到上線
-            Harness-v0 Migration: Harness-v0 遷移
+            Migration and Compatibility: Migration 與相容性
             Tools: 工具
             MLflow: MLflow
             Pueue: Pueue
@@ -111,13 +111,14 @@ nav:
   - Why exp: why-exp.md
   - Research Principles: research-principles.md
   - Getting Started: getting-started.md
+  - Command Map: reference/command-map.md
   - Workflows:
       - Overview: workflows/index.md
       - Core Research Workflow: workflows/core-workflow.md
       - Agents and Workspaces: workflows/agents-and-workspaces.md
       - Runtime Dispatch: workflows/runtime-dispatch.md
       - Evidence to Promotion: workflows/evidence-to-promotion.md
-      - Harness-v0 Migration: workflows/migration.md
+      - Migration and Compatibility: workflows/migration.md
   - Tools:
       - Overview: tools/index.md
       - MLflow: tools/mlflow.md
@@ -130,7 +131,6 @@ nav:
       - Tool Explorations: notes/tool-explorations.md
   - Reference:
       - Configuration and Paths: reference/configuration.md
-      - Command Map: reference/command-map.md
       - Records and Authority: reference/records-and-authority.md
   - Design:
       - Architecture: design/architecture.md

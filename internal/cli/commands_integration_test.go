@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/daviddwlee84/exp-cli/internal/execx"
+	"github.com/daviddwlee84/exp-cli/internal/lifecycle"
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/projection"
 	"github.com/daviddwlee84/exp-cli/internal/provider"
@@ -25,6 +26,39 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/safex"
 	"github.com/google/uuid"
 )
+
+func TestLifecycleTransactionFailureRendersRecoveryIdentity(t *testing.T) {
+	result := &record.TransactionResult{
+		TransactionID: "tx-lifecycle-recovery", State: record.TransactionPrepared, RecoveryRequired: true,
+		Paths: []record.TransactionPathResult{{Path: "candidates/candidate.md", Published: true}}, Documents: []*record.Document{},
+	}
+	injected := errors.New("injected lifecycle commit-mark failure")
+	var stdout bytes.Buffer
+	app := NewApp(t.Context(), nil, &stdout, nil)
+	err := lifecycleCommandFailure(app, true, "candidate create", &lifecycle.TransactionError{Result: result, Err: injected})
+	if !errors.Is(err, injected) {
+		t.Fatalf("lifecycle failure = %v", err)
+	}
+	envelope := decodeEnvelope(t, stdout.String())
+	var data failedTransactionData
+	decodeData(t, envelope, &data)
+	if envelope.OK || !envelope.Partial || data.Transaction == nil || data.Transaction.TransactionID != result.TransactionID || !data.Transaction.RecoveryRequired {
+		t.Fatalf("lifecycle recovery envelope = %#v data=%#v", envelope, data)
+	}
+}
+
+func TestRecordTransactionDataPreservesPreparedProgress(t *testing.T) {
+	result := &record.TransactionResult{
+		TransactionID: "01a09900-0000-7001-8000-000000000001",
+		State:         record.TransactionPrepared, RecoveryRequired: true,
+		Paths:     []record.TransactionPathResult{{Path: "plans/plan.md", Published: true}},
+		Documents: []*record.Document{},
+	}
+	data := makeRecordTransactionData(result)
+	if data.TransactionID != result.TransactionID || data.State != record.TransactionPrepared || !data.RecoveryRequired || len(data.Paths) != 1 || !data.Paths[0].Published || data.Records == nil {
+		t.Fatalf("prepared transaction data = %#v", data)
+	}
+}
 
 type commandInvocation struct {
 	stdout string

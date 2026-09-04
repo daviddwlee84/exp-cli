@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,107 @@ func TestScientificLifecycleClosesAtomicallyAndCreatesCandidate(t *testing.T) {
 	inventory = fixture.inventory(t)
 	if !inventory.Valid() || len(inventory.OfKind(research.KindCandidate)) != 1 || len(inventory.OfKind(research.KindFinding)) != 1 {
 		t.Fatalf("final scientific inventory = %#v", inventory.Diagnostics)
+	}
+}
+
+func TestCandidateV2CopiesCleanFormalAttemptSources(t *testing.T) {
+	fixture := newLifecycleFixture(t)
+	sourceID := fixture.nextID(t, research.KindSource)
+	source := fixture.create(t, &research.Source{
+		Common: research.Common{Schema: research.SchemaSource, ID: sourceID, Title: "Production source", CreatedAt: fixture.now, UpdatedAt: fixture.now},
+		Key:    "production", Kind: research.SourceGit, Subdir: ".", LocatorHints: []string{"https://github.com/example/production.git"}, State: research.SourceActive,
+	}, "# Production source\n")
+	study := fixture.addStudy(t, "Source-aware candidate", research.ExperimentSingleFactor, nil)
+	cleanAttempt := fixture.addSuccessfulAttemptV3(t, study, sourceID, research.AttemptSucceeded)
+	nonterminalAttempt := fixture.addSuccessfulAttemptV3(t, study, sourceID, research.AttemptRunning)
+	fixture.addSuccessfulAttempt(t, study, strings.Repeat("c", 40), "legacy.go")
+
+	fixture.advance()
+	closed, err := fixture.service.CloseExperiment(context.Background(), CloseExperimentRequest{
+		Experiment: ref(study.experiment), Plan: ref(study.plan), Verdict: research.VerdictSupported,
+		Summary: "The source-aware candidate passes.", Evidence: []ConclusionEvidenceInput{{Run: ref(study.run), Disposition: research.EvidenceIncluded}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.advance()
+	legacyEvaluation, err := fixture.service.CreateEvaluation(context.Background(), CreateEvaluationRequest{
+		Spec: ref(fixture.scientificSpec), Subject: ref(closed.Experiment), Data: passingEvaluation("Legacy source-aware result"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, createErr := fixture.service.CreateCandidate(context.Background(), CreateCandidateRequest{
+		Title: "Unbound v2 candidate", Experiment: ref(closed.Experiment), Evaluation: ref(legacyEvaluation.Evaluation),
+		EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision, Attempt: ref(cleanAttempt),
+	}); !errors.Is(createErr, ErrPrecondition) || result != nil {
+		t.Fatalf("unbound Candidate v2 = %#v, %v", result, createErr)
+	}
+
+	fixture.advance()
+	legacy, err := fixture.service.CreateCandidate(context.Background(), CreateCandidateRequest{
+		Title: "Reachable legacy candidate", Experiment: ref(closed.Experiment), Evaluation: ref(legacyEvaluation.Evaluation),
+		EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision,
+		GitCommit:                      strings.Repeat("c", 40), ChangeSet: []string{"legacy.go"},
+	})
+	if err != nil || legacy == nil || legacy.Candidate.Record.(*research.Candidate).Schema != research.SchemaCandidate {
+		t.Fatalf("Source-aware legacy Candidate creation = %#v, %v", legacy, err)
+	}
+
+	fixture.advance()
+	evaluation, err := fixture.service.CreateEvaluation(context.Background(), CreateEvaluationRequest{
+		Spec: ref(fixture.scientificSpec), Subject: ref(closed.Experiment), Attempt: ref(cleanAttempt), Data: passingEvaluation("Source-aware result"),
+	})
+	if err != nil || evaluation.Evaluation.Record.(*research.Evaluation).Schema != research.SchemaEvaluationV2 || evaluation.Evaluation.Record.(*research.Evaluation).Attempt != cleanAttempt.Record.(*research.Attempt).ID {
+		t.Fatalf("Attempt-bound Evaluation = %#v, %v", evaluation, err)
+	}
+
+	fixture.advance()
+	if result, err := fixture.service.CreateCandidate(context.Background(), CreateCandidateRequest{
+		Title: "Nonterminal candidate", Experiment: ref(closed.Experiment), Evaluation: ref(evaluation.Evaluation),
+		EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision, Attempt: ref(nonterminalAttempt),
+	}); !errors.Is(err, ErrPrecondition) || result != nil {
+		t.Fatalf("nonterminal Candidate = %#v, %v", result, err)
+	}
+
+	candidate, err := fixture.service.CreateCandidate(context.Background(), CreateCandidateRequest{
+		Title: "Source-aware candidate", Body: "# Source-aware candidate\n",
+		Experiment: ref(closed.Experiment), Evaluation: ref(evaluation.Evaluation),
+		EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision, Attempt: ref(cleanAttempt),
+	})
+	if err != nil || candidate == nil {
+		t.Fatalf("CreateCandidate v2 = %#v, %v", candidate, err)
+	}
+	value := candidate.Candidate.Record.(*research.Candidate)
+	attempt := cleanAttempt.Record.(*research.Attempt)
+	if value.Schema != research.SchemaCandidateV2 || value.Attempt != attempt.ID || len(value.Sources) != 1 ||
+		value.Sources[0].Source != sourceID || value.Sources[0].HeadCommit != attempt.SourceSnapshots[0].HeadCommit ||
+		!reflect.DeepEqual(value.Sources[0].ChangeSet, attempt.SourceSnapshots[0].ChangeSet) || value.GitCommit != "" || len(value.ChangeSet) != 0 {
+		t.Fatalf("Candidate v2 source copy = %#v", value)
+	}
+	if source.Record.(*research.Source).ID != value.Sources[0].Source {
+		t.Fatal("Candidate v2 lost canonical Source identity")
+	}
+
+	fixture.advance()
+	tryID := fixture.nextID(t, research.KindTry)
+	tryDocument := fixture.create(t, &research.Try{
+		Common: research.Common{Schema: research.SchemaTry, ID: tryID, Title: "Exploratory owner", CreatedAt: fixture.now, UpdatedAt: fixture.now},
+		State:  research.TryOpen, Goal: "Explore only.", Sources: []research.ID{sourceID},
+	}, "# Exploratory owner\n")
+	dirtySnapshot := lifecycleSnapshot(t, sourceID, fixture.now, research.SourceSnapshotDirty)
+	exitCode := 0
+	tryAttempt := fixture.create(t, &research.Attempt{
+		Common: research.Common{Schema: research.SchemaAttemptV3, ID: fixture.nextID(t, research.KindAttempt), Title: "Dirty Try Attempt", CreatedAt: fixture.now, UpdatedAt: fixture.now},
+		Try:    tryDocument.Record.(*research.Try).ID, State: research.AttemptSucceeded, Runner: "direct", Scheduler: "direct", CWD: ".", Argv: []string{"true"},
+		ExecutionSource: sourceID, SourceSnapshots: []research.SourceSnapshot{dirtySnapshot},
+		Terminal: &research.Terminal{Source: "direct", ObservedAt: fixture.now, StartedAt: &fixture.now, EndedAt: fixture.now, ExitCode: &exitCode},
+	}, "# Dirty Try Attempt\n")
+	if result, err := fixture.service.CreateCandidate(context.Background(), CreateCandidateRequest{
+		Title: "Try-backed candidate", Experiment: ref(closed.Experiment), Evaluation: ref(evaluation.Evaluation),
+		EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision, Attempt: ref(tryAttempt),
+	}); !errors.Is(err, ErrPrecondition) || result != nil {
+		t.Fatalf("Try-backed Candidate = %#v, %v", result, err)
 	}
 }
 
@@ -263,6 +366,178 @@ func TestCombinationReleasePromotionAndRollback(t *testing.T) {
 	champions, err := fixture.inventory(t).CurrentChampions()
 	if err != nil || len(champions) != 1 || champions[0].Release != mustDocumentID(releaseA.Release) || champions[0].Promotion != mustDocumentID(rolledBack.Promotion) {
 		t.Fatalf("derived champions = %#v, %v", champions, err)
+	}
+}
+
+type lifecycleFailureStore struct {
+	Store
+	operation string
+	published int
+	err       error
+	sequence  int
+}
+
+func (store *lifecycleFailureStore) Transact(ctx context.Context, request record.TransactionRequest) (*record.TransactionResult, error) {
+	if request.Operation != store.operation {
+		return store.Store.Transact(ctx, request)
+	}
+	store.sequence++
+	result := &record.TransactionResult{
+		TransactionID: fmt.Sprintf("tx-%s-%d", strings.ReplaceAll(store.operation, ".", "-"), store.sequence),
+		State:         record.TransactionPrepared, RecoveryRequired: true,
+		Paths: make([]record.TransactionPathResult, len(request.Changes)), Documents: []*record.Document{},
+	}
+	for index, change := range request.Changes {
+		result.Paths[index] = record.TransactionPathResult{Path: fmt.Sprintf("path-%d", index), Published: index < store.published}
+		if change.Operation != record.TransactionDelete && change.Document != nil {
+			result.Documents = append(result.Documents, change.Document.Clone())
+		}
+	}
+	return result, store.err
+}
+
+func TestLifecycleConstructorsPreservePreparedTransactionRecovery(t *testing.T) {
+	fixture := newLifecycleFixture(t)
+	baseCandidate := fixture.produceCandidate(t, "Recovery base", strings.Repeat("a", 40), "base/model.go")
+	baseRelease, err := fixture.service.CreateRelease(context.Background(), CreateReleaseRequest{
+		Title: "Recovery release", Target: "production", Version: "v1", State: research.ReleaseValidated,
+		Slots:      []ReleaseSlotInput{{Name: "model", Candidate: ref(baseCandidate)}},
+		Evaluation: &ReleaseEvaluationInput{Spec: ref(fixture.promotionEvaluationSpec), Data: passingEvaluation("Recovery release gate")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.advance()
+	basePromotionSpec, err := fixture.service.CreatePromotionSpec(context.Background(), CreatePromotionSpecRequest{
+		Title: "Recovery promotion gate", Target: "production", EvaluationSpec: ref(fixture.promotionEvaluationSpec), HoldoutBudgetHours: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.advance()
+	baseHoldout, err := fixture.service.CreateEvaluation(context.Background(), CreateEvaluationRequest{
+		Spec: ref(fixture.promotionEvaluationSpec), Subject: ref(baseRelease.Release), Data: passingEvaluation("Recovery holdout"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	candidateStudy := fixture.addStudy(t, "Recovery candidate target", research.ExperimentSingleFactor, nil)
+	fixture.addSuccessfulAttempt(t, candidateStudy, strings.Repeat("b", 40), "candidate/model.go")
+	fixture.advance()
+	candidateClosed, err := fixture.service.CloseExperiment(context.Background(), CloseExperimentRequest{
+		Experiment: ref(candidateStudy.experiment), Plan: ref(candidateStudy.plan), Verdict: research.VerdictSupported,
+		Summary: "Candidate recovery evidence passed.", Evidence: []ConclusionEvidenceInput{{Run: ref(candidateStudy.run), Disposition: research.EvidenceIncluded}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.advance()
+	candidateEvaluation, err := fixture.service.CreateEvaluation(context.Background(), CreateEvaluationRequest{
+		Spec: ref(fixture.scientificSpec), Subject: ref(candidateClosed.Experiment), Data: passingEvaluation("Candidate recovery evaluation"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStudy := fixture.addStudy(t, "Recovery close target", research.ExperimentSingleFactor, nil)
+	fixture.addSuccessfulAttempt(t, closeStudy, strings.Repeat("c", 40), "close/model.go")
+	fixture.advance()
+
+	injected := errors.New("injected lifecycle transaction boundary")
+	failureStore := &lifecycleFailureStore{Store: fixture.store, err: injected}
+	service := New(failureStore, WithClock(func() time.Time { return fixture.now }), WithUUIDGenerator(fixture.generate))
+	tests := []struct {
+		name      string
+		operation string
+		invoke    func() (any, error)
+		valid     func(any) bool
+	}{
+		{
+			name: "experiment close", operation: "experiment.close",
+			invoke: func() (any, error) {
+				return service.CloseExperiment(context.Background(), CloseExperimentRequest{
+					Experiment: ref(closeStudy.experiment), Plan: ref(closeStudy.plan), Verdict: research.VerdictSupported,
+					Summary: "Close recovery target.", Evidence: []ConclusionEvidenceInput{{Run: ref(closeStudy.run), Disposition: research.EvidenceIncluded}},
+				})
+			},
+			valid: func(value any) bool {
+				result, ok := value.(*CloseExperimentResult)
+				return ok && result.Experiment != nil && result.Plan != nil
+			},
+		},
+		{
+			name: "evaluation", operation: "evaluation.create",
+			invoke: func() (any, error) {
+				return service.CreateEvaluation(context.Background(), CreateEvaluationRequest{
+					Spec: ref(fixture.scientificSpec), Subject: ref(candidateClosed.Experiment), Data: passingEvaluation("Recovery evaluation target"),
+				})
+			},
+			valid: func(value any) bool {
+				result, ok := value.(*CreateEvaluationResult)
+				return ok && result.Evaluation != nil
+			},
+		},
+		{
+			name: "candidate", operation: "candidate.create",
+			invoke: func() (any, error) {
+				return service.CreateCandidate(context.Background(), CreateCandidateRequest{
+					Title: "Recovery candidate", Experiment: ref(candidateClosed.Experiment), Evaluation: ref(candidateEvaluation.Evaluation),
+					EvaluationSpecExpectedRevision: fixture.scientificSpec.Revision, GitCommit: strings.Repeat("b", 40), ChangeSet: []string{"candidate/model.go"},
+				})
+			},
+			valid: func(value any) bool {
+				result, ok := value.(*CreateCandidateResult)
+				return ok && result.Candidate != nil
+			},
+		},
+		{
+			name: "release", operation: "release.create",
+			invoke: func() (any, error) {
+				return service.CreateRelease(context.Background(), CreateReleaseRequest{
+					Title: "Recovery draft", Target: "staging", Version: "v2", State: research.ReleaseDraft,
+					Slots: []ReleaseSlotInput{{Name: "model", Candidate: ref(baseCandidate)}},
+				})
+			},
+			valid: func(value any) bool { result, ok := value.(*CreateReleaseResult); return ok && result.Release != nil },
+		},
+		{
+			name: "promotion spec", operation: "promotion-spec.create",
+			invoke: func() (any, error) {
+				return service.CreatePromotionSpec(context.Background(), CreatePromotionSpecRequest{
+					Title: "Recovery spec", Target: "staging", EvaluationSpec: ref(fixture.promotionEvaluationSpec), HoldoutBudgetHours: 1,
+				})
+			},
+			valid: func(value any) bool {
+				result, ok := value.(*CreatePromotionSpecResult)
+				return ok && result.Spec != nil
+			},
+		},
+		{
+			name: "promotion", operation: "promotion.append",
+			invoke: func() (any, error) {
+				return service.AppendPromotion(context.Background(), AppendPromotionRequest{
+					Title: "Recovery promotion", Target: "production", Spec: ref(basePromotionSpec.Spec), Challenger: ref(baseRelease.Release), Evaluation: ref(baseHoldout.Evaluation),
+					EvaluationSpecExpectedRevision: fixture.promotionEvaluationSpec.Revision, Outcome: research.PromotionAccepted, ApprovedBy: "human:test",
+				})
+			},
+			valid: func(value any) bool {
+				result, ok := value.(*AppendPromotionResult)
+				return ok && result.Promotion != nil && result.Champion != nil
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			failureStore.operation = testCase.operation
+			for _, published := range []int{0, 1, 1 << 20} {
+				failureStore.published = published
+				result, err := testCase.invoke()
+				transaction, carried := TransactionResultFromError(err)
+				if !errors.Is(err, injected) || !carried || transaction == nil || !transaction.RecoveryRequired || transaction.TransactionID == "" || !testCase.valid(result) {
+					t.Fatalf("published=%d result=%#v transaction=%#v carried=%t err=%v", published, result, transaction, carried, err)
+				}
+			}
+		})
 	}
 }
 
@@ -438,6 +713,43 @@ func (fixture *lifecycleFixture) addSuccessfulAttempt(t *testing.T, study studyF
 		DispatchID: "test-" + attemptID.UUIDHex(), BaseCommit: strings.Repeat("0", 40), HeadCommit: commit, ChangeSet: []string{changedPath},
 		Terminal: &research.Terminal{Source: "direct", ObservedAt: fixture.now, StartedAt: &started, EndedAt: fixture.now, ExitCode: intPointer(0)},
 	}, "# Successful implementation\n")
+}
+
+func (fixture *lifecycleFixture) addSuccessfulAttemptV3(t *testing.T, study studyFixture, source research.ID, state research.AttemptState) *record.Document {
+	t.Helper()
+	attemptID := fixture.nextID(t, research.KindAttempt)
+	snapshot := lifecycleSnapshot(t, source, fixture.now, research.SourceSnapshotClean)
+	var terminal *research.Terminal
+	if state == research.AttemptSucceeded {
+		started := fixture.now
+		terminal = &research.Terminal{Source: "direct", ObservedAt: fixture.now, StartedAt: &started, EndedAt: fixture.now, ExitCode: intPointer(0)}
+	}
+	return fixture.create(t, &research.Attempt{
+		Common: research.Common{Schema: research.SchemaAttemptV3, ID: attemptID, Title: "Source-aware execution", CreatedAt: fixture.now, UpdatedAt: fixture.now},
+		Run:    study.run.Record.(*research.Run).ID, State: state, Runner: "direct", Scheduler: "direct", CWD: ".", Argv: []string{"true"},
+		ExecutionSource: source, SourceSnapshots: []research.SourceSnapshot{snapshot}, Terminal: terminal,
+	}, "# Source-aware execution\n")
+}
+
+func lifecycleSnapshot(t *testing.T, source research.ID, now time.Time, state research.SourceSnapshotState) research.SourceSnapshot {
+	t.Helper()
+	snapshot := research.SourceSnapshot{
+		Source: source, Subdir: ".", PolicyVersion: "capture-v1", CapturedAt: now,
+		GitObjectFormat: research.GitObjectSHA1,
+		BaseCommit:      strings.Repeat("0", 40), HeadCommit: strings.Repeat("b", 40),
+		ChangeSet: []string{"model.go"}, State: state, Reproducibility: research.ReproducibilityExact,
+	}
+	if state == research.SourceSnapshotDirty {
+		snapshot.DirtyDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+		snapshot.DirtySummary = "tracked_changes=1"
+		snapshot.Reproducibility = research.ReproducibilityBounded
+	}
+	digest, err := research.SourceSnapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Digest = digest
+	return snapshot
 }
 
 func intPointer(value int) *int { return &value }

@@ -27,6 +27,7 @@ type EvaluationData struct {
 type CreateEvaluationRequest struct {
 	Spec    RevisionRef
 	Subject RevisionRef
+	Attempt RevisionRef
 	Data    EvaluationData
 }
 
@@ -55,13 +56,42 @@ func (service *Service) CreateEvaluation(ctx context.Context, request CreateEval
 	if err := validateMetrics(spec, request.Data.Metrics, request.Data.Outcome); err != nil {
 		return nil, err
 	}
+	var attemptDocument *record.Document
+	if !request.Attempt.ID.IsZero() || request.Attempt.Revision != "" {
+		if subjectDocument.Kind() != research.KindExperiment {
+			return nil, fmt.Errorf("Attempt-bound Evaluations require an Experiment subject: %w", ErrPrecondition)
+		}
+		attemptDocument, err = resolve(inventory, request.Attempt, research.KindAttempt)
+		if err != nil {
+			return nil, err
+		}
+		attempt := attemptDocument.Record.(*research.Attempt)
+		if attempt.Schema != research.SchemaAttemptV3 || !attempt.Try.IsZero() || attempt.Run.IsZero() || attempt.State != research.AttemptSucceeded || attempt.Terminal == nil {
+			return nil, fmt.Errorf("Evaluation backing Attempt %s is not a successful formal exp.attempt/v3: %w", attempt.ID, ErrPrecondition)
+		}
+		runDocument, runErr := inventory.ByID(attempt.Run)
+		if runErr != nil {
+			return nil, runErr
+		}
+		run, ok := runDocument.Record.(*research.Run)
+		if !ok || run.Experiment != request.Subject.ID {
+			return nil, fmt.Errorf("Evaluation backing Attempt %s does not belong to Experiment %s: %w", attempt.ID, request.Subject.ID, ErrPrecondition)
+		}
+	}
 	now := service.now()
+	if attemptDocument != nil && attemptDocument.Record.(*research.Attempt).Terminal.EndedAt.After(now) {
+		return nil, fmt.Errorf("Evaluation cannot predate its backing Attempt: %w", ErrPrecondition)
+	}
 	reserved := make(map[research.ID]struct{})
 	id, err := service.allocate(inventory, research.KindEvaluation, now, reserved)
 	if err != nil {
 		return nil, err
 	}
-	evaluation := newEvaluation(id, request.Spec.ID, request.Subject.ID, now, request.Data)
+	attemptID := research.ID{}
+	if attemptDocument != nil {
+		attemptID, _ = attemptDocument.ID()
+	}
+	evaluation := newEvaluation(id, request.Spec.ID, request.Subject.ID, attemptID, now, request.Data)
 	changes := newGuardedChanges()
 	if err := changes.guard(specDocument, request.Spec.Revision); err != nil {
 		return nil, err
@@ -69,27 +99,43 @@ func (service *Service) CreateEvaluation(ctx context.Context, request CreateEval
 	if err := changes.guard(subjectDocument, request.Subject.Revision); err != nil {
 		return nil, err
 	}
+	if attemptDocument != nil {
+		if err := changes.guard(attemptDocument, request.Attempt.Revision); err != nil {
+			return nil, err
+		}
+	}
 	changes.create(&record.Document{Record: evaluation, Body: request.Data.Body})
-	transaction, err := service.store.Transact(ctx, record.TransactionRequest{
+	transaction, transactionErr := service.store.Transact(ctx, record.TransactionRequest{
 		Operation: "evaluation.create", Changes: changes.changes,
 	})
-	if err != nil {
-		return nil, err
+	result := &CreateEvaluationResult{}
+	if transaction != nil {
+		result.TransactionID = transaction.TransactionID
+		result.Evaluation, _ = resultDocument(transaction, id)
 	}
-	document, err := resultDocument(transaction, id)
-	if err != nil {
-		return nil, err
+	if transactionErr != nil {
+		if transaction == nil {
+			return nil, transactionErr
+		}
+		return result, lifecycleTransactionError(transaction, transactionErr)
 	}
-	return &CreateEvaluationResult{TransactionID: transaction.TransactionID, Evaluation: document}, nil
+	if result.Evaluation == nil {
+		return nil, fmt.Errorf("canonical transaction omitted Evaluation %s", id)
+	}
+	return result, nil
 }
 
-func newEvaluation(id, spec, subject research.ID, now time.Time, data EvaluationData) *research.Evaluation {
+func newEvaluation(id, spec, subject, attempt research.ID, now time.Time, data EvaluationData) *research.Evaluation {
+	schema := research.SchemaEvaluation
+	if !attempt.IsZero() {
+		schema = research.SchemaEvaluationV2
+	}
 	return &research.Evaluation{
 		Common: research.Common{
-			Schema: research.SchemaEvaluation, ID: id, Title: data.Title,
+			Schema: schema, ID: id, Title: data.Title,
 			CreatedAt: now, UpdatedAt: now, Tags: append([]string(nil), data.Tags...),
 		},
-		Spec: spec, Subject: subject, Outcome: data.Outcome, EvaluatedAt: now,
+		Spec: spec, Subject: subject, Attempt: attempt, Outcome: data.Outcome, EvaluatedAt: now,
 		Metrics:      append([]research.MetricValue(nil), data.Metrics...),
 		ExternalRefs: cloneExternalRefs(data.ExternalRefs), Summary: data.Summary,
 		Extensions: cloneExtensions(data.Extensions),

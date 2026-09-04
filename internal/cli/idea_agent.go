@@ -94,12 +94,13 @@ func runIdeaDevelop(command *cobra.Command, app *App, root *rootOptions, options
 		return commandFailure(app, options.json, "idea develop", struct{}{}, false, nil, err)
 	}
 	data := struct {
-		Proposal      ideaPlanProposal     `json:"proposal"`
-		Applied       bool                 `json:"applied"`
-		Idea          *canonicalRecordView `json:"idea,omitempty"`
-		Plan          *canonicalRecordView `json:"plan,omitempty"`
-		AgentProfile  string               `json:"agent_profile"`
-		ReportedModel string               `json:"reported_model,omitempty"`
+		Proposal      ideaPlanProposal          `json:"proposal"`
+		Applied       bool                      `json:"applied"`
+		Idea          *canonicalRecordView      `json:"idea,omitempty"`
+		Plan          *canonicalRecordView      `json:"plan,omitempty"`
+		AgentProfile  string                    `json:"agent_profile"`
+		ReportedModel string                    `json:"reported_model,omitempty"`
+		Transaction   *record.TransactionResult `json:"transaction,omitempty"`
 	}{Proposal: proposal, AgentProfile: run.Profile, ReportedModel: run.ReportedModel}
 	if !options.apply {
 		pretty, _ := json.MarshalIndent(proposal, "", "  ")
@@ -138,7 +139,8 @@ func runIdeaDevelop(command *cobra.Command, app *App, root *rootOptions, options
 		{Operation: record.TransactionReplace, Document: updatedIdea, ExpectedRevision: ideaDocument.Revision},
 	}})
 	if err != nil {
-		return commandFailure(app, options.json, "idea develop", data, false, nil, err)
+		data.Transaction = result
+		return commandFailure(app, options.json, "idea develop", data, result != nil, transactionFailureDiagnostics(result), err)
 	}
 	ideaResult := canonicalView(transactionDocument(result, research.KindIdea))
 	planResult := canonicalView(transactionDocument(result, research.KindPlan))

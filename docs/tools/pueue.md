@@ -65,8 +65,8 @@ calling `pueue kill`, `exp` requires all of the following:
 
 1. Exactly one canonical Attempt in this project references that native Pueue
    task ID.
-2. The Attempt assigns scheduler ownership to `pueue` and is a v2 dispatch with
-   a canonical pool and dispatch route.
+2. The Attempt assigns scheduler ownership to `pueue` and is a dispatch-bearing
+   Attempt v2 or formal Attempt v3 with a canonical pool and route.
 3. The external reference context is the local Pueue context.
 4. The Attempt's captured Pueue group and label still match the current runtime
    pool binding.
@@ -101,7 +101,9 @@ The daemon applies these rules:
 Pueue persists task environments in daemon state. Consequently, runtime
 `secret_env` must be empty, and `allowed_env` may contain only explicitly
 approved non-secret names. Workloads that need credentials must obtain them
-after startup through a workload-side broker or provider profile.
+after startup through a workload-side broker. Formal runtime v2 also rejects
+MLflow profiles with environment bindings; named profiles cannot bypass this
+scheduler boundary.
 
 See [Runtime Dispatch](../workflows/runtime-dispatch.md) for the complete
 workload contract and the [Provider contract](../design/provider-contract.md)

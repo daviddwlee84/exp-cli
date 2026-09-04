@@ -9,12 +9,17 @@ This reference contains only the command metadata supplied by this build's CLI l
 Use the Git-native research control plane.
 
 ```text
-exp [--skill]
+exp [--skill] [--start-dir DIR] [--workspace PROJECT|PATH] [--source SOURCE] [--workspace-backend BACKEND] [--mlflow-profile PROFILE]
 ```
 
 Options:
 
+- `--mlflow-profile` — select one trusted named MLflow profile
 - `--skill` — print this build's embedded SKILL.md
+- `--source` — select a canonical Source
+- `--start-dir` — set the physical invocation directory
+- `--workspace` — select a canonical workspace by Project UUID or path
+- `--workspace-backend` — override native_git or dev_cli for this invocation
 
 ## `exp agent`
 
@@ -65,19 +70,22 @@ exp candidate
 
 ## `exp candidate create`
 
-Create a Candidate from supported evidence and an exact change set.
+Create Candidate v2 from a clean formal Attempt, or infer the compatible Candidate v1 flag shape.
 
 ```text
-exp candidate create --experiment ID --evaluation ID --git-commit SHA --change PATH [--json]
+exp candidate create --title TITLE --experiment ID --evaluation ID --attempt ATTEMPT [--json] | exp candidate create --title TITLE --experiment ID --evaluation ID --git-commit SHA --change PATH [--legacy] [--json]
 ```
 
 Options:
 
-- `--change` — add an exact changed path
+- `--attempt` — select the clean successful formal Attempt
+- `--change` — add a legacy exact changed path
 - `--evaluation` — select its passing scientific Evaluation
 - `--experiment` — select the supported Experiment
-- `--git-commit` — pin the full Git object ID
+- `--git-commit` — pin the legacy full Git object ID
 - `--json` — emit the versioned machine-readable envelope
+- `--legacy` — explicitly select Candidate v1 (legacy fields also infer it)
+- `--title` — set the Candidate title
 
 ## `exp champion`
 
@@ -103,6 +111,94 @@ Options:
 
 - `--json` — emit the versioned machine-readable envelope
 - `--target` — select one production target
+
+## `exp config`
+
+Inspect layered configuration and manage exact-digest trust.
+
+```text
+exp config
+```
+
+## `exp config explain`
+
+Explain layer and trust provenance for effective fields.
+
+```text
+exp config explain [FIELD] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp config list`
+
+List sanitized local trust receipts.
+
+```text
+exp config list [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp config path`
+
+Show candidate and applied configuration paths.
+
+```text
+exp config path [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp config revoke`
+
+Revoke trust for a current or deleted config scope.
+
+```text
+exp config revoke --path PATH [--digest SHA256] [--capability CAPABILITY] --confirm [--json]
+```
+
+Options:
+
+- `--capability` — limit revocation to a capability
+- `--confirm` — confirm without prompting
+- `--digest` — limit revocation to one digest
+- `--json` — emit the versioned machine-readable envelope
+- `--path` — select a current or deleted repository config
+
+## `exp config show`
+
+Show effective non-secret configuration and safe provenance.
+
+```text
+exp config show [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp config trust`
+
+Approve current execution-bearing config by exact digest, with a TTY review wizard for missing fields.
+
+```text
+exp config trust [--path PATH --digest SHA256 --capability CAPABILITY --confirm] [--json]
+```
+
+Options:
+
+- `--capability` — approve an execution-bearing capability
+- `--confirm` — confirm without prompting
+- `--digest` — require its exact current digest
+- `--json` — emit the versioned machine-readable envelope
+- `--path` — select one applied repository config
 
 ## `exp context`
 
@@ -214,7 +310,7 @@ exp doctor [--json] [--live]
 Options:
 
 - `--json` — emit the versioned machine-readable envelope
-- `--live` — permit only the explicitly documented live probes
+- `--live` — run short version and explicit read-only local/service probes
 
 ## `exp evaluation`
 
@@ -226,19 +322,27 @@ exp evaluation
 
 ## `exp evaluation create`
 
-Record one immutable Evaluation.
+Record one immutable Evaluation with optional exact MLflow ownership verification.
 
 ```text
-exp evaluation create --spec ID --subject ID --outcome OUTCOME --metric VALUE [--json]
+exp evaluation create --title TITLE --spec ID --subject ID [--attempt ATTEMPT] --outcome OUTCOME --metric VALUE --summary TEXT [--mlflow-run-id ID --mlflow-tag exp.attempt_id=ATTEMPT] [--json]
 ```
 
 Options:
 
+- `--allow-env` — compatibility-mode non-secret parent binding
+- `--attempt` — bind an Experiment Evaluation to its exact formal Attempt
 - `--json` — emit the versioned machine-readable envelope
 - `--metric` — record a declared metric
+- `--mlflow-context` — override context only in compatibility mode
+- `--mlflow-run-id` — select one workload-owned MLflow run
+- `--mlflow-tag` — assert one selected MLflow tag
 - `--outcome` — set passed, failed, or invalid
+- `--secret-env` — compatibility-mode required secret binding
 - `--spec` — select the EvaluationSpec
 - `--subject` — select the evaluated subject
+- `--summary` — summarize the bounded result
+- `--title` — set the Evaluation title
 
 ## `exp evaluation spec`
 
@@ -253,16 +357,20 @@ exp evaluation spec
 Create a comparable EvaluationSpec.
 
 ```text
-exp evaluation spec create --purpose PURPOSE --dataset NAME --protocol TEXT --metric SPEC --pool ID --budget-hours HOURS [--sealed] [--json]
+exp evaluation spec create --title TITLE --purpose PURPOSE --dataset NAME --protocol TEXT --metric SPEC --pool ID --budget-hours HOURS [--sealed] [--json]
 ```
 
 Options:
 
+- `--budget-hours` — set the finite evaluation budget
+- `--dataset` — identify the frozen dataset or split
 - `--json` — emit the versioned machine-readable envelope
 - `--metric` — declare a metric contract
 - `--pool` — select the budget pool
+- `--protocol` — describe the comparable protocol
 - `--purpose` — select scientific or promotion use
 - `--sealed` — seal the protocol now
+- `--title` — set the EvaluationSpec title
 
 ## `exp experiment`
 
@@ -403,11 +511,26 @@ Options:
 
 ## `exp init`
 
-Initialize an idempotent v1 experiments root.
+Initialize a project; the TTY wizard defaults to a separate private experiment repository.
 
 ```text
-exp init
+exp init [--name NAME] [--dedicated-repo DIR [--create] --source-repo DIR --source-key KEY --confirm] [--json]
 ```
+
+Options:
+
+- `--confirm` — confirm the dedicated plan
+- `--confirm-local-only` — confirm an initial Source without a remote locator
+- `--create` — git-init only a missing or empty dedicated target
+- `--dedicated-repo` — adopt an exact dedicated Git repository root
+- `--json` — emit the versioned machine-readable envelope
+- `--name` — set the project name
+- `--source-key` — set the initial Source key
+- `--source-locator` — add a sanitized locator hint
+- `--source-repo` — bind an existing Source clone
+- `--source-subdir` — bind a Source subdirectory
+- `--source-tag` — add an initial Source tag
+- `--source-title` — set the initial Source title
 
 ## `exp migrate`
 
@@ -435,15 +558,16 @@ Options:
 Build a read-only, fingerprinted harness-v0 migration plan.
 
 ```text
-exp migrate plan [--source DIR] [--resolutions PATH|-] [--output PATH|-] [--json]
+exp migrate plan [--legacy-source DIR | --source DIR] [--resolutions PATH|-] [--output PATH|-] [--json]
 ```
 
 Options:
 
 - `--json` — emit the versioned machine-readable envelope
+- `--legacy-source` — set the Git-root-relative harness-v0 source directory
 - `--output` — write the complete no-clobber plan to a path or raw stdout
 - `--resolutions` — read explicit needs_review resolutions from JSON
-- `--source` — set the Git-root-relative harness-v0 source directory
+- `--source` — compatibility alias for --legacy-source on migrate plan
 
 ## `exp plan`
 
@@ -604,7 +728,7 @@ exp promotion
 Append a human Promotion decision.
 
 ```text
-exp promotion append --target TARGET --spec ID --challenger ID --evaluation ID --outcome OUTCOME --approved-by HUMAN --confirm [--json]
+exp promotion append --title TITLE --target TARGET --spec ID --challenger ID --evaluation ID --outcome OUTCOME --approved-by HUMAN --confirm [--json]
 ```
 
 Options:
@@ -612,16 +736,19 @@ Options:
 - `--approved-by` — identify the human approver
 - `--challenger` — select the validated Release
 - `--confirm` — confirm the exact production decision
+- `--evaluation` — select the sealed holdout Evaluation
 - `--json` — emit the versioned machine-readable envelope
 - `--outcome` — set accepted, rejected, or rolled_back
+- `--spec` — select the PromotionSpec
 - `--target` — select the exact target
+- `--title` — set the Promotion event title
 
 ## `exp promotion spec-create`
 
 Create a sealed human-gated PromotionSpec.
 
 ```text
-exp promotion spec-create --target TARGET --evaluation-spec ID --holdout-budget-hours HOURS [--json]
+exp promotion spec-create --title TITLE --target TARGET --evaluation-spec ID --holdout-budget-hours HOURS [--json]
 ```
 
 Options:
@@ -630,6 +757,7 @@ Options:
 - `--holdout-budget-hours` — bound holdout use
 - `--json` — emit the versioned machine-readable envelope
 - `--target` — select the production target
+- `--title` — set the PromotionSpec title
 
 ## `exp provider`
 
@@ -649,17 +777,20 @@ exp provider mlflow
 
 ## `exp provider mlflow verify`
 
-Read only requested metrics and tags from an MLflow run.
+Read only selected metrics and tags through a trusted profile or explicit compatibility bindings.
 
 ```text
-exp provider mlflow verify --run-id ID [--metric NAME] [--tag NAME=VALUE] [--json]
+exp provider mlflow verify --run-id ID [--metric NAME] [--tag NAME=VALUE] [--mlflow-profile PROFILE | --mlflow-context CONTEXT --allow-env NAME --secret-env NAME] [--json]
 ```
 
 Options:
 
+- `--allow-env` — compatibility-mode non-secret parent binding
 - `--json` — emit the versioned machine-readable envelope
-- `--metric` — request a metric
+- `--metric` — request a metric (profile defaults apply when omitted)
+- `--mlflow-context` — override context only in compatibility mode
 - `--run-id` — select the workload-owned run
+- `--secret-env` — compatibility-mode required secret binding
 - `--tag` — verify one expected tag
 
 ## `exp provider pueue`
@@ -854,12 +985,13 @@ Options:
 Render deterministic projections or check them without writing.
 
 ```text
-exp render [--check]
+exp render [--check] [--json]
 ```
 
 Options:
 
 - `--check` — report projection drift without writing
+- `--json` — emit the versioned machine-readable envelope
 
 ## `exp skill`
 
@@ -874,16 +1006,28 @@ exp skill print|install|check|sync
 Check installed files, compatibility, manifest hash, and consumer links without mutation.
 
 ```text
-exp skill check
+exp skill check [--dir DIR] [--links] [--json]
 ```
+
+Options:
+
+- `--dir` — set the skill destination
+- `--json` — emit the versioned machine-readable envelope
+- `--links` — also check supported consumer links
 
 ## `exp skill install`
 
 Atomically install the embedded skill and safe consumer links.
 
 ```text
-exp skill install
+exp skill install [--dir DIR] [--link] [--json]
 ```
+
+Options:
+
+- `--dir` — set the skill destination
+- `--json` — emit the versioned machine-readable envelope
+- `--link` — create safe supported consumer links
 
 ## `exp skill print`
 
@@ -905,12 +1049,386 @@ Options:
 
 - `--check` — report source-tree command-reference drift without writing
 
+## `exp source`
+
+Manage canonical Git Source bindings and local clone associations.
+
+```text
+exp source
+```
+
+## `exp source add`
+
+Publish and associate a planned Source; a TTY wizard can gather missing fields.
+
+```text
+exp source add [--key KEY --repo DIR] [--title TITLE] [--subdir DIR] [--locator URL] [--tag TAG] [--confirm] [--confirm-local-only] [--json]
+```
+
+Options:
+
+- `--confirm` — confirm canonical and local effects
+- `--confirm-local-only` — confirm a clone with no remote locator
+- `--json` — emit the versioned machine-readable envelope
+- `--key` — set the Source key
+- `--locator` — add a sanitized locator hint
+- `--repo` — inspect an existing Git clone
+- `--subdir` — bind a Git-root-relative subdirectory
+- `--tag` — add a Source tag
+- `--title` — set the Source title
+
+## `exp source append-locator`
+
+Append a sanitized Source locator through exact-revision CAS.
+
+```text
+exp source append-locator [SOURCE] --locator URL --expected-revision SHA256 --confirm [--json]
+```
+
+Options:
+
+- `--confirm` — confirm the locator update
+- `--expected-revision` — require the exact Source revision
+- `--json` — emit the versioned machine-readable envelope
+- `--locator` — append a sanitized locator hint
+
+## `exp source list`
+
+List canonical Sources without provider access.
+
+```text
+exp source list [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp source register`
+
+Register or repair a Source clone association, with TTY review when fields are missing.
+
+```text
+exp source register [SOURCE] [--repo DIR] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+- `--repo` — inspect and register an existing Git clone
+
+## `exp source retire`
+
+Retire an active Source through exact-revision CAS.
+
+```text
+exp source retire [SOURCE] --expected-revision SHA256 --confirm [--json]
+```
+
+Options:
+
+- `--confirm` — confirm retirement
+- `--expected-revision` — require the exact Source revision
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp source show`
+
+Show one canonical Source.
+
+```text
+exp source show [SOURCE] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp source status`
+
+Validate local associations for canonical Sources.
+
+```text
+exp source status [SOURCE] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp try`
+
+Run bounded exploratory work in managed native Git worktrees.
+
+```text
+exp try
+```
+
+## `exp try abandon`
+
+Record a human reason for abandoning an open Try.
+
+```text
+exp try abandon TRY --reason TEXT --confirm [--json]
+```
+
+Options:
+
+- `--confirm` — confirm without prompting
+- `--json` — emit the versioned machine-readable envelope
+- `--reason` — record the abandonment reason
+
+## `exp try adopt`
+
+Atomically adopt a reviewed concluded Try as an Idea v2; a TTY wizard supplies safe classification defaults.
+
+```text
+exp try adopt [TRY] [--title TITLE --summary TEXT --proposed-by HUMAN] [classification flags] [--confirm] [--json]
+```
+
+Options:
+
+- `--body` — set optional Idea Markdown detail
+- `--cluster` — set the primary cluster
+- `--component` — set the component slug
+- `--confirm` — confirm a fully explicit adoption without prompting
+- `--domain` — set the domain slug
+- `--horizon` — set short, medium, or long horizon
+- `--json` — emit the versioned machine-readable envelope without prompting
+- `--lane` — classify exploit or explore
+- `--method` — set the method slug
+- `--origin` — set human or hybrid origin
+- `--parent` — link a parent Idea
+- `--proposed-by` — identify the confirming human
+- `--risk` — set low, medium, or high risk
+- `--summary` — state the formal direction
+- `--tags` — set canonical Idea tags
+- `--title` — set the Idea title
+- `--work` — set the work-class slug
+
+## `exp try cleanup`
+
+Remove only verified manager-owned worktrees and seed bundles.
+
+```text
+exp try cleanup TRY --confirm [--json]
+```
+
+Options:
+
+- `--confirm` — confirm safe local cleanup
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp try finish`
+
+Record a reviewed human conclusion with an explicit result selection.
+
+```text
+exp try finish [TRY] [--summary TEXT] [--result-digest SHA256|--external-ref JSON|--no-results] [--confirm] [--json]
+```
+
+Options:
+
+- `--confirm` — confirm without prompting
+- `--external-ref` — select an ExternalRef
+- `--json` — emit the versioned machine-readable envelope
+- `--no-results` — explicitly select no results
+- `--result-digest` — select a result digest
+- `--summary` — record the human conclusion
+
+## `exp try list`
+
+List a bounded page of canonical Tries and Attempt counts.
+
+```text
+exp try list [--limit N] [--offset N] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+- `--limit` — limit rows to 1..1000
+- `--offset` — skip rows before this page
+
+## `exp try reconcile`
+
+Import late evidence or explicitly abandon one uncertain Attempt.
+
+```text
+exp try reconcile TRY --attempt ATTEMPT --abandon-uncertain --reason TEXT --confirm [--json]
+```
+
+Options:
+
+- `--abandon-uncertain` — record a durable terminal disposition when no marker or live lease exists
+- `--attempt` — select the exact uncertain Attempt
+- `--confirm` — confirm without prompting
+- `--json` — emit the versioned machine-readable envelope
+- `--reason` — record the human reconciliation reason
+
+## `exp try resume`
+
+Resume provably unstarted work or import a durable marker.
+
+```text
+exp try resume TRY [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp try retry`
+
+Retry a terminal Attempt with identical Source and argv identity.
+
+```text
+exp try retry TRY [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp try run`
+
+Register and execute one direct argv; a TTY wizard can gather and review missing fields while fully explicit flags run immediately.
+
+```text
+exp try run [--title TITLE --goal GOAL] [--dirty=capture] [--allow GLOB] [--timeout DURATION] [--tags TAG] [--json] [-- COMMAND [ARG...]]
+```
+
+Options:
+
+- `--allow` — allow a Source-relative changed path glob
+- `--body` — set optional canonical Markdown detail
+- `--dirty` — explicitly capture dirty Source state
+- `--goal` — state the bounded goal
+- `--json` — emit the versioned machine-readable envelope without prompting
+- `--tags` — set canonical Try tags
+- `--timeout` — bound command runtime
+- `--title` — set the Try title
+
+## `exp try show`
+
+Show one Try with canonical and local direct status.
+
+```text
+exp try show TRY [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp try status`
+
+Inspect a bounded page of Attempts, jobs, markers, and worktrees without executing.
+
+```text
+exp try status [TRY] [--limit N] [--offset N] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+- `--limit` — limit unfiltered rows to 1..1000
+- `--offset` — skip unfiltered rows before this page
+
+## `exp ui`
+
+Open the read-only local research TUI on real terminal stdin and stdout.
+
+```text
+exp ui
+```
+
 ## `exp validate`
 
 Validate canonical local records without provider calls.
 
 ```text
 exp validate [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp workspace`
+
+Register or inspect canonical workspace associations.
+
+```text
+exp workspace
+```
+
+## `exp workspace backend`
+
+Inspect workspace provider capabilities and selection.
+
+```text
+exp workspace backend
+```
+
+## `exp workspace backend handoff`
+
+Open one exact managed Try Attempt through the selected provider.
+
+```text
+exp workspace backend handoff TRY --attempt ATTEMPT [--workspace-backend BACKEND] [--json]
+```
+
+Options:
+
+- `--attempt` — select the exact canonical Attempt
+- `--json` — emit the versioned machine-readable envelope
+- `--workspace-backend` — override native_git or dev_cli for this invocation
+
+## `exp workspace backend list`
+
+List built-in and optional workspace providers.
+
+```text
+exp workspace backend list [--probe] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+- `--probe` — run bounded local compatibility probes
+
+## `exp workspace backend status`
+
+Show requested and actual workspace preparation providers.
+
+```text
+exp workspace backend status [--probe] [--workspace-backend BACKEND] [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+- `--probe` — run the bounded local compatibility probe
+- `--workspace-backend` — override native_git or dev_cli for this invocation
+
+## `exp workspace register`
+
+Register the resolved canonical workspace on this host.
+
+```text
+exp workspace register [--json]
+```
+
+Options:
+
+- `--json` — emit the versioned machine-readable envelope
+
+## `exp workspace status`
+
+Show resolved workspace, Source, association, and config status.
+
+```text
+exp workspace status [--json]
 ```
 
 Options:

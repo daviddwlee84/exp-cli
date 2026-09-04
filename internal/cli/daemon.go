@@ -16,7 +16,10 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/controlplane"
 	"github.com/daviddwlee84/exp-cli/internal/execx"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
+	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/pueue"
+	"github.com/daviddwlee84/exp-cli/internal/sourcesnapshot"
+	"github.com/daviddwlee84/exp-cli/internal/workspacebackend"
 	"github.com/spf13/cobra"
 )
 
@@ -83,8 +86,9 @@ func addDaemonControllerFlags(command *cobra.Command, options *daemonOptions, in
 	command.Flags().StringVar(&options.holder, "holder", "", "override the local non-secret lease holder ID")
 	if includeInterval {
 		command.Flags().StringVar(&options.interval, "interval", "5s", "set the positive reconcile interval")
+	} else {
+		command.Flags().BoolVar(&options.json, "json", false, jsonFlagUsage)
 	}
-	command.Flags().BoolVar(&options.json, "json", false, jsonFlagUsage)
 }
 
 func newDaemonStatusCommand(app *App, root *rootOptions) *cobra.Command {
@@ -115,11 +119,7 @@ func newDaemonPauseCommand(app *App, root *rootOptions, paused bool) *cobra.Comm
 }
 
 func runDaemonStatus(command *cobra.Command, app *App, root *rootOptions, options *daemonOptions) error {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, "daemon status", daemonStatusData{Jobs: map[string]int{}}, false, nil, err)
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	info, err := resolveProjectInfo(command, app, root)
 	if err != nil {
 		return commandFailure(app, options.json, "daemon status", daemonStatusData{Jobs: map[string]int{}}, false, nil, err)
 	}
@@ -134,7 +134,7 @@ func runDaemonStatus(command *cobra.Command, app *App, root *rootOptions, option
 	} else if err != nil {
 		return commandFailure(app, options.json, "daemon status", data, false, nil, err)
 	}
-	store, err := app.OpenOperational(command.Context(), info)
+	store, err := app.OpenOperationalReadOnly(command.Context(), info)
 	if err != nil {
 		return commandFailure(app, options.json, "daemon status", data, false, nil, err)
 	}
@@ -144,7 +144,7 @@ func runDaemonStatus(command *cobra.Command, app *App, root *rootOptions, option
 	if err != nil {
 		return commandFailure(app, options.json, "daemon status", data, false, nil, err)
 	}
-	jobs, err := store.ListJobs(command.Context())
+	jobs, err := store.ListJobSummaries(command.Context())
 	if err != nil {
 		return commandFailure(app, options.json, "daemon status", data, false, nil, err)
 	}
@@ -156,11 +156,7 @@ func runDaemonStatus(command *cobra.Command, app *App, root *rootOptions, option
 }
 
 func runDaemonPause(command *cobra.Command, app *App, root *rootOptions, options *daemonOptions, paused bool) error {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, "daemon pause", operation.RuntimeState{}, false, nil, err)
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
+	info, err := resolveProjectInfo(command, app, root)
 	if err != nil {
 		return commandFailure(app, options.json, "daemon pause", operation.RuntimeState{}, false, nil, err)
 	}
@@ -185,19 +181,11 @@ func runDaemonPause(command *cobra.Command, app *App, root *rootOptions, options
 }
 
 func runDaemonFrontier(command *cobra.Command, app *App, root *rootOptions, options *daemonOptions) error {
-	start, err := app.startDir(root.startDir)
+	info, store, err := openTransactionalStore(command, app, root)
 	if err != nil {
 		return commandFailure(app, options.json, "daemon frontier", struct{}{}, false, nil, err)
 	}
-	info, err := app.DiscoverProject(command.Context(), start)
-	if err != nil {
-		return commandFailure(app, options.json, "daemon frontier", struct{}{}, false, nil, err)
-	}
-	store, err := app.NewTransactionalStore(info)
-	if err != nil {
-		return commandFailure(app, options.json, "daemon frontier", struct{}{}, false, nil, err)
-	}
-	adapter := controlplane.Adapter{Store: store, RepositoryRoot: info.Repository.Root, ConfigPath: options.config, Clock: app.clock, GenerateUUID: app.GenerateUUID}
+	adapter := runtimeAdapter(app, info, store, options.config, root.workspaceBackend, root.mlflowProfile)
 	items, err := adapter.Frontier(command.Context())
 	if err != nil {
 		return commandFailure(app, options.json, "daemon frontier", struct{}{}, false, nil, err)
@@ -216,15 +204,7 @@ func runDaemonFrontier(command *cobra.Command, app *App, root *rootOptions, opti
 }
 
 func runDaemonController(command *cobra.Command, app *App, root *rootOptions, options *daemonOptions, continuous bool) error {
-	start, err := app.startDir(root.startDir)
-	if err != nil {
-		return commandFailure(app, options.json, daemonCommandName(continuous), controller.TickResult{}, false, nil, err)
-	}
-	info, err := app.DiscoverProject(command.Context(), start)
-	if err != nil {
-		return commandFailure(app, options.json, daemonCommandName(continuous), controller.TickResult{}, false, nil, err)
-	}
-	canonicalStore, err := app.NewTransactionalStore(info)
+	info, canonicalStore, err := openTransactionalStore(command, app, root)
 	if err != nil {
 		return commandFailure(app, options.json, daemonCommandName(continuous), controller.TickResult{}, false, nil, err)
 	}
@@ -253,11 +233,9 @@ func runDaemonController(command *cobra.Command, app *App, root *rootOptions, op
 		}
 		holder = "daemon-" + strconv.Itoa(os.Getpid()) + "-" + strings.ReplaceAll(instance.String(), "-", "")[:12]
 	}
-	canonical := controlplane.Adapter{
-		Store: canonicalStore, RepositoryRoot: info.Repository.Root, ConfigPath: options.config,
-		WorkerExecutable: filepath.Clean(executable), WorkerArgs: []string{"worker", "run", "--job"},
-		Clock: app.clock, GenerateUUID: app.GenerateUUID,
-	}
+	canonical := runtimeAdapter(app, info, canonicalStore, options.config, root.workspaceBackend, root.mlflowProfile)
+	canonical.WorkerExecutable = filepath.Clean(executable)
+	canonical.WorkerArgs = []string{"worker", "run", "--job"}
 	scheduler := controller.PueueScheduler{Adapter: pueue.Adapter{Invoker: app.Invoker, LookupBinary: app.BinaryLookup}, Environment: environment}
 	scope, err := controlplane.ScopeID(info.Repository.Root)
 	if err != nil {
@@ -280,15 +258,26 @@ func runDaemonController(command *cobra.Command, app *App, root *rootOptions, op
 	if err != nil || interval <= 0 {
 		return commandFailure(app, options.json, "daemon run", controller.TickResult{}, false, nil, errors.New("--interval must be a positive duration"))
 	}
-	if options.json {
-		return commandFailure(app, true, "daemon run", controller.TickResult{}, false, nil, errors.New("daemon run is streaming and does not support --json; use daemon tick --json"))
-	}
 	loop.PollEvery = interval
 	err = loop.Run(command.Context())
 	if errors.Is(err, context.Canceled) || errors.Is(err, command.Context().Err()) {
 		return nil
 	}
 	return err
+}
+
+func runtimeAdapter(app *App, info *project.Info, store controlplane.Store, configPath, explicitBackend, explicitMLflowProfile string) controlplane.Adapter {
+	capturer := sourcesnapshot.Capturer{Git: app.GitRunner, Clock: app.clock}
+	native := workspacebackend.NativeGit{Git: app.GitRunner, Clock: app.clock}
+	backend := app.WorkspaceRegistry.WithNative(native)
+	return controlplane.Adapter{
+		Store: store, CanonicalWorkspace: info, RepositoryRoot: info.Repository.Root,
+		ConfigPath: configPath, Clock: app.clock, GenerateUUID: app.GenerateUUID, Git: app.GitRunner,
+		SourceResolver: app.ResolveWorkspace, ConfigLoader: app.ConfigLoader,
+		RuntimeTrust: app.TrustStore, SourceCapturer: capturer, Workspace: backend,
+		WorkspaceBackend: strings.TrimSpace(explicitBackend),
+		MLflowProfile:    strings.TrimSpace(explicitMLflowProfile),
+	}
 }
 
 func daemonCommandName(continuous bool) string {
