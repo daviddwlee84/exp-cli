@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/daviddwlee84/exp-cli/internal/experimentgit"
+	"github.com/daviddwlee84/exp-cli/internal/exploration"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/record"
@@ -437,6 +439,31 @@ func (direct *Direct) Retry(ctx context.Context, request RetryRequest) (*Executi
 	}
 	attempt := newDirectAttempt(attemptID, tryValue.ID, tryValue.Title, previous.CWD, previous.Argv, captured, resolved, policy.AllowedGlobs, policy.Timeout, mlflowProfile, now)
 	attempt.RetryOf = previous.ID
+	if metadata, err := exploration.MetadataFor(previous); err != nil {
+		return nil, err
+	} else if metadata != nil {
+		execution, err := exploration.LoadExecution(ctx, resolved.ProjectID().String(), previous.ID.String())
+		if err != nil {
+			return nil, err
+		}
+		if execution.Digest() != metadata.ContextDigest {
+			return nil, errors.New("retry exploration receipt mismatch")
+		}
+		if err := exploration.VerifyInputs(ctx, execution); err != nil {
+			return nil, err
+		}
+		execution.Attempt = attemptID.String()
+		execution.OutputDir = filepath.Join(execution.Storage.Root, "attempts", execution.Project, execution.Attempt, "output")
+		metadata.ContextDigest = execution.Digest()
+		metadata.Artifacts = []exploration.Artifact{}
+		metadata.ArchiveState = "pending"
+		if err := exploration.SetMetadata(attempt, *metadata); err != nil {
+			return nil, err
+		}
+		if err := exploration.PersistExecution(ctx, execution); err != nil {
+			return nil, err
+		}
+	}
 	if err := research.Validate(attempt); err != nil {
 		direct.cleanupUnpublishedBundle(ctx, captured.Bundle)
 		return nil, runtimeFailure(StageCapture, nil, false, false, err)

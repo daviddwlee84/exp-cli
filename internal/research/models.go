@@ -175,8 +175,9 @@ const (
 	MaxSourceSnapshotSummaryBytes = 32 << 10
 )
 
-// TryConclusion is a human-authored selection of bounded results. Digests are
-// content identities, not paths; ExternalRefs use the ordinary sanitized form.
+// TryConclusion selects bounded observations. Existing records imply human
+// authorship; explicit agent authorship is marked in the exploration extension
+// as unreviewed. Digests are content identities, never host paths.
 type TryConclusion struct {
 	ConcludedAt   time.Time     `toml:"concluded_at"`
 	Summary       string        `toml:"summary"`

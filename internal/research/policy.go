@@ -506,6 +506,18 @@ func credentialKey(key string) bool { return safex.SensitiveName(key) }
 // ValidateCommitSafeText rejects concrete credential syntax while allowing
 // ordinary prose that merely discusses authentication, cookies, or tokens.
 func ValidateCommitSafeText(value string) error {
+	key, cached := safeTextCached(value)
+	if cached {
+		return nil
+	}
+	if err := validateCommitSafeTextUncached(value); err != nil {
+		return err
+	}
+	rememberSafeText(value, key)
+	return nil
+}
+
+func validateCommitSafeTextUncached(value string) error {
 	failure := func(code, message string) error {
 		return &PolicyError{Code: code, Message: message, Err: ErrUnsafeText}
 	}
@@ -575,7 +587,15 @@ func credentialBearingURI(raw string) bool {
 }
 
 func containsCredentialMaterial(value string) bool {
-	return safex.ContainsSecretText(safex.DecodePercentEncoding(value))
+	key, cached := safeTextCachedDomain(value, 1)
+	if cached {
+		return false
+	}
+	if safex.ContainsSecretText(safex.DecodePercentEncoding(value)) {
+		return true
+	}
+	rememberSafeText(value, key)
+	return false
 }
 
 func validateCredentialSensitiveString(value, field string, collector *issueCollector) {

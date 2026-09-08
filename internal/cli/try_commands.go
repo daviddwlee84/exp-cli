@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/exploration"
 	"github.com/daviddwlee84/exp-cli/internal/project"
 	"github.com/daviddwlee84/exp-cli/internal/record"
 	"github.com/daviddwlee84/exp-cli/internal/research"
@@ -27,17 +28,24 @@ const (
 )
 
 type tryRunOptions struct {
-	json    bool
-	title   string
-	body    string
-	goal    string
-	dirty   string
-	allow   []string
-	timeout time.Duration
-	tags    []string
+	outputs    bool
+	storage    string
+	runner     string
+	inputs     []string
+	allowLarge bool
+	json       bool
+	title      string
+	body       string
+	goal       string
+	dirty      string
+	allow      []string
+	timeout    time.Duration
+	tags       []string
 }
 
 type tryHumanOptions struct {
+	author           string
+	savedResults     bool
 	json             bool
 	confirm          bool
 	expectedRevision string
@@ -94,21 +102,22 @@ type tryTerminalView struct {
 }
 
 type tryAttemptView struct {
-	ID               string            `json:"id"`
-	Path             string            `json:"path"`
-	Revision         string            `json:"revision"`
-	Title            string            `json:"title"`
-	State            string            `json:"state"`
-	StateReason      string            `json:"state_reason,omitempty"`
-	Runner           string            `json:"runner"`
-	Scheduler        string            `json:"scheduler"`
-	CWD              string            `json:"cwd"`
-	Argv             []string          `json:"argv"`
-	ExecutionSource  string            `json:"execution_source"`
-	SourceSnapshots  []trySnapshotView `json:"source_snapshots"`
-	Terminal         *tryTerminalView  `json:"terminal,omitempty"`
-	ResultDigests    []string          `json:"result_digests"`
-	CleanupCompleted bool              `json:"cleanup_completed"`
+	Exploration      *exploration.Metadata `json:"exploration,omitempty"`
+	ID               string                `json:"id"`
+	Path             string                `json:"path"`
+	Revision         string                `json:"revision"`
+	Title            string                `json:"title"`
+	State            string                `json:"state"`
+	StateReason      string                `json:"state_reason,omitempty"`
+	Runner           string                `json:"runner"`
+	Scheduler        string                `json:"scheduler"`
+	CWD              string                `json:"cwd"`
+	Argv             []string              `json:"argv"`
+	ExecutionSource  string                `json:"execution_source"`
+	SourceSnapshots  []trySnapshotView     `json:"source_snapshots"`
+	Terminal         *tryTerminalView      `json:"terminal,omitempty"`
+	ResultDigests    []string              `json:"result_digests"`
+	CleanupCompleted bool                  `json:"cleanup_completed"`
 }
 
 type tryConclusionView struct {
@@ -124,17 +133,20 @@ type tryAbandonmentView struct {
 }
 
 type tryRecordDetailView struct {
-	ID          string              `json:"id"`
-	Display     string              `json:"display"`
-	Path        string              `json:"path"`
-	Revision    string              `json:"revision"`
-	Title       string              `json:"title"`
-	State       string              `json:"state"`
-	Goal        string              `json:"goal"`
-	Sources     []string            `json:"sources"`
-	Conclusion  *tryConclusionView  `json:"conclusion,omitempty"`
-	Abandonment *tryAbandonmentView `json:"abandonment,omitempty"`
-	AdoptedIdea string              `json:"adopted_idea,omitempty"`
+	Summary          string              `json:"summary,omitempty"`
+	SummaryAuthor    string              `json:"summary_author,omitempty"`
+	ConclusionAuthor string              `json:"conclusion_author,omitempty"`
+	ID               string              `json:"id"`
+	Display          string              `json:"display"`
+	Path             string              `json:"path"`
+	Revision         string              `json:"revision"`
+	Title            string              `json:"title"`
+	State            string              `json:"state"`
+	Goal             string              `json:"goal"`
+	Sources          []string            `json:"sources"`
+	Conclusion       *tryConclusionView  `json:"conclusion,omitempty"`
+	Abandonment      *tryAbandonmentView `json:"abandonment,omitempty"`
+	AdoptedIdea      string              `json:"adopted_idea,omitempty"`
 }
 
 type tryRuntimeView struct {
@@ -218,6 +230,10 @@ func newTryCommand(app *App, root *rootOptions) *cobra.Command {
 	command.RunE = func(command *cobra.Command, _ []string) error { return command.Help() }
 	command.AddCommand(
 		newTryRunCommand(app, root),
+		newTryStartCommand(app, root),
+		newTryExecCommand(app, root),
+		newTryRootCommand(app),
+		newTrySummarizeCommand(app, root),
 		newTryRetryCommand(app, root),
 		newTryResumeCommand(app, root),
 		newTryReconcileCommand(app, root),
@@ -251,6 +267,7 @@ func newTryRunCommand(app *App, root *rootOptions) *cobra.Command {
 		return runTryRun(command, app, root, options, args)
 	}
 	flags := command.Flags()
+	addExplorationFlags(command, options)
 	flags.StringVar(&options.title, "title", "", "set the canonical Try title")
 	flags.StringVar(&options.goal, "goal", "", "state the bounded evidence-gathering goal")
 	flags.StringVar(&options.body, "body", "", "set optional canonical Markdown detail")
@@ -308,7 +325,9 @@ func newTryFinishCommand(app *App, root *rootOptions) *cobra.Command {
 		return runTryFinish(command, app, root, options, reference)
 	}
 	flags := command.Flags()
-	flags.StringVar(&options.summary, "summary", "", "record the human conclusion summary")
+	flags.StringVar(&options.summary, "summary", "", "record the conclusion summary")
+	flags.StringVar(&options.author, "author", "human", "human or agent; agent conclusions are explicitly unreviewed")
+	flags.BoolVar(&options.savedResults, "saved-results", false, "select saved artifact manifests by ownership without manual JSON")
 	flags.StringArrayVar(&options.resultDigests, "result-digest", nil, "select one sha256 result digest (repeatable)")
 	flags.StringArrayVar(&options.externalRefs, "external-ref", nil, "select one ExternalRef as a strict JSON object (repeatable)")
 	flags.BoolVar(&options.noResults, "no-results", false, "explicitly conclude without selecting a result")
@@ -433,9 +452,21 @@ func runTryRun(command *cobra.Command, app *App, root *rootOptions, options *try
 	if err != nil {
 		return commandFailure(app, options.json, "try run", emptyTryExecutionData(), false, nil, err)
 	}
+	managed := options.outputs || options.storage != "" || options.runner != "" || len(options.inputs) > 0
+	if options.runner != "" {
+		info, _, resolveErr := openTransactionalStore(command, app, root)
+		if resolveErr != nil {
+			return commandFailure(app, options.json, "try run", emptyTryExecutionData(), false, nil, resolveErr)
+		}
+		argv, options.runner, err = runnerArgv(command.Context(), info.Project().ProjectID.String(), options.runner, argv)
+		if err != nil {
+			return commandFailure(app, options.json, "try run", emptyTryExecutionData(), false, nil, err)
+		}
+	}
 	coordinator := app.NewTryCoordinator()
 	result, runErr := coordinator.Run(command.Context(), tryflow.RunRequest{
 		Selection: selection, Title: options.title, Body: options.body, Goal: options.goal,
+		ManagedOutputs: managed, StorageProfile: options.storage, RunnerProfile: options.runner, InputNames: options.inputs, AllowLarge: options.allowLarge,
 		Argv: append([]string{}, argv...), DirtyCapture: dirty,
 		AllowedGlobs: append([]string{}, options.allow...), Timeout: options.timeout,
 		Tags: append([]string{}, options.tags...),
@@ -509,7 +540,19 @@ func renderTryExecution(app *App, machine bool, commandName string, result *tryf
 }
 
 func runTryFinish(command *cobra.Command, app *App, root *rootOptions, options *tryHumanOptions, reference string) error {
-	selectionComplete := options.noResults != (len(options.resultDigests) > 0 || len(options.externalRefs) > 0)
+	if options.author != "" && options.author != "human" && options.author != "agent" {
+		return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, errors.New("author must be human or agent"))
+	}
+	if options.author == "agent" {
+		options.confirm = true
+		if !options.noResults && len(options.resultDigests) == 0 && len(options.externalRefs) == 0 {
+			options.savedResults = true
+		}
+	}
+	if options.savedResults && (options.noResults || len(options.resultDigests) > 0 || len(options.externalRefs) > 0) {
+		return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, errors.New("--saved-results cannot be combined with another result selection"))
+	}
+	selectionComplete := options.savedResults || options.noResults != (len(options.resultDigests) > 0 || len(options.externalRefs) > 0)
 	if strings.TrimSpace(reference) == "" || !options.confirm || strings.TrimSpace(options.summary) == "" || !selectionComplete {
 		if !app.interactive(options.json) {
 			return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, invalidUsagef("Try finish requires TRY, --summary, an explicit result selection, and --confirm in non-interactive or JSON mode"))
@@ -520,7 +563,7 @@ func runTryFinish(command *cobra.Command, app *App, root *rootOptions, options *
 		}
 		reference = prepared
 	}
-	if options.noResults == (len(options.resultDigests) > 0 || len(options.externalRefs) > 0) {
+	if !options.savedResults && options.noResults == (len(options.resultDigests) > 0 || len(options.externalRefs) > 0) {
 		return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, errors.New("select --result-digest/--external-ref, or explicitly use --no-results"))
 	}
 	for _, digest := range options.resultDigests {
@@ -539,9 +582,29 @@ func runTryFinish(command *cobra.Command, app *App, root *rootOptions, options *
 	if options.expectedRevision != "" && tryReference.Revision != options.expectedRevision {
 		return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, &guidedPlanStaleError{subject: "Try revision"})
 	}
-	_ = inventory
+	if options.savedResults {
+		for _, document := range inventory.OfKind(research.KindAttempt) {
+			attempt := document.Record.(*research.Attempt)
+			if attempt.Try != tryReference.ID {
+				continue
+			}
+			metadata, metaErr := exploration.MetadataFor(attempt)
+			if metaErr != nil {
+				return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, metaErr)
+			}
+			if metadata == nil {
+				continue
+			}
+			if metadata.ArchiveState != "saved" {
+				return commandFailure(app, options.json, "try finish", emptyTryTransitionData(), false, nil, errors.New("save pending artifacts with exp results save before finishing"))
+			}
+			if len(metadata.Artifacts) > 0 {
+				externalRefs = append(externalRefs, research.ExternalRef{Role: research.ExternalArtifact, Provider: "exp-storage", Context: metadata.Storage, NativeKind: "artifact-manifest", NativeID: attempt.ID.String()})
+			}
+		}
+	}
 	result, err := tryflow.New(store, tryflow.WithClock(app.clock), tryflow.WithUUIDGenerator(app.GenerateUUID)).Conclude(command.Context(), tryflow.ConcludeRequest{
-		Try: tryReference, Summary: options.summary, ResultDigests: append([]string{}, options.resultDigests...), ExternalRefs: externalRefs,
+		Try: tryReference, Summary: options.summary, Author: options.author, ResultDigests: append([]string{}, options.resultDigests...), ExternalRefs: externalRefs,
 	})
 	if err != nil {
 		data := tryTransitionFailureData(result, nil, inventory, err)
@@ -928,6 +991,11 @@ func makeTryRecordDetail(document *record.Document, inventory *record.Inventory)
 		Title: value.Title, State: string(value.State), Goal: value.Goal, Sources: sources,
 		AdoptedIdea: value.AdoptedIdea.String(),
 	}
+	if table := value.Extensions[exploration.Namespace]; table != nil {
+		view.Summary, _ = table["summary"].(string)
+		view.SummaryAuthor, _ = table["summary_author"].(string)
+		view.ConclusionAuthor, _ = table["conclusion_author"].(string)
+	}
 	if value.Conclusion != nil {
 		view.Conclusion = &tryConclusionView{
 			ConcludedAt:   value.Conclusion.ConcludedAt.UTC().Format(time.RFC3339Nano),
@@ -967,6 +1035,7 @@ func makeTryAttemptView(document *record.Document) tryAttemptView {
 		return view
 	}
 	value := document.Record.(*research.Attempt)
+	view.Exploration, _ = exploration.MetadataFor(value)
 	view.ID, view.Path, view.Revision, view.Title = value.ID.String(), document.Path, document.Revision, value.Title
 	view.State, view.StateReason = string(value.State), safeDiagnosticText(value.StateReason)
 	view.Runner, view.Scheduler, view.CWD = value.Runner, value.Scheduler, value.CWD

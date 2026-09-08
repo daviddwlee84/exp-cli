@@ -4,7 +4,7 @@
     技術名詞首次出現以「中文 (English original)」格式呈現。若無公認譯名，
     直接保留英文。程式碼、API 名、CLI flag、套件名與檔名一律不翻。
 
-目前 approved、generator-backed CLI metadata 有 **112 個 command paths**。本 authored
+目前 approved、generator-backed CLI metadata 有 **136 個 command paths**。本 authored
 map 依 user task 分組，不重複每個 flag。
 
 執行中的 binary 是 syntax authority：
@@ -28,7 +28,7 @@ maintainer 只能透過 `exp skill sync` 更新。
 | 把 validated evidence 移到 target | Promotion | `exp candidate create` | Release → sealed holdout → named-human Promotion |
 | Safe resume/browse | Read-only | `exp context` | `exp guide`、completion 或 `exp ui` |
 
-Conceptual terminal guides 與 standard Cobra utilities 刻意不計入 112 個
+Conceptual terminal guides 與 standard Cobra utilities 刻意不計入 136 個
 generator-backed domain paths：
 
 ```bash
@@ -236,9 +236,13 @@ observation；missing observation 不會成為 scientific verdict。
 | `exp record transaction` | Apply supported low-risk prepared Idea/ResourcePool transaction。 |
 | `exp record recover` | 從 exact hashes roll durable prepared transaction forward。 |
 
-以上 section count 合計 **112** 個 approved paths。如果 `exp <command> --help` 或
+原有 families 加上下方 exploration commands 合計 **136** 個 approved paths。如果 `exp <command> --help` 或
 generated `commands.md` 沒有某個 syntax，不可從 roadmap、note 或舊文件推定。
 
 Large datasets、model/checkpoint/artifact bytes、traces 與 unbounded logs 留在 MLflow、
 DVC 或 object storage。只有 bounded summaries、digests、exact identities 與 sanitized
 references 進入 canonical Git records。
+
+## 探索與產出物
+
+`try root/start/exec/summarize`, `storage add/use/show`, `input bind/list`, `runner add/use/list`, `history search`, `results list/compare/describe/save/fetch/open`. [流程與完整範例](../workflows/exploration.md)。

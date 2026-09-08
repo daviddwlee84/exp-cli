@@ -99,6 +99,28 @@ approval for every Source. See
 [Getting Started](docs/getting-started.md) and
 [Configuration and Paths](docs/reference/configuration.md).
 
+## Explore, save, and retrieve
+
+Use a continuing Try for adhoc analysis, including work without an existing
+codebase. `try root PATH` remembers a custom scratch collection location.
+
+```bash
+exp try start --scratch --title "Inspect latency" --goal "Find patterns worth testing" --json
+# Carry the returned Project and Try IDs; write analysis code at source_path.
+exp --workspace PROJECT input bind sample /Volumes/data/sample.csv
+exp --workspace PROJECT try exec TRY --input sample --dirty=capture -- python3 plot.py
+exp --workspace PROJECT try finish TRY --author agent --summary "Latency has two clusters"
+exp history search latency --all
+exp --workspace PROJECT results open ATTEMPT plots/latency.png
+```
+
+Analysis reads `EXP_INPUT_SAMPLE` and writes under `EXP_OUTPUT_DIR`. Each Attempt
+has independent outputs and recorded input/binary digests. Storage preferences
+persist in private XDG configuration; local directories, local MLflow with
+SQLite metadata, and remote MLflow are supported. `results save` repairs pending
+publication without rerunning analysis. Agent conclusions are explicitly
+unreviewed. See [Adhoc Exploration](docs/workflows/exploration.md).
+
 ## Try a bounded question
 
 A fully explicit Try executes argv directly in an exp-managed native Git
@@ -231,7 +253,7 @@ flowchart LR
 ```
 
 Large datasets, model checkpoints, artifacts, traces, and unbounded logs stay in
-MLflow, DVC, or object storage. Git receives only bounded summaries, cryptographic
+managed local artifact directories, MLflow, DVC, or object storage. Git receives only bounded summaries, cryptographic
 digests, exact Source/commit identities, and sanitized provider references.
 Credentials, raw environments, host paths, large artifact bytes, and unbounded
 provider output never belong in canonical records.

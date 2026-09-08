@@ -20,7 +20,7 @@ const (
 	// SchemaVersion identifies the metadata contract understood by Check.
 	SchemaVersion = "exp.skill/v1"
 	// SkillVersion identifies this revision of the methodology and command guide.
-	SkillVersion = "1"
+	SkillVersion = "2"
 
 	embeddedRoot = "exp-cli"
 	hashDomain   = "exp-cli-skill-content-v1"

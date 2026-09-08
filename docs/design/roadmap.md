@@ -175,8 +175,8 @@ The current scope does not provide:
 - automatic Git merge, push, rebase, branch deletion, production deploy, or
   rollback execution;
 - agent-, provider-, autonomy-, manifest-, or TUI-approved Promotion;
-- a large artifact store, raw telemetry/log mirror, artifact-byte persistence,
-  or automatic artifact/model download;
+- a general cloud artifact service, raw telemetry/log mirroring, or implicit downloads;
+  managed local/MLflow exploration artifacts and explicit verified retrieval are supported;
 - direct Candidate/Promotion from a Try—especially a dirty Try; a clean formal
   rerun, typed Evaluation v2, and Candidate v2 are required;
 - multiple canonical Project roots in one Git repository or canonical relations
@@ -187,3 +187,7 @@ The current scope does not provide:
 - automatic scientific verdicts from process, scheduler, tracker, commit, or
   artifact state;
 - execution of legacy harness scripts during migration.
+
+## Delivered: exploration ergonomics
+
+Configurable scratch collections, continuing Try steps, named input bindings, independent artifact outputs, local and MLflow storage writers, attributed agent conclusions, runner identity, and SQLite-backed cross-Project history are implemented. See [Adhoc Exploration](../workflows/exploration.md).

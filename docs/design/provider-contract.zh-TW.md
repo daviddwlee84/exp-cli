@@ -342,3 +342,5 @@ entries 或 active prepared Attempts 所需的 runtimes 會進行 Git verificati
 terminal Plans 的 obsolete entries 不會阻擋其他工作。私有 worker 會凍結大小受限的
 result，並在將 job 標記為 finished 前發布持久 terminal marker。Scheduler 與 marker
 observations 只能透過明確的 canonical transaction 推進 Attempt 的 operational state。
+
+上述 MLflow read-only contract 適用於 observation／evaluation adapter。獨立 opt-in exploration writer 支援 artifact upload 與 explicit verified retrieval；詳見[臨時探索](../workflows/exploration.md)。

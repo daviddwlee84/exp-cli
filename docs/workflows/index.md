@@ -1,5 +1,7 @@
 # Workflows
 
+Use [Adhoc Exploration](exploration.md) for plots, repeated Try steps, storage preferences and historical result retrieval.
+
 Use the decision table before opening a detailed workflow. The three routes have
 different evidence and authority; do not use a quick Try as a shortcut around a
 formal Experiment or the human promotion gate.

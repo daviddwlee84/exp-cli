@@ -26,7 +26,7 @@ exploration in the `explore` lane instead of disguising it as exploitation.
 ## Use Try for bounded uncertainty
 
 A Try asks whether a direction deserves formalization. It records a goal,
-declared Sources, operational Attempts, and an explicit human conclusion or
+declared Sources, operational Attempts, and an attributed conclusion or
 abandonment. A useful conclusion can be adopted as Idea v2; it is not itself a
 Candidate.
 
@@ -115,3 +115,5 @@ incumbent for one target. Seal the holdout protocol and finite budget before use
 never reuse the holdout Evaluation, and require a named human for every append-only
 Promotion. No autonomy mode, provider, artifact registry, generated Champion
 manifest, or read-only TUI can approve deployment.
+
+Exploration can finish with an explicitly unreviewed agent conclusion. Human adoption and formal evidence gates remain separate; see [Adhoc Exploration](workflows/exploration.md).

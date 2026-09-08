@@ -22,7 +22,7 @@ benefit、information value、resource cost、assumption，以及什麼結果會
 ## 用 Try 處理 bounded uncertainty
 
 Try 詢問某方向是否值得 formalize。它記錄 goal、declared Sources、operational Attempts，以及
-explicit human conclusion 或 abandonment。有價值的 conclusion 可 adopt 成 Idea v2；本身不是
+attributed conclusion 或 abandonment。有價值的 conclusion 可 adopt 成 Idea v2；本身不是
 Candidate。
 
 Dirty work 必須 opt-in、bounded，且 reproducible 到足以 inspect。Dirty SourceSnapshot 只有
@@ -97,3 +97,5 @@ Scientific Evaluation 判斷 exact result 能否成為 Candidate；Promotion Eva
 validated Release 是否應取代某 target incumbent。使用前先 seal holdout protocol 與 finite budget，
 不得 reuse holdout Evaluation，每筆 append-only Promotion 都要求具名 human。任何 autonomy mode、
 provider、artifact registry、generated Champion manifest 或 read-only TUI 都不能核准 deployment。
+
+探索可由 agent 明示 unreviewed conclusion 收尾；human adoption 與正式 evidence gates 仍分開。詳見[臨時探索](workflows/exploration.md)。

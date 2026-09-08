@@ -411,3 +411,7 @@ success. Neither valid result JSON nor output hashes are scientific verdicts.
 See [Runtime Dispatch](../workflows/runtime-dispatch.md),
 [Git and Worktrees](../tools/git-worktrees.md), and
 [MLflow](../tools/mlflow.md).
+
+## Exploration preferences
+
+Host-only `exp.exploration-config/v1` lives in `$XDG_CONFIG_HOME/exp/exploration.json`. It stores `tries_root`, storage/runner profiles, global defaults, Project overrides and external input bindings. Inspect/edit these through `try root`, `storage`, `runner` and `input`. These preferences do not grant repository execution trust. Frozen per-Attempt receipts preserve historical routing after preferences change. See [Adhoc Exploration](../workflows/exploration.md).

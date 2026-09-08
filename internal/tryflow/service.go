@@ -185,6 +185,7 @@ func (service *Service) Create(ctx context.Context, request CreateRequest) (*Cre
 }
 
 type ConcludeRequest struct {
+	Author        string
 	Try           RevisionRef
 	Summary       string
 	ResultDigests []string
@@ -196,10 +197,16 @@ type TransitionResult struct {
 	Try           *record.Document
 }
 
-// Conclude records an explicit human summary and selected bounded results.
+// Conclude records an attributed summary and selected bounded results.
 func (service *Service) Conclude(ctx context.Context, request ConcludeRequest) (*TransitionResult, error) {
+	if request.Author == "" {
+		request.Author = "human"
+	}
+	if request.Author != "human" && request.Author != "agent" {
+		return nil, errors.New("conclusion author must be human or agent")
+	}
 	if strings.TrimSpace(request.Summary) == "" {
-		return nil, fmt.Errorf("human conclusion summary is required: %w", ErrPrecondition)
+		return nil, fmt.Errorf("conclusion summary is required: %w", ErrPrecondition)
 	}
 	inventory, currentDocument, current, err := service.openTry(ctx, request.Try)
 	if err != nil {
@@ -208,7 +215,13 @@ func (service *Service) Conclude(ctx context.Context, request ConcludeRequest) (
 	digests := append([]string(nil), request.ResultDigests...)
 	sort.Strings(digests)
 	if (current.State == research.TryConcluded || current.State == research.TryAdopted) && current.Conclusion != nil {
-		if current.Conclusion.Summary == request.Summary && sameStrings(current.Conclusion.ResultDigests, digests) && sameExternalRefs(current.Conclusion.ExternalRefs, request.ExternalRefs) {
+		author := "human"
+		if table := current.Extensions["io.github.daviddwlee84.exp-cli.exploration"]; table != nil {
+			if value, ok := table["conclusion_author"].(string); ok {
+				author = value
+			}
+		}
+		if author == request.Author && current.Conclusion.Summary == request.Summary && sameStrings(current.Conclusion.ResultDigests, digests) && sameExternalRefs(current.Conclusion.ExternalRefs, request.ExternalRefs) {
 			return &TransitionResult{Try: currentDocument.Clone()}, nil
 		}
 		return nil, fmt.Errorf("Try %s already has a different conclusion: %w", current.ID, ErrPrecondition)
@@ -225,6 +238,17 @@ func (service *Service) Conclude(ctx context.Context, request ConcludeRequest) (
 	value := replacement.Record.(*research.Try)
 	value.State = research.TryConcluded
 	value.UpdatedAt = now
+	if request.Author == "agent" {
+		if value.Extensions == nil {
+			value.Extensions = research.Extensions{}
+		}
+		table := value.Extensions["io.github.daviddwlee84.exp-cli.exploration"]
+		if table == nil {
+			table = map[string]any{"schema": "exp.exploration-session/v1"}
+			value.Extensions["io.github.daviddwlee84.exp-cli.exploration"] = table
+		}
+		table["conclusion_author"], table["conclusion_reviewed"] = "agent", false
+	}
 	value.Conclusion = &research.TryConclusion{
 		ConcludedAt: now, Summary: request.Summary,
 		ResultDigests: digests,
@@ -319,7 +343,7 @@ func (service *Service) Adopt(ctx context.Context, request AdoptRequest) (*Adopt
 		return nil, fmt.Errorf("Try %s was already adopted with different Idea content: %w", current.ID, ErrPrecondition)
 	}
 	if current.State != research.TryConcluded || current.Conclusion == nil {
-		return nil, fmt.Errorf("Try %s must have a human conclusion before adoption: %w", current.ID, ErrPrecondition)
+		return nil, fmt.Errorf("Try %s must be concluded before named-human adoption: %w", current.ID, ErrPrecondition)
 	}
 
 	changes := newChanges()

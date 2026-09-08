@@ -1,5 +1,7 @@
 # Run a bounded Try
 
+For continuing adhoc work, external data, and saved plots, read `exp guide exploration`.
+
 Choose a Try when the immediate decision is whether a direction deserves formal
 research. It is not a Candidate shortcut.
 

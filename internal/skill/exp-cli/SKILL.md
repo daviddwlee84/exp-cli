@@ -5,7 +5,7 @@ description: >-
   Tries, rigorous experiment queue, evidence lifecycle, and human Promotion.
 metadata:
   schema-version: "exp.skill/v1"
-  skill-version: "1"
+  skill-version: "2"
 ---
 
 # exp-cli research control plane
@@ -19,6 +19,22 @@ Read [the generated command reference](references/commands.md) before invoking
 an unfamiliar command. It is generated from approved live CLI metadata; full
 flags in `exp <command> --help` are authoritative. Use `exp guide` for conceptual
 workflow help.
+
+## Everyday exploration and result retrieval
+
+For plotting, adhoc analysis, external datasets, or continuing a previous Try,
+read [exploration.md](references/exploration.md). Use `try start` / `try exec`;
+`--scratch` creates an isolated small Git Source under the configured `try root`.
+Named input bindings and managed artifact outputs keep large bytes outside Git.
+Use `storage show` to reuse persistent preferences, `history search` to find
+prior work, and `results list/fetch/open` to retrieve exact artifacts.
+
+Within an authorized task, organize outputs and save an attributed summary.
+`try finish --author agent` records an explicitly unreviewed conclusion and
+selects saved artifact manifests; it does not require another human-confirmation
+prompt. Ask about a new storage destination or exceptional format when needed,
+and remember the answer through CLI preferences. Human adoption and Promotion
+retain their existing review gates.
 
 ## Resolve authority before choosing a flow
 
@@ -57,7 +73,7 @@ execution will use. Editing the file invalidates that approval.
 
 | User's decision | Route | Start | Valid outcome |
 |---|---|---|---|
-| Is this direction worth formalizing? | Quick exploratory Try | `exp try run` | Human finish/abandon; optional `try adopt` into Idea v2 |
+| Is this direction worth formalizing? | Quick exploratory Try | `exp try run` | Attributed finish/abandon; reviewed `try adopt` into Idea v2 |
 | Should constrained compute test this claim? | Rigorous Experiment | `exp idea add` | Priced Plan → Queue → clean Attempt v3 → Evaluation v2/Candidate v2 |
 | Should validated evidence reach a target? | Promotion | `exp candidate create` | Typed Release → sealed fresh holdout → named-human Promotion |
 
@@ -169,7 +185,7 @@ for record ownership and routing to TODO/backlog/pitfalls/invariants.
 ## Keep provider-owned bytes out of Git
 
 Large datasets, checkpoints/models, artifact files, traces, and unbounded logs
-remain in MLflow, DVC, or object storage. Canonical Git records may contain only
+remain outside Git, using managed local artifacts or MLflow/DVC/object storage. Canonical Git records may contain only
 bounded summaries, selected values, cryptographic digests, exact Source/commit
 identities, and sanitized refs. Never commit credentials, raw environments,
 host-local paths, large artifact bytes, or unbounded provider output.

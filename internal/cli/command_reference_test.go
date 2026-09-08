@@ -74,7 +74,7 @@ func TestCommandReferenceContainsAutonomousResearchWorkflow(t *testing.T) {
 			t.Errorf("generated reference is missing %s", path)
 		}
 	}
-	for _, deferred := range []string{"## `exp run"} {
+	for _, deferred := range []string{"## `exp run`"} {
 		if strings.Contains(reference, deferred) {
 			t.Errorf("generated reference advertises deferred command %s", deferred)
 		}

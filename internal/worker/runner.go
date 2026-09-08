@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daviddwlee84/exp-cli/internal/execx"
+	"github.com/daviddwlee84/exp-cli/internal/exploration"
 	"github.com/daviddwlee84/exp-cli/internal/gitx"
 	"github.com/daviddwlee84/exp-cli/internal/mlflow"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
@@ -34,6 +35,7 @@ const (
 	// schemas so rolling upgrades never reinterpret a closed v1 payload.
 	JobSchema              = "exp.worker-job/v1"
 	SourceJobSchema        = "exp.worker-job/v2"
+	ExplorationJobSchema   = "exp.worker-job/v3"
 	TerminalSchema         = "exp.worker-terminal/v1"
 	SourceTerminalSchema   = "exp.worker-terminal/v2"
 	ResultSchema           = "exp.worker-result/v1"
@@ -113,6 +115,7 @@ func (binding SnapshotBinding) snapshot() (research.SourceSnapshot, error) {
 }
 
 type Workload struct {
+	Exploration                 *exploration.Execution  `json:"exploration,omitempty"`
 	Schema                      string                  `json:"schema_version"`
 	AttemptID                   string                  `json:"attempt_id"`
 	TryID                       string                  `json:"try_id,omitempty"`
@@ -351,7 +354,7 @@ func (runner Runner) Run(ctx context.Context, job operation.Job) (Terminal, erro
 		invoker = execx.NewInvoker()
 	}
 	outputPolicy := execx.DefaultOutputPolicy(execx.OutputCapture)
-	if workload.Schema == SourceJobSchema {
+	if workload.Schema == SourceJobSchema || workload.Schema == ExplorationJobSchema {
 		outputPolicy.MaxStdoutBytes = maxTerminalStreamBytes
 		outputPolicy.MaxStderrBytes = maxTerminalStreamBytes
 	}
@@ -396,13 +399,18 @@ func (runner Runner) Run(ctx context.Context, job operation.Job) (Terminal, erro
 		State: state, ExitCode: process.ExitCode, StartedAt: started, EndedAt: ended,
 		TimedOut: process.TimedOut, Cancelled: process.Canceled,
 	}
-	if workload.Schema == SourceJobSchema {
+	if workload.Schema == SourceJobSchema || workload.Schema == ExplorationJobSchema {
 		terminal.Stdout, terminal.Stderr = process.Stdout, process.Stderr
 		terminal.StdoutTruncated, terminal.StderrTruncated = process.StdoutTruncated, process.StderrTruncated
 	}
 	if state == operation.JobSucceeded && len(workload.Sources) > 0 {
 		if err := verifyReadOnlySourceWorkload(ctx, runner.Git, runner.Snapshots, workload); err != nil {
 			state, terminal.State, message = operation.JobFailed, operation.JobFailed, "read-only Source changed during formal execution"
+		}
+	}
+	if state == operation.JobSucceeded && workload.Exploration != nil {
+		if err := exploration.VerifyInputs(ctx, *workload.Exploration); err != nil {
+			state, terminal.State, message = operation.JobFailed, operation.JobFailed, "input data changed during exploration"
 		}
 	}
 	workloadResult := json.RawMessage(`{}`)
@@ -538,7 +546,7 @@ func recoveredResultPayload(ctx context.Context, markerRoot *os.Root, resultName
 }
 
 func terminalSchemaForWorkload(schema string) string {
-	if schema == SourceJobSchema {
+	if schema == SourceJobSchema || schema == ExplorationJobSchema {
 		return SourceTerminalSchema
 	}
 	return TerminalSchema
@@ -799,12 +807,19 @@ func decodeWorkload(payload []byte) (Workload, error) {
 			return Workload{}, err
 		}
 		workload = legacy.workload()
-	case SourceJobSchema:
+	case SourceJobSchema, ExplorationJobSchema:
 		if err := decodeStrictWorkerJSON(payload, &workload, "worker job"); err != nil {
 			return Workload{}, err
 		}
 	default:
 		return Workload{}, errors.New("worker job schema is unsupported")
+	}
+	if workload.Schema == ExplorationJobSchema {
+		if workload.Exploration == nil || workload.Exploration.Schema != exploration.ExecutionSchema || workload.Exploration.Attempt != workload.AttemptID || workload.Exploration.Try != workload.TryID || !exploration.AbsolutePath(workload.Exploration.OutputDir) || formalWorkloadFieldsPresent(workload) {
+			return Workload{}, errors.New("exploration worker requires an exact direct Try execution receipt")
+		}
+	} else if workload.Exploration != nil {
+		return Workload{}, errors.New("legacy worker schemas cannot carry exploration fields")
 	}
 	if workload.AttemptID == "" {
 		return Workload{}, errors.New("worker job attempt id is invalid")
@@ -844,7 +859,7 @@ func decodeWorkload(payload []byte) (Workload, error) {
 	if workload.BaseCommit == "" || workload.HeadCommit == "" {
 		return Workload{}, errors.New("worker base_commit and head_commit are required")
 	}
-	if workload.Schema == SourceJobSchema && workload.SourceSnapshot == nil {
+	if (workload.Schema == SourceJobSchema || workload.Schema == ExplorationJobSchema) && workload.SourceSnapshot == nil {
 		return Workload{}, errors.New("exp.worker-job/v2 requires source_snapshot")
 	}
 	if workload.SourceSnapshot != nil {
@@ -1162,6 +1177,15 @@ func workloadEnvironment(workload Workload, job operation.Job, markerRoot string
 			execx.Bind("EXP_CANONICAL_SCOPE", workload.CanonicalScope),
 			execx.Bind("EXP_EXECUTION_SOURCE", workload.ExecutionSource),
 		)
+	}
+	if workload.Exploration != nil {
+		bindings = append(bindings, execx.Bind("EXP_OUTPUT_DIR", workload.Exploration.OutputDir), execx.Bind("EXP_TRY_ID", workload.TryID), execx.Bind("EXP_PROJECT_ID", workload.Exploration.Project))
+		for name, path := range workload.Exploration.Inputs {
+			if !exploration.NameValid(name) || !exploration.AbsolutePath(path) {
+				return execx.Environment{}, "", errors.New("invalid input binding")
+			}
+			bindings = append(bindings, execx.Bind("EXP_INPUT_"+strings.ToUpper(strings.ReplaceAll(name, "-", "_")), path))
+		}
 	}
 	for _, name := range workload.SecretEnv {
 		bindings = append(bindings, execx.BindSecretFromEnv(name, name))

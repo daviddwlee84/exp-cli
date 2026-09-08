@@ -445,6 +445,26 @@ Options:
 - `--base` — pin the exact base commit
 - `--json` — emit the versioned machine-readable envelope
 
+## `exp history`
+
+Search descriptions and evidence across canonical records.
+
+```text
+exp history
+```
+
+## `exp history search`
+
+Search canonical descriptions, tags, versions and artifact names using a rebuildable SQLite cache.
+
+```text
+exp history search [WORDS...] [--all] [--kind KIND] [--source-key SOURCE] [--version VERSION] [--state STATE] [--after DATE] [--before DATE] [--limit N] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
 ## `exp idea`
 
 Capture and qualify human or agent research ideas.
@@ -531,6 +551,38 @@ Options:
 - `--source-subdir` — bind a Source subdirectory
 - `--source-tag` — add an initial Source tag
 - `--source-title` — set the initial Source title
+
+## `exp input`
+
+Bind external inputs without copying data into Git.
+
+```text
+exp input
+```
+
+## `exp input bind`
+
+Remember a private external data binding and inspect its content identity.
+
+```text
+exp input bind NAME PATH [--global] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp input list`
+
+Inspect effective host-local input bindings.
+
+```text
+exp input list [--global] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
 
 ## `exp migrate`
 
@@ -993,6 +1045,130 @@ Options:
 - `--check` — report projection drift without writing
 - `--json` — emit the versioned machine-readable envelope
 
+## `exp results`
+
+Locate and retrieve artifacts using exact Try and Attempt ownership.
+
+```text
+exp results
+```
+
+## `exp results compare`
+
+Compare named outputs and the exact runner identities that produced them.
+
+```text
+exp results compare TRY|ATTEMPT TRY|ATTEMPT... [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp results describe`
+
+Annotate one artifact without changing its content identity.
+
+```text
+exp results describe ATTEMPT NAME --description TEXT [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp results fetch`
+
+Retrieve one unambiguous named artifact and verify its digest.
+
+```text
+exp results fetch TRY|ATTEMPT NAME [--destination PATH] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp results list`
+
+List artifact identities and provider-free local availability.
+
+```text
+exp results list TRY|ATTEMPT [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp results open`
+
+Retrieve and verify one named artifact, then invoke the desktop file opener.
+
+```text
+exp results open TRY|ATTEMPT NAME [--destination PATH] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp results save`
+
+Retry pending artifact publication without re-executing the workload.
+
+```text
+exp results save TRY|ATTEMPT [--allow-large] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp runner`
+
+Configure portable project runner commands and version identity.
+
+```text
+exp runner
+```
+
+## `exp runner add`
+
+Remember project CLI argv and optional JSON version and lockfile probes.
+
+```text
+exp runner add NAME [--version-arg ARG] [--environment-file PATH] [--json] -- COMMAND [ARG...]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp runner list`
+
+List configured runner profiles.
+
+```text
+exp runner list [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp runner use`
+
+Remember the current Project or global runner preference.
+
+```text
+exp runner use NAME [--global] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
 ## `exp skill`
 
 Inspect or manage the version-matched embedded guidance skill.
@@ -1155,6 +1331,50 @@ Options:
 
 - `--json` — emit the versioned machine-readable envelope
 
+## `exp storage`
+
+Configure host-local artifact storage preferences.
+
+```text
+exp storage
+```
+
+## `exp storage add`
+
+Remember storage routing; MLflow metadata and artifact bytes use separate stores.
+
+```text
+exp storage add NAME --root DIR [--kind local|mlflow-local|mlflow-remote] [--tracking-uri URI] [--python BINARY] [--token-env NAME] [--large-bytes N] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp storage show`
+
+Inspect private storage profiles, effective preference and its origin.
+
+```text
+exp storage show [--global] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp storage use`
+
+Persist the storage default for the current Project or globally.
+
+```text
+exp storage use NAME [--global] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
 ## `exp try`
 
 Run bounded exploratory work in managed native Git worktrees.
@@ -1218,12 +1438,24 @@ Options:
 - `--confirm` — confirm safe local cleanup
 - `--json` — emit the versioned machine-readable envelope
 
-## `exp try finish`
+## `exp try exec`
 
-Record a reviewed human conclusion with an explicit result selection.
+Append a new Attempt with independent managed outputs, input identities and runner provenance.
 
 ```text
-exp try finish [TRY] [--summary TEXT] [--result-digest SHA256|--external-ref JSON|--no-results] [--confirm] [--json]
+exp try exec TRY [--storage PROFILE] [--runner PROFILE] [--input NAME] [--dirty=capture] [--allow GLOB] [--json] -- [COMMAND [ARG...]]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp try finish`
+
+Conclude a Try with attributed observations; agent conclusions remain explicitly unreviewed.
+
+```text
+exp try finish TRY --summary TEXT [--author human|agent] [--saved-results|--result-digest SHA256|--external-ref JSON|--no-results] [--confirm] [--json]
 ```
 
 Options:
@@ -1289,12 +1521,24 @@ Options:
 
 - `--json` — emit the versioned machine-readable envelope
 
-## `exp try run`
+## `exp try root`
 
-Register and execute one direct argv; a TTY wizard can gather and review missing fields while fully explicit flags run immediately.
+Inspect or set the adhoc collection root without moving previous explorations.
 
 ```text
-exp try run [--title TITLE --goal GOAL] [--dirty=capture] [--allow GLOB] [--timeout DURATION] [--tags TAG] [--json] [-- COMMAND [ARG...]]
+exp try root [PATH] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
+## `exp try run`
+
+Run a bounded Try; opt into managed artifact outputs or use try start/exec for continuing exploration.
+
+```text
+exp try run --title TITLE --goal GOAL [--outputs] [--storage PROFILE] [--runner PROFILE] [--input NAME] [--dirty=capture] [--allow GLOB] [--json] -- COMMAND [ARG...]
 ```
 
 Options:
@@ -1320,6 +1564,18 @@ Options:
 
 - `--json` — emit the versioned machine-readable envelope
 
+## `exp try start`
+
+Create an open Try and optionally an isolated small Git Source for adhoc work.
+
+```text
+exp try start --title TITLE --goal GOAL [--scratch] [--tags TAGS] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
+
 ## `exp try status`
 
 Inspect a bounded page of Attempts, jobs, markers, and worktrees without executing.
@@ -1333,6 +1589,18 @@ Options:
 - `--json` — emit the versioned machine-readable envelope
 - `--limit` — limit unfiltered rows to 1..1000
 - `--offset` — skip unfiltered rows before this page
+
+## `exp try summarize`
+
+Save an attributed working summary without changing the Try lifecycle.
+
+```text
+exp try summarize TRY --summary TEXT [--author agent|human] [--json]
+```
+
+Options:
+
+- `--json` — emit one exp.cli/v1 machine-readable JSON envelope
 
 ## `exp ui`
 

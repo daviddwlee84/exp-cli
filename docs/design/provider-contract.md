@@ -322,3 +322,5 @@ Git verification; obsolete entries for terminal Plans do not block other work.
 The private worker freezes the bounded result and publishes a durable terminal
 marker before marking the job finished. Scheduler and marker observations can advance an Attempt's operational
 state only through an explicit canonical transaction.
+
+The read-only MLflow contract above applies to the observation/evaluation adapter. The separate opt-in exploration storage writer owns artifact upload and verified explicit retrieval; see [Adhoc Exploration](../workflows/exploration.md).

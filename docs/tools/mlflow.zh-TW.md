@@ -1,7 +1,7 @@
 # MLflow
 
 MLflow 仍是 workload-created run、metric、parameter、tag、trace、artifact location/bytes 與 registry
-state 的 authority。`exp` 是 bounded read-only observer：絕不 create/mutate run、log telemetry、
+state 的 authority。Evaluation／observation adapter 是 bounded read-only observer，不 create/mutate run、log telemetry、
 download artifact、改 registry state，或把 run status 轉成 scientific verdict。
 
 Canonical authorities 彼此分離：
@@ -198,3 +198,7 @@ rollback。
 - 除 sanitized run observation 外，沒有 read-only registry capability。
 - Formal Pueue runtime 不接受 environment-bound MLflow profile。
 - 不把 sweep/trial/nested-run 解讀為 canonical Run/Attempt。
+
+## 探索 artifact writer
+
+Opt-in storage profile 現在另外支援 local MLflow＋SQLite，以及 remote MLflow 的 ownership-tagged run、artifact upload 與 explicit fetch。這個 writer 與上述唯讀 observation adapter 分開；不產生 scientific verdict 或 mutation registry。詳見[臨時探索](../workflows/exploration.md)。

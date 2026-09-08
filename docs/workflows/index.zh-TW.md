@@ -1,5 +1,7 @@
 # 工作流程
 
+畫圖、連續 Try、儲存偏好與歷史結果查找，請先看[臨時探索](exploration.md)。
+
 !!! note "Terminology rule (zh-TW pages)"
     技術名詞首次出現以「中文 (English original)」格式呈現。若無公認譯名，
     直接保留英文。程式碼、API 名、CLI flag、套件名與檔名一律不翻。

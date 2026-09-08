@@ -20,12 +20,13 @@ type guideSpec struct {
 }
 
 var guideCatalog = map[string]guideSpec{
-	"setup":      {filename: "guides/setup.md", summary: "initialize canonical authority and local registration"},
-	"quick":      {filename: "guides/quick.md", summary: "run and conclude a bounded exploratory Try"},
-	"research":   {filename: "guides/research.md", summary: "move from Ideas through comparable evidence"},
-	"promotion":  {filename: "guides/promotion.md", summary: "package evidence and preserve the human production gate"},
-	"config":     {filename: "guides/config.md", summary: "understand layered preferences and exact-digest trust"},
-	"workspaces": {filename: "guides/workspaces.md", summary: "resolve Projects, Sources, clones, and workspace backends"},
+	"exploration": {filename: "guides/exploration.md", summary: "start adhoc analyses, remember storage preferences, and retrieve results"},
+	"setup":       {filename: "guides/setup.md", summary: "initialize canonical authority and local registration"},
+	"quick":       {filename: "guides/quick.md", summary: "run and conclude a bounded exploratory Try"},
+	"research":    {filename: "guides/research.md", summary: "move from Ideas through comparable evidence"},
+	"promotion":   {filename: "guides/promotion.md", summary: "package evidence and preserve the human production gate"},
+	"config":      {filename: "guides/config.md", summary: "understand layered preferences and exact-digest trust"},
+	"workspaces":  {filename: "guides/workspaces.md", summary: "resolve Projects, Sources, clones, and workspace backends"},
 }
 
 func newGuideCommand(app *App) *cobra.Command {
@@ -35,7 +36,7 @@ func newGuideCommand(app *App) *cobra.Command {
 		valid = append(valid, cobra.CompletionWithDesc(topic, guideCatalog[topic].summary))
 	}
 	command := &cobra.Command{
-		Use:   "guide [setup|quick|research|promotion|config|workspaces]",
+		Use:   "guide [setup|quick|exploration|research|promotion|config|workspaces]",
 		Short: "Read conceptual workflow guides",
 		Long: `Read concise conceptual guides that explain when commands fit together.
 

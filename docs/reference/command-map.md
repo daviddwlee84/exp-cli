@@ -1,7 +1,6 @@
 # Command Map
 
-The current approved, generator-backed CLI metadata contains **112 command
-paths**. This authored map groups those paths by user task; it does not duplicate
+The current approved, generator-backed CLI metadata contains **136 command paths**. This authored map groups those paths by user task; it does not duplicate
 every flag.
 
 The running binary is authoritative for syntax:
@@ -26,7 +25,7 @@ which maintainers update only through `exp skill sync`.
 | Resume or browse safely | Read-only | `exp context` | `exp guide`, completion, or `exp ui` |
 
 Conceptual terminal guides and standard Cobra utilities are intentionally outside
-the 112 generator-backed domain paths:
+the 136 generator-backed domain paths:
 
 ```bash
 exp guide [setup|workspaces|config|quick|research|promotion]
@@ -236,10 +235,14 @@ scientific verdict.
 | `exp record transaction` | Apply the supported low-risk prepared Idea/ResourcePool transaction. |
 | `exp record recover` | Roll durable prepared transactions forward from exact hashes. |
 
-The section counts total **112** approved paths. If syntax is absent from
+The original families plus the exploration commands below total **136** approved paths. If syntax is absent from
 `exp <command> --help` or generated `commands.md`, do not infer it from a roadmap,
 note, or older documentation.
 
 Large datasets, model/checkpoint/artifact bytes, traces, and unbounded logs stay
 in MLflow, DVC, or object storage. Only bounded summaries, digests, exact
 identities, and sanitized references enter canonical Git records.
+
+## Exploration and artifacts
+
+`try root/start/exec/summarize`, `storage add/use/show`, `input bind/list`, `runner add/use/list`, `history search`, `results list/compare/describe/save/fetch/open`. [Workflow and complete examples](../workflows/exploration.md).

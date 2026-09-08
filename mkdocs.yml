@@ -53,6 +53,7 @@ plugins:
             Core Research Workflow: 核心研究流程
             Agents and Workspaces: Agent 與工作區
             Runtime Dispatch: 執行與派送
+            Adhoc Exploration: 臨時探索與結果查找
             Evidence to Promotion: 從證據到上線
             Migration and Compatibility: Migration 與相容性
             Tools: 工具
@@ -114,6 +115,7 @@ nav:
   - Command Map: reference/command-map.md
   - Workflows:
       - Overview: workflows/index.md
+      - Adhoc Exploration: workflows/exploration.md
       - Core Research Workflow: workflows/core-workflow.md
       - Agents and Workspaces: workflows/agents-and-workspaces.md
       - Runtime Dispatch: workflows/runtime-dispatch.md

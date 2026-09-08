@@ -1,10 +1,11 @@
 # MLflow
 
 MLflow remains authoritative for workload-created runs, metrics, parameters,
-tags, traces, artifact locations/bytes, and registry state. `exp` is a bounded
-read-only observer: it never creates or mutates a run, logs telemetry, downloads
-an artifact, changes registry state, or turns run status into a scientific
-verdict.
+tags, traces, artifact locations/bytes, and registry state. The evaluation/observation adapter is a bounded
+read-only observer; it does not create runs or download artifacts. The separate
+opt-in exploration storage writer creates ownership-tagged runs, logs artifacts,
+and verifies explicit retrieval. Neither changes registry state or turns run
+status into a scientific verdict. See [Adhoc Exploration](../workflows/exploration.md).
 
 The canonical authorities are separate:
 
@@ -211,7 +212,7 @@ Promotion.
 ## Artifact and promotion boundary
 
 A verified artifact URI is useful navigation and provenance, not evidence that
-bytes are present, immutable, safe, or production-ready. `exp` does not hash,
+bytes are present, immutable, safe, or production-ready. The observation adapter does not hash,
 copy, cache, compare, register, alias, promote, delete, or serve MLflow artifacts
 or models. Candidate v2 authority comes from clean SourceSnapshots plus typed
 Evaluation; Promotion comes from a sealed holdout and named human approval.

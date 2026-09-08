@@ -591,6 +591,19 @@ func validateSourceUpdate(current, replacement *research.Source, currentBody, re
 }
 
 func validateTryUpdate(current, replacement *research.Try, currentBody, replacementBody string) error {
+	if err := validateExplorationTryUpdate(current, replacement); err != nil {
+		return err
+	}
+	// Compare the original immutable fields after validating the narrowly scoped
+	// annotation transition. Other extension namespaces remain immutable.
+	current = research.Clone(current).(*research.Try)
+	if current.Extensions == nil && replacement.Extensions != nil {
+		current.Extensions = research.Extensions{}
+	}
+	if table, ok := replacement.Extensions[explorationNamespace]; ok {
+		current.Extensions[explorationNamespace] = table
+	}
+
 	if current.Title != replacement.Title || !reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) ||
 		!reflect.DeepEqual(current.Tags, replacement.Tags) || current.Goal != replacement.Goal ||
 		!reflect.DeepEqual(current.Sources, replacement.Sources) || currentBody != replacementBody ||
@@ -704,6 +717,9 @@ func validatePlanUpdate(current, replacement *research.Plan) error {
 }
 
 func validateAttemptUpdate(current, replacement *research.Attempt) error {
+	if err := validateExplorationAttemptUpdate(current, replacement); err != nil {
+		return err
+	}
 	terminalRefinement := current.Terminal != nil && current.Terminal.Source == "pueue" && replacement.Terminal != nil && replacement.Terminal.Source == "direct" && terminalAttemptState(current.State) && terminalAttemptState(replacement.State)
 	immutableEqual := current.Title == replacement.Title && reflect.DeepEqual(current.LegacyAliases, replacement.LegacyAliases) && reflect.DeepEqual(current.Tags, replacement.Tags) &&
 		current.Run == replacement.Run && current.Try == replacement.Try && current.RetryOf == replacement.RetryOf && current.Runner == replacement.Runner && current.Scheduler == replacement.Scheduler && current.CWD == replacement.CWD &&
@@ -726,6 +742,9 @@ func validateAttemptUpdate(current, replacement *research.Attempt) error {
 		}
 	}
 	for namespace, table := range current.Extensions {
+		if namespace == explorationNamespace {
+			continue
+		}
 		replacementTable, found := replacement.Extensions[namespace]
 		if !found {
 			return fmt.Errorf("Attempt extension namespace %s is append-only", namespace)

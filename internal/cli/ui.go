@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daviddwlee84/exp-cli/internal/exploration"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
 	"github.com/daviddwlee84/exp-cli/internal/provider"
 	"github.com/daviddwlee84/exp-cli/internal/record"
@@ -207,6 +208,7 @@ func loadUILocalSnapshot(ctx context.Context, app *App, root *rootOptions) (tui.
 		tui.ViewTries: {
 			tui.NewSection("Open Tries", "No open Tries.", openTries...),
 			tui.NewSection("Recent completed Tries", "No completed Try history.", recentTries...),
+			tui.NewSection("Saved results", "Use try exec to produce managed artifacts.", uiArtifactRows(inventory)...),
 		},
 		tui.ViewQueue: {
 			tui.NewSection("Canonical queue frontiers", "No dispatchable queue frontiers.", frontiers...),
@@ -356,9 +358,19 @@ func uiTryRows(inventory *record.Inventory) (openRows, recentRows []tui.Row, att
 	})
 	for _, document := range tries {
 		view := makeTryRecordDetail(document, inventory)
+		description := view.Goal
+		if view.Summary != "" {
+			description += " · " + view.Summary
+		}
+		if view.Conclusion != nil {
+			description += " · " + view.Conclusion.Summary
+		}
+		if view.ConclusionAuthor == "agent" {
+			description += " · agent observation, unreviewed"
+		}
 		row := tui.NewRow(tui.RowSpec{
 			ID: view.ID, Title: view.Display + " " + view.Title, State: view.State,
-			Detail: fmt.Sprintf("%d attempt(s) · %s", attemptCounts[document.Record.(*research.Try).ID], view.Goal),
+			Detail: fmt.Sprintf("%d attempt(s) · %s", attemptCounts[document.Record.(*research.Try).ID], description),
 		})
 		if document.Record.(*research.Try).State == research.TryOpen {
 			openRows = append(openRows, row)
@@ -645,4 +657,22 @@ func uiTerminalAttempt(state research.AttemptState) bool {
 	default:
 		return false
 	}
+}
+
+func uiArtifactRows(inventory *record.Inventory) []tui.Row {
+	rows := []tui.Row{}
+	for _, document := range inventory.OfKind(research.KindAttempt) {
+		attempt := document.Record.(*research.Attempt)
+		metadata, err := exploration.MetadataFor(attempt)
+		if err != nil || metadata == nil {
+			continue
+		}
+		for _, artifact := range metadata.Artifacts {
+			rows = append(rows, tui.NewRow(tui.RowSpec{ID: attempt.ID.String() + ":" + artifact.Name, Title: artifact.Name, State: metadata.ArchiveState, Detail: fmt.Sprintf("%s · %d bytes · %s · %s", attempt.ID, artifact.Bytes, artifact.Storage, artifact.Digest), Remediation: "exp results open " + attempt.ID.String() + " " + artifact.Name}))
+			if len(rows) == 50 {
+				return rows
+			}
+		}
+	}
+	return rows
 }

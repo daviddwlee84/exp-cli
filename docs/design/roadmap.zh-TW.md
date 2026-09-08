@@ -156,8 +156,7 @@ start/download，且除非 explicit import，provider state 保持 non-canonical
 
 - automatic Git merge、push、rebase、branch deletion、production deploy 或 rollback execution；
 - agent/provider/autonomy/manifest/TUI-approved Promotion；
-- large artifact store、raw telemetry/log mirror、artifact-byte persistence 或 automatic artifact/model
-  download；
+- 通用 cloud artifact service、raw telemetry/log mirror 或 implicit download；managed local／MLflow exploration artifacts 與 explicit verified retrieval 已支援；
 - 從 Try（尤其 dirty Try）直接建立 Candidate/Promotion；必須 clean formal rerun、typed Evaluation v2
   與 Candidate v2；
 - 同一 Git repository 的多個 canonical Project roots，或不同 Project UUID 間的 canonical relation
@@ -165,3 +164,7 @@ start/download，且除非 explicit import，provider state 保持 non-canonical
 - universal cloud scheduler/model registry、generic browser-session control、dynamic Go plugin ABI；
 - 從 process、scheduler、tracker、commit 或 artifact state automatic scientific verdict；
 - migration 期間執行 legacy harness scripts。
+
+## 已交付：探索體驗
+
+可配置 scratch collection、連續 Try steps、具名 input bindings、獨立 artifact outputs、local／MLflow writer、具作者標記的 agent conclusion、runner identity，以及 SQLite cross-Project history 已實作。詳見[臨時探索](../workflows/exploration.md)。

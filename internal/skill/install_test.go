@@ -188,6 +188,7 @@ func TestCheckReportsExactCurrentMissingAndDriftedFiles(t *testing.T) {
 	expectedCurrent := []string{
 		"SKILL.md",
 		"references/commands.md",
+		"references/exploration.md",
 		"references/usage-and-fallback.md",
 	}
 	if !slices.Equal(check.CurrentFiles, expectedCurrent) {
@@ -599,7 +600,7 @@ func TestCheckReportsIncompatibleSkillVersionWithoutRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed := []byte(strings.Replace(string(content), `skill-version: "1"`, `skill-version: "999"`, 1))
+	changed := []byte(strings.Replace(string(content), `skill-version: "`+skill.SkillVersion+`"`, `skill-version: "999"`, 1))
 	if slices.Equal(content, changed) {
 		t.Fatal("test did not change skill-version metadata")
 	}

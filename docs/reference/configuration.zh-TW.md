@@ -369,3 +369,7 @@ result JSON 與 output hash 都不是 scientific verdict。
 
 另見 [Runtime Dispatch](../workflows/runtime-dispatch.md)、
 [Git and Worktrees](../tools/git-worktrees.md)與[MLflow](../tools/mlflow.md)。
+
+## 探索偏好
+
+Host-only `exp.exploration-config/v1` 位於 `$XDG_CONFIG_HOME/exp/exploration.json`，保存 `tries_root`、storage／runner profiles、global defaults、Project overrides 與外部 input bindings。透過 `try root`、`storage`、`runner`、`input` 操作；這些偏好不授予 repository execution trust。每個 Attempt 的 frozen receipt 保留歷史路由。詳見[臨時探索](../workflows/exploration.md)。

@@ -22,6 +22,7 @@ import (
 	"github.com/daviddwlee84/exp-cli/internal/config"
 	"github.com/daviddwlee84/exp-cli/internal/execx"
 	"github.com/daviddwlee84/exp-cli/internal/experimentgit"
+	"github.com/daviddwlee84/exp-cli/internal/exploration"
 	"github.com/daviddwlee84/exp-cli/internal/gitx"
 	"github.com/daviddwlee84/exp-cli/internal/mlflow"
 	"github.com/daviddwlee84/exp-cli/internal/operation"
@@ -255,14 +256,20 @@ type Selection struct {
 // is interpreted as shell text.
 type RunRequest struct {
 	Selection
-	Title        string
-	Body         string
-	Goal         string
-	Argv         []string
-	DirtyCapture bool
-	AllowedGlobs []string
-	Timeout      time.Duration
-	Tags         []string
+	ExistingTry    string
+	ManagedOutputs bool
+	StorageProfile string
+	RunnerProfile  string
+	InputNames     []string
+	AllowLarge     bool
+	Title          string
+	Body           string
+	Goal           string
+	Argv           []string
+	DirtyCapture   bool
+	AllowedGlobs   []string
+	Timeout        time.Duration
+	Tags           []string
 }
 
 // ResumeRequest resumes only a provably unstarted planned/queued Attempt or
@@ -349,6 +356,26 @@ func (direct *Direct) Run(ctx context.Context, request RunRequest) (*ExecutionRe
 	if err := direct.validateOperationalAvailability(); err != nil {
 		return nil, runtimeFailure(StageResolve, nil, false, false, err)
 	}
+	var existingTry *record.Document
+	if request.ExistingTry != "" {
+		resolved, _, _, document, err := direct.resolveTry(ctx, request.Selection, request.ExistingTry)
+		if err != nil {
+			return nil, runtimeFailure(StageResolve, nil, false, false, err)
+		}
+		value := document.Record.(*research.Try)
+		if value.State != research.TryOpen {
+			return nil, runtimeFailure(StageResolve, nil, false, false, errors.New("only an open Try accepts new exploration steps"))
+		}
+		existingTry = document
+		request.Workspace = resolved.Project.Root
+		if request.Source == "" && len(value.Sources) == 1 {
+			request.Source = value.Sources[0].String()
+		}
+		if request.Title == "" {
+			request.Title = value.Title
+		}
+		request.Goal = value.Goal
+	}
 	if err := validateRunRequest(request); err != nil {
 		return nil, runtimeFailure(StageResolve, nil, false, false, err)
 	}
@@ -377,6 +404,19 @@ func (direct *Direct) Run(ctx context.Context, request RunRequest) (*ExecutionRe
 	if err != nil {
 		return nil, runtimeFailure(StageResolve, nil, false, false, err)
 	}
+	if existingTry != nil {
+		value := existingTry.Record.(*research.Try)
+		tryID = value.ID
+		allowedSource := false
+		for _, source := range value.Sources {
+			if source == resolved.Source.ID {
+				allowedSource = true
+			}
+		}
+		if !allowedSource {
+			return nil, runtimeFailure(StageResolve, nil, false, false, errors.New("execution Source is not declared by this Try"))
+		}
+	}
 	attemptID, err := allocator.allocate(inventory, research.KindAttempt, now, reserved)
 	if err != nil {
 		return nil, runtimeFailure(StageResolve, nil, false, false, err)
@@ -401,6 +441,28 @@ func (direct *Direct) Run(ctx context.Context, request RunRequest) (*ExecutionRe
 		State: research.TryOpen, Goal: request.Goal, Sources: []research.ID{resolved.Source.ID},
 	}
 	attemptValue := newDirectAttempt(attemptID, tryID, request.Title, cwd, request.Argv, captured, resolved, allowed, request.Timeout, mlflowProfile, now)
+	if request.ManagedOutputs {
+		settings, err := exploration.Load(ctx, "")
+		if err != nil {
+			return nil, runtimeFailure(StageCapture, nil, false, false, err)
+		}
+		execution, metadata, err := exploration.Prepare(ctx, settings, resolved.ProjectID().String(), tryID.String(), attemptID.String(), request.StorageProfile, request.RunnerProfile, request.InputNames, request.AllowLarge)
+		if err != nil {
+			return nil, runtimeFailure(StageCapture, nil, false, false, err)
+		}
+		for _, root := range []string{resolved.SourceRoot, resolved.Project.Repository.Root} {
+			inside, checkErr := pathx.Contains(root, execution.Storage.Root)
+			if checkErr != nil || inside {
+				return nil, runtimeFailure(StageCapture, nil, false, false, errors.New("artifact storage must be outside the Source and canonical repositories"))
+			}
+		}
+		if err := exploration.SetMetadata(attemptValue, metadata); err != nil {
+			return nil, runtimeFailure(StageCapture, nil, false, false, err)
+		}
+		if err := exploration.PersistExecution(ctx, execution); err != nil {
+			return nil, runtimeFailure(StageCapture, nil, false, false, err)
+		}
+	}
 	if err := research.Validate(tryValue); err != nil {
 		direct.cleanupUnpublishedBundle(ctx, captured.Bundle)
 		return nil, runtimeFailure(StageCapture, nil, false, false, err)
@@ -414,7 +476,11 @@ func (direct *Direct) Run(ctx context.Context, request RunRequest) (*ExecutionRe
 		direct.cleanupUnpublishedBundle(ctx, captured.Bundle)
 		return nil, runtimeFailure(StageCanonicalPlan, nil, false, false, err)
 	}
-	changes.create(&record.Document{Record: tryValue, Body: defaultBody(request.Body, request.Title)})
+	if existingTry == nil {
+		changes.create(&record.Document{Record: tryValue, Body: defaultBody(request.Body, request.Title)})
+	} else if err := changes.guard(existingTry, existingTry.Revision); err != nil {
+		return nil, runtimeFailure(StageCanonicalPlan, nil, false, false, err)
+	}
 	changes.create(&record.Document{Record: attemptValue, Body: "# Direct Try Attempt\n"})
 	transaction, transactionErr := store.Transact(ctx, record.TransactionRequest{Operation: "try.run.plan", Changes: changes.values})
 	result := &ExecutionResult{Stage: StageCanonicalPlan, Project: resolved.Project, Context: resolved}
@@ -422,6 +488,9 @@ func (direct *Direct) Run(ctx context.Context, request RunRequest) (*ExecutionRe
 		result.Transactions = append(result.Transactions, transaction.TransactionID)
 		result.Try, _ = resultDocument(transaction, tryID)
 		result.Attempt, _ = resultDocument(transaction, attemptID)
+		if existingTry != nil {
+			result.Try = existingTry.Clone()
+		}
 	}
 	if transactionErr != nil {
 		if transaction == nil {
@@ -873,6 +942,31 @@ func (direct *Direct) execute(ctx context.Context, selection Selection, result *
 	if err != nil {
 		return result, runtimeFailure(StageWorkspace, result, true, true, err)
 	}
+	metadata, metadataErr := exploration.MetadataFor(attemptValue)
+	if metadataErr != nil {
+		return result, runtimeFailure(StageWorkspace, result, false, true, metadataErr)
+	}
+	if metadata != nil {
+		execution, err := exploration.LoadExecution(ctx, resolved.ProjectID().String(), attemptValue.ID.String())
+		if err != nil || execution.Digest() != metadata.ContextDigest {
+			return result, runtimeFailure(StageWorkspace, result, false, true, errors.New("exploration execution receipt does not match the canonical Attempt"))
+		}
+		workload.Schema = worker.ExplorationJobSchema
+		workload.Exploration = &execution
+		if metadata.Runner == nil {
+			identity, err := exploration.InspectRunner(ctx, execution, executionCWD, executable, attemptValue.SourceSnapshots[0].HeadCommit)
+			if err != nil {
+				return result, runtimeFailure(StageWorkspace, result, true, true, err)
+			}
+			metadata.Runner = identity
+			updated, err := saveExplorationMetadata(ctx, store, result.Attempt, *metadata)
+			if err != nil {
+				return result, runtimeFailure(StageWorkspace, result, true, true, err)
+			}
+			result.Attempt, currentAttempt = updated, updated
+			attemptValue = updated.Record.(*research.Attempt)
+		}
+	}
 	payload, err := json.Marshal(workload)
 	if err != nil {
 		return result, runtimeFailure(StageOperationalQueue, result, true, true, err)
@@ -1081,6 +1175,18 @@ func (direct *Direct) importTerminal(ctx context.Context, resolved *workspace.Co
 		return result, runtimeFailure(StageOperationalDone, result, true, true, err)
 	}
 	result.Attempt = updated
+	if metadata, metadataErr := exploration.MetadataFor(updated.Record.(*research.Attempt)); metadataErr != nil {
+		return result, metadataErr
+	} else if metadata != nil {
+		archived, archiveErr := SaveArtifacts(context.WithoutCancel(ctx), store, resolved.ProjectID().String(), updated.Record.(*research.Attempt).ID, false)
+		if archived != nil {
+			result.Attempt = archived
+		}
+		if archiveErr != nil {
+			result.RecoveryAction = "exp results save " + updated.Record.(*research.Attempt).ID.String()
+			return result, runtimeFailure(StageCanonicalDone, result, true, true, archiveErr)
+		}
+	}
 	result.Stage = StageCanonicalDone
 	if err := direct.refresh(context.WithoutCancel(ctx), resolved.Project, store); err != nil {
 		return result, runtimeFailure(StageProjection, result, true, true, err)
@@ -1294,7 +1400,30 @@ func (direct *Direct) preflight(ctx context.Context, selection Selection, info *
 		expectedTimeout = policy.Timeout.String()
 	}
 	snapshot := attempt.SourceSnapshots[0]
-	if workload.Schema != worker.SourceJobSchema || workload.AttemptID != attempt.ID.String() || workload.TryID != attempt.Try.String() ||
+	expectedSchema := worker.SourceJobSchema
+	metadata, err := exploration.MetadataFor(attempt)
+	if err != nil {
+		return err
+	}
+	if metadata != nil {
+		expectedSchema = worker.ExplorationJobSchema
+		if workload.Exploration == nil || workload.Exploration.Digest() != metadata.ContextDigest || workload.Exploration.Project != info.Project().ProjectID.String() || workload.Exploration.Attempt != attempt.ID.String() {
+			return errors.New("exploration job identity mismatch")
+		}
+		if metadata.Runner == nil {
+			return errors.New("exploration runner identity is missing")
+		}
+		digest, err := exploration.HashExecutable(ctx, expectedExecutable)
+		if err != nil || digest != metadata.Runner.ExecutableDigest {
+			return errors.New("runner executable changed since preparation")
+		}
+		if err := exploration.VerifyInputs(ctx, *workload.Exploration); err != nil {
+			return err
+		}
+	} else if workload.Exploration != nil {
+		return errors.New("unexpected exploration routing on a legacy Attempt")
+	}
+	if workload.Schema != expectedSchema || workload.AttemptID != attempt.ID.String() || workload.TryID != attempt.Try.String() ||
 		workload.Executable != expectedExecutable || workload.CWD != expectedCWD || workload.RepositoryRoot != managed.Root ||
 		workload.RegisteredGitCommonDir != prepare.RegisteredGitCommonDir || workload.RegisteredGitCommonIdentity != prepare.RegisteredGitCommonIdentity ||
 		workload.Timeout != expectedTimeout || !sameStrings(workload.Args, attempt.Argv[1:]) ||
@@ -1442,7 +1571,7 @@ func (direct *Direct) resolveExecutable(cwd, command string) (string, error) {
 	if !filepath.IsAbs(canonical) {
 		return "", errors.New("resolved executable is not absolute")
 	}
-	return canonical, nil
+	return filepath.Clean(absolute), nil
 }
 
 func buildWorkload(attempt *research.Attempt, prepare workspacebackend.PrepareRequest, managed workspacebackend.Workspace, cwd, executable string, profile *mlflow.ResolvedProfile) (worker.Workload, error) {
