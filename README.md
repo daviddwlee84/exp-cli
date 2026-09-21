@@ -277,6 +277,8 @@ mise exec -- make all
 make docs-build
 ```
 
+Tagged [GitHub releases](https://github.com/daviddwlee84/exp-cli/releases) provide macOS/Linux amd64/arm64 archives, SHA-256 checksums, and Bash/Zsh completions. Verify the matching archive against `checksums.txt` before installing it. Windows and AIX remain source/cross-build targets; these releases do not claim native validation there. See [RELEASING.md](RELEASING.md).
+
 ## License
 
 Newly authored source code in this repository is available under the MIT

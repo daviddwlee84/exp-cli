@@ -12,3 +12,5 @@ __pycache__/
 
 # mkdocs build output (regenerated every build)
 /site/
+
+/completions/

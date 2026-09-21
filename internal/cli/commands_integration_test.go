@@ -197,9 +197,7 @@ func TestProjectJSONRedactsCredentialShapedAbsolutePaths(t *testing.T) {
 		t.Fatalf("test repository %q does not contain credential component", repository)
 	}
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	isolatedTestHome(t)
 	app := deterministicApp(t, "01a01e60-0000-7101-8000-000000000101")
 	for _, testCase := range []struct {
 		name string
@@ -798,11 +796,27 @@ func uuidGeneratorSequence(t *testing.T, values ...string) (research.UUIDGenerat
 	return generator, &calls
 }
 
-func newGitRepository(t *testing.T) string {
+func isolatedTestHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	for name, directory := range map[string]string{
+		"XDG_CONFIG_HOME": "config",
+		"XDG_STATE_HOME":  "state",
+		"XDG_DATA_HOME":   "data",
+		"XDG_CACHE_HOME":  "cache",
+	} {
+		t.Setenv(name, filepath.Join(home, directory))
+	}
+}
+
+func newGitRepository(t *testing.T) string {
+	t.Helper()
+	isolatedTestHome(t)
 	repository := filepath.Join(t.TempDir(), "repo")
 	if err := os.Mkdir(repository, 0o755); err != nil {
 		t.Fatal(err)
