@@ -1,0 +1,21 @@
+{
+  "main": "./cmd/exp",
+  "version_symbol": "github.com/daviddwlee84/exp-cli/internal/cli.Version",
+  "required": [
+    "cmd/exp/main.go",
+    "internal/skill/exp-cli/SKILL.md",
+    "internal/exploration/mlflow_bridge.py",
+    "internal/cli/guides/config.md",
+    "internal/cli/guides/exploration.md",
+    "internal/cli/guides/promotion.md",
+    "internal/cli/guides/quick.md",
+    "internal/cli/guides/research.md",
+    "internal/cli/guides/setup.md",
+    "internal/cli/guides/workspaces.md"
+  ],
+  "smoke": [
+    [
+      "--skill"
+    ]
+  ]
+}

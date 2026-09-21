@@ -283,3 +283,19 @@ Tagged [GitHub releases](https://github.com/daviddwlee84/exp-cli/releases) provi
 
 Newly authored source code in this repository is available under the MIT
 License; see [LICENSE](LICENSE).
+
+### Source distribution size
+
+Release assets include a rootless source archive (`exp-cli_<version>_source.tar.gz`)
+and its checksum. Source archives omit SpecStory history and agent plan folders
+using `.gitattributes`; Go module downloads omit the same evidence through nested
+`go.mod` boundary markers. Build inputs, embedded resources, tests, licenses, and
+skills remain available. Full Git clones retain development history.
+
+CI builds and exercises both a real Git archive and an independently generated Go
+module ZIP using the official `golang.org/x/mod` implementation. To run the check
+from a committed revision:
+
+```sh
+python3 scripts/check-distribution.py
+```
