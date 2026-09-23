@@ -1610,6 +1610,21 @@ Open the read-only local research TUI on real terminal stdin and stdout.
 exp ui
 ```
 
+## `exp upgrade`
+
+Update this executable through verified Homebrew or Scoop ownership; Scoop exits and hands off to a tracked helper.
+
+```text
+exp upgrade [--check] [--yes] [--status OPERATION] [--json]
+```
+
+Options:
+
+- `--check` — inspect the exact installed package without changing it
+- `--json` — emit the versioned machine-readable envelope
+- `--status` — read a previous Scoop operation without mutation
+- `-y, --yes` — approve the inspected upgrade
+
 ## `exp validate`
 
 Validate canonical local records without provider calls.

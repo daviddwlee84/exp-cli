@@ -106,6 +106,7 @@ func NewRootCommand(app *App) *cobra.Command {
 	root.AddCommand(
 		newInitCommand(app, options),
 		newDoctorCommand(app),
+		newUpgradeCommand(app),
 		newUICommand(app, options),
 		newWorkspaceCommand(app, options),
 		newSourceCommand(app, options),

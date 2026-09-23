@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"github.com/daviddwlee84/exp-cli/internal/scoopupgrade"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +12,9 @@ import (
 )
 
 func main() {
+	if code, handled := scoopupgrade.HandleHelper(scoopupgrade.Product{Binary: "exp", Module: "github.com/daviddwlee84/exp-cli", Main: "github.com/daviddwlee84/exp-cli/cmd/exp"}); handled {
+		os.Exit(code)
+	}
 	os.Exit(run())
 }
 

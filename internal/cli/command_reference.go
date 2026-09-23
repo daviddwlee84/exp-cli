@@ -16,6 +16,11 @@ type commandReferenceSpec struct {
 }
 
 var approvedCommandReference = map[string]commandReferenceSpec{
+	"exp upgrade": {
+		use: "exp upgrade [--check] [--yes] [--status OPERATION] [--json]", summary: "Update this executable through verified Homebrew or Scoop ownership; Scoop exits and hands off to a tracked helper.",
+		flags: map[string]string{"check": "inspect the exact installed package without changing it", "yes": "approve the inspected upgrade", "status": "read a previous Scoop operation without mutation", "json": "emit the versioned machine-readable envelope"},
+	},
+
 	"exp": {
 		use: "exp [--skill] [--start-dir DIR] [--workspace PROJECT|PATH] [--source SOURCE] [--workspace-backend BACKEND] [--mlflow-profile PROFILE]", summary: "Use the Git-native research control plane.",
 		flags: map[string]string{
