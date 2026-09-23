@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -159,7 +160,7 @@ func TestEnsureRootAtNoSymlinksAcceptsConcurrentSafeCreator(t *testing.T) {
 		t.Fatal("no concurrent writer reported creating the directory")
 	}
 	info, err := os.Stat(filepath.Join(rootPath, "shared", "nested"))
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if err != nil || !info.IsDir() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o700) {
 		t.Fatalf("concurrent directory = %#v, %v", info, err)
 	}
 }

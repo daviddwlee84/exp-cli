@@ -127,16 +127,28 @@ func checkPrivateOpenFile(file *os.File, _ fs.FileMode, description string, sing
 	if err != nil {
 		return fmt.Errorf("inspect %s discretionary ACL: %w", description, err)
 	}
-	if dacl == nil || dacl.AceCount != 1 {
-		return fmt.Errorf("%s must have exactly one owner-only discretionary ACL entry", description)
+	if dacl == nil || dacl.AceCount == 0 {
+		return fmt.Errorf("%s must have an owner-only discretionary ACL", description)
 	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil || ace == nil {
-		return fmt.Errorf("inspect %s discretionary ACL entry: %w", description, err)
+	effectiveOwner := false
+	// Windows may split a directory's GENERIC_ALL inheritable grant into an
+	// effective file-rights ACE and an inherit-only generic-rights ACE. Validate
+	// every grant rather than requiring an encoding-specific single ACE.
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil || ace == nil {
+			return fmt.Errorf("inspect %s discretionary ACL entry: %w", description, err)
+		}
+		entrySID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 || ace.Mask == 0 || entrySID == nil || !entrySID.Equals(user.User.Sid) {
+			return fmt.Errorf("%s discretionary ACL grants access beyond the current user", description)
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0 {
+			effectiveOwner = true
+		}
 	}
-	entrySID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 || ace.Mask == 0 || entrySID == nil || !entrySID.Equals(user.User.Sid) {
-		return fmt.Errorf("%s discretionary ACL grants access beyond the current user", description)
+	if !effectiveOwner {
+		return fmt.Errorf("%s lacks an effective owner grant", description)
 	}
 	return nil
 }

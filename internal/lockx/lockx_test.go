@@ -3,8 +3,10 @@ package lockx
 import (
 	"context"
 	"errors"
+	"github.com/daviddwlee84/exp-cli/internal/pathx"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -105,7 +107,7 @@ func TestWithTrustedRootRejectsHardLinkedLockBeforeMutation(t *testing.T) {
 	if statErr != nil {
 		t.Fatal(statErr)
 	}
-	if info.Mode().Perm() != 0o640 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
 		t.Fatalf("hard-link target mode changed: %#o", info.Mode().Perm())
 	}
 }
@@ -147,6 +149,17 @@ func TestWithTrustedRootDetectsRetargetWhileWaiting(t *testing.T) {
 	moved := filepath.Join(t.TempDir(), "moved")
 	if err := os.Rename(original, moved); err != nil {
 		close(release)
+		if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+			// Native sharing denies renaming an actively held coordination directory.
+			// Both operations must still complete normally against the unchanged root.
+			if firstErr := <-firstDone; firstErr != nil {
+				t.Fatal(firstErr)
+			}
+			if secondErr := <-secondDone; secondErr != nil || !called {
+				t.Fatalf("unchanged root: %v", secondErr)
+			}
+			return
+		}
 		t.Fatal(err)
 	}
 	if err := os.Symlink(moved, original); err != nil {
@@ -181,6 +194,28 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if info.IsDir() {
+			root, err := os.OpenRoot(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if _, err = pathx.CheckPrivateRoot(root, want, "private lock directory"); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			root, err := os.OpenRoot(filepath.Dir(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if _, err = pathx.CheckPrivateFile(root, filepath.Base(path), want, "private lock"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return
 	}
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
