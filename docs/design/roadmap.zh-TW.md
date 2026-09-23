@@ -168,3 +168,5 @@ start/download，且除非 explicit import，provider state 保持 non-canonical
 ## 已交付：探索體驗
 
 可配置 scratch collection、連續 Try steps、具名 input bindings、獨立 artifact outputs、local／MLflow writer、具作者標記的 agent conclusion、runner identity，以及 SQLite cross-Project history 已實作。詳見[臨時探索](../workflows/exploration.md)。
+
+原生 Windows 發布目前暫緩；失敗證據與重新發布的驗收條件記錄於 [storage 與 release backlog](https://github.com/daviddwlee84/exp-cli/blob/main/backlog/windows-release-storage.md)。

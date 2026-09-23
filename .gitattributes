@@ -9,3 +9,8 @@
 /.cursor/plans/** export-ignore
 /.opencode/plans export-ignore
 /.opencode/plans/** export-ignore
+
+/AGENTS.md export-ignore
+/TODO.md export-ignore
+/backlog export-ignore
+/pitfalls export-ignore

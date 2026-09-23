@@ -191,3 +191,5 @@ The current scope does not provide:
 ## Delivered: exploration ergonomics
 
 Configurable scratch collections, continuing Try steps, named input bindings, independent artifact outputs, local and MLflow storage writers, attributed agent conclusions, runner identity, and SQLite-backed cross-Project history are implemented. See [Adhoc Exploration](../workflows/exploration.md).
+
+Native Windows publication is currently deferred; see the [storage and release backlog](https://github.com/daviddwlee84/exp-cli/blob/main/backlog/windows-release-storage.md) for evidence and acceptance requirements.
