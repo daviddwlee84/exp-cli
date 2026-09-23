@@ -67,9 +67,16 @@ func protectPrivateOpenFile(file *os.File, want fs.FileMode, directory bool) err
 	if err != nil {
 		return fmt.Errorf("construct private ACL: %w", err)
 	}
-	if err := windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, acl, nil); err != nil {
+	// os.Root's metadata handle lacks WRITE_DAC. Reopen the same object by
+	// handle, preserving identity instead of reopening an attacker-swappable path.
+	reopened, err := reopenPrivateSecurityHandle(windows.Handle(file.Fd()), directory)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(reopened)
+	if err := windows.SetSecurityInfo(reopened, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION,
+		user.User.Sid, nil, acl, nil); err != nil {
 		return fmt.Errorf("apply private ACL: %w", err)
 	}
 	return nil
@@ -132,4 +139,31 @@ func checkPrivateOpenFile(file *os.File, _ fs.FileMode, description string, sing
 		return fmt.Errorf("%s discretionary ACL grants access beyond the current user", description)
 	}
 	return nil
+}
+
+var reopenFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
+
+func reopenPrivateSecurityHandle(original windows.Handle, directory bool) (windows.Handle, error) {
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if directory {
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	h, _, err := reopenFile.Call(uintptr(original), uintptr(windows.WRITE_DAC|windows.WRITE_OWNER|windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES), uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE), uintptr(flags))
+	if windows.Handle(h) == windows.InvalidHandle {
+		return 0, fmt.Errorf("reopen private object for ACL protection: %w", err)
+	}
+	var before, after windows.ByHandleFileInformation
+	if e := windows.GetFileInformationByHandle(original, &before); e != nil {
+		windows.CloseHandle(windows.Handle(h))
+		return 0, e
+	}
+	if e := windows.GetFileInformationByHandle(windows.Handle(h), &after); e != nil {
+		windows.CloseHandle(windows.Handle(h))
+		return 0, e
+	}
+	if before.VolumeSerialNumber != after.VolumeSerialNumber || before.FileIndexHigh != after.FileIndexHigh || before.FileIndexLow != after.FileIndexLow {
+		windows.CloseHandle(windows.Handle(h))
+		return 0, fmt.Errorf("private filesystem object changed")
+	}
+	return windows.Handle(h), nil
 }

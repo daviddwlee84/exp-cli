@@ -11,6 +11,7 @@ func TestXDGHomeResolutionUsesOnlyAbsoluteOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	state := filepath.Join(home, "state")
 	config := filepath.Join(home, "config")
 	cache := filepath.Join(home, "cache")
