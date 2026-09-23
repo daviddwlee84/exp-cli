@@ -150,7 +150,20 @@ func reopenPrivateSecurityHandle(original windows.Handle, directory bool) (windo
 	}
 	h, _, err := reopenFile.Call(uintptr(original), uintptr(windows.WRITE_DAC|windows.WRITE_OWNER|windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES), uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE), uintptr(flags))
 	if windows.Handle(h) == windows.InvalidHandle {
-		return 0, fmt.Errorf("reopen private object for ACL protection: %w", err)
+		// Some directory handles returned by os.Root cannot use ReOpenFile.
+		// Resolve the held handle, open without following a final reparse point,
+		// and prove the same file ID before changing security on the new handle.
+		buffer := make([]uint16, 32768)
+		n, nameErr := windows.GetFinalPathNameByHandle(original, &buffer[0], uint32(len(buffer)), 0)
+		if nameErr != nil || n == 0 || n >= uint32(len(buffer)) {
+			return 0, fmt.Errorf("resolve private object for ACL protection: %w", err)
+		}
+		reopened, openErr := windows.CreateFile(&buffer[0], windows.WRITE_DAC|windows.WRITE_OWNER|windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, flags, 0)
+		if openErr != nil {
+			return 0, fmt.Errorf("open held private object for ACL protection: %w", openErr)
+		}
+		h = uintptr(reopened)
 	}
 	var before, after windows.ByHandleFileInformation
 	if e := windows.GetFileInformationByHandle(original, &before); e != nil {
