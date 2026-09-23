@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,16 +22,18 @@ func newUpgradeCommand(app *App) *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Approve updating the inspected package")
 	cmd.Flags().BoolVar(&jsonMode, "json", false, jsonFlagUsage)
 	write := func(cmd *cobra.Command, r scoopupgrade.Report) error {
-		if jsonMode {
-			ok := r.Status != "failed" && r.Status != "blocked" && r.Status != "interrupted" && r.Status != "canceled"
-			return app.WriteJSON(app.NewEnvelope("upgrade", ok, false, r, nil))
-		}
+		var human bytes.Buffer
 		if r.Manager == "homebrew" && r.Status == "checked" {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Owner: Homebrew (%s)\nVersion: %s\nCommand: %v\n", r.Package, r.CurrentVersion, r.Command)
-			return err
+			fmt.Fprintf(&human, "Owner: Homebrew (%s)\nVersion: %s\nCommand: %v\n", r.Package, r.CurrentVersion, r.Command)
+		} else {
+			_ = scoopupgrade.WriteHuman(&human, r)
 		}
-		return scoopupgrade.WriteHuman(cmd.OutOrStdout(), r)
+		if r.Status == "failed" || r.Status == "blocked" || r.Status == "interrupted" || r.Status == "canceled" {
+			return commandFailure(app, jsonMode, "upgrade", r, false, nil, errors.New(r.Reason))
+		}
+		return commandSuccess(app, jsonMode, "upgrade", r, false, nil, human.String())
 	}
+
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		exe, err := os.Executable()
 		if err != nil {
@@ -67,6 +70,7 @@ func newUpgradeCommand(app *App) *cobra.Command {
 		}
 		outcome, err := plan.Apply(cmd.Context(), progress)
 		r.Status = "up-to-date"
+		r.ChangeKnown = err == nil
 		r.Changed = outcome.Changed
 		r.Version = outcome.Version
 		r.Path = outcome.Path
