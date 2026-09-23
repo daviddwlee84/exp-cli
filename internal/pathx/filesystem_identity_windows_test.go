@@ -62,6 +62,7 @@ func TestPrivateWindowsDACLValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { setFileDACL(t, filepath.Join(rootPath, "private.json"), permissive, false) })
 	setFileDACL(t, filepath.Join(rootPath, "private.json"), permissive, false)
 	if _, err := CheckPrivateFile(root, "private.json", 0o600, "permissive file"); err == nil {
 		t.Fatal("owner-created file granting Everyone access was accepted as private")
@@ -72,7 +73,11 @@ func TestPrivateWindowsDACLValidation(t *testing.T) {
 		t.Fatal("null DACL was accepted as private")
 	}
 
-	empty, err := windows.ACLFromEntries(nil, nil)
+	emptyDescriptor, err := windows.SecurityDescriptorFromString("D:P")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, _, err := emptyDescriptor.DACL()
 	if err != nil {
 		t.Fatal(err)
 	}

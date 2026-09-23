@@ -34,7 +34,10 @@ func acquireFile(ctx context.Context, file *os.File) (*fileLock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	lock := &fileLock{file: file}
+	// LockFileEx enforces read exclusion, unlike Unix advisory flock. Reserve
+	// a byte beyond the bounded JSON payload so waiters can read owner metadata
+	// without entering the critical section or touching the protected byte.
+	lock := &fileLock{file: file, overlapped: windows.Overlapped{OffsetHigh: 0x7fffffff, Offset: 0xfffffffe}}
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
